@@ -221,7 +221,13 @@ was launched from, normalised with `directory-file-name'), :cwd and
     out))
 
 (defun claude-code--pid-live-p (pid)
-  "Return non-nil when integer PID is a currently running process."
+  "Return non-nil when integer PID is a currently running process.
+This is a bare membership test against `list-system-processes'; it does not
+verify the live process is the same `claude' the sessions file recorded.  A
+stale sessions/*.json (left by a crash) whose PID has since been reused could
+therefore mis-flag a dead session as external.  PID reuse is vanishingly
+unlikely in practice (Linux `pid_max' defaults to 4194304), so this is an
+accepted simplicity trade-off rather than comparing process start times."
   (and (integerp pid) (memql pid (list-system-processes)) t))
 
 (defun claude-code--session-liveness (session)

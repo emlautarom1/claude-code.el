@@ -160,6 +160,27 @@ Clears the transcript cache first so tests do not leak into each other."
   (should (eq 'dead (claude-code--session-liveness
                      (claude-code-session--create :alive-p nil)))))
 
+(ert-deftest claude-code-test-external-session ()
+  "An unmanaged transcript with a live sessions PID is external, else dead."
+  (claude-code-tests--with-fixtures
+   (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
+     ;; Session 22222222 has sessions/1002.json (pid 1002).  When Emacs does
+     ;; not manage it but that pid is live, it is external, not dead.
+     (cl-letf (((symbol-function 'list-system-processes) (lambda () '(1002))))
+       (let ((s (claude-code-tests--find-session
+                 (claude-code-sessions "/home/test/proj")
+                 "22222222-2222-4222-8222-222222222222")))
+         (should-not (claude-code-session-alive-p s))
+         (should (claude-code-session-external-p s))
+         (should (eq 'external (claude-code--session-liveness s)))))
+     ;; With no such live pid the same session is simply dead.
+     (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+       (let ((s (claude-code-tests--find-session
+                 (claude-code-sessions "/home/test/proj")
+                 "22222222-2222-4222-8222-222222222222")))
+         (should-not (claude-code-session-external-p s))
+         (should (eq 'dead (claude-code--session-liveness s))))))))
+
 ;;;; Operations
 
 (ert-deftest claude-code-test-build-args-new ()

@@ -25,6 +25,8 @@ this package reads:
 
 `claude-code--live-status-table` parses every such file into a hash keyed by `sessionId`. It is pure parsing: a missing `status` yields nil, and process liveness is decided separately (`claude-code--pid-live-p`). This package treats a session as *alive* only when it manages the instance itself, so this table is used to read a managed session's status and to flag [external](glossary.md#external-session) sessions — not as the source of aliveness.
 
+Liveness is a plain `pid ∈ list-system-processes` check; the `procStart` field is deliberately **not** consulted. A stale `sessions/<pid>.json` (left by a crash) whose PID was reused could therefore mis-flag a dead session as external — accepted as a simplicity trade-off, since PID reuse is vanishingly unlikely (`pid_max` defaults to 4194304).
+
 ## Transcripts — `projects/<encoded-cwd>/<sessionId>.jsonl`
 
 Append-only JSONL, one JSON object per line. This package extracts three things, by scanning **backward** from the end of the file (the values of interest sit near the tail), cached by file modification time in `claude-code--transcript-cache`:
