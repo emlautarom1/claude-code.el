@@ -112,8 +112,10 @@ Transcripts are append-only, so an unchanged modification time means
 the extracted fields are still valid.")
 
 (defun claude-code--json-line-field (regexp field)
-  "Return FIELD of the last line in the current buffer matching REGEXP.
-Point is moved.  Returns nil when no matching line parses."
+  "Return FIELD from the last line in the current buffer matching REGEXP.
+Scans backward from the end and inspects only that last match; point is moved.
+Returns nil if no line matches, or if that line does not parse as JSON with
+FIELD."
   (goto-char (point-max))
   (when (re-search-backward regexp nil t)
     (let ((line (buffer-substring-no-properties
@@ -200,8 +202,17 @@ the transcript; WORKTREE-P marks worktree sessions; TRANSCRIPT is the absolute
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
 Keys: :buffer (the Ghostel buffer), :origin (project root the instance
-was launched from, normalised with `directory-file-name'), :cwd and
-:worktree.")
+was launched from, normalised with `claude-code--normalize-root'), :cwd
+and :worktree.")
+
+(defun claude-code--normalize-root (path)
+  "Return PATH as an absolute, symlink-resolved directory name.
+Claude records a session's cwd as the real (symlink-resolved) path its process
+reports, whereas Emacs `project-root' may hand back a symlinked path.  Resolving
+with `file-truename' keeps the root we compute matching Claude's encoded
+transcript directory, and keeps a spawned instance's `:origin' comparable to the
+root a later query normalises the same way."
+  (directory-file-name (file-truename (expand-file-name path))))
 
 (defun claude-code--session-process (buffer)
   "Return BUFFER's live Ghostel process, or nil."
@@ -211,7 +222,7 @@ was launched from, normalised with `directory-file-name'), :cwd and
 
 (defun claude-code--live-managed (project-root)
   "Return an alist of (ID . BUFFER) for live managed instances of PROJECT-ROOT."
-  (let ((root (directory-file-name (expand-file-name project-root)))
+  (let ((root (claude-code--normalize-root project-root))
         (out '()))
     (maphash (lambda (id plist)
                (when (and (equal (plist-get plist :origin) root)
@@ -254,7 +265,7 @@ transcript on disk belongs to a session Emacs does not manage: when a
 `claude' process is still running it outside Emacs the session is flagged
 `claude-code-session-external-p' (an external session); otherwise no process
 is running it and it is dead."
-  (let* ((root (directory-file-name (expand-file-name project-root)))
+  (let* ((root (claude-code--normalize-root project-root))
          (live (claude-code--live-status-table))
          (managed (claude-code--live-managed root))
          (transcripts (claude-code--project-transcripts root))
@@ -422,7 +433,7 @@ WORKTREE requests a git worktree: t for an auto-named one, or a string to
 name it.  MODEL and NAME set the model and display name.  The session id is
 generated internally and is not exposed."
   (require 'ghostel)
-  (let* ((root (directory-file-name (expand-file-name project-root)))
+  (let* ((root (claude-code--normalize-root project-root))
          (id (claude-code--new-uuid))
          (args (claude-code--build-args :session-id id :prompt prompt
                                         :worktree worktree :model model
@@ -446,7 +457,7 @@ instance rather than starting a second `claude' for the same session."
     (if existing
         (progn (pop-to-buffer existing) existing)
       (require 'ghostel)
-      (let* ((root (directory-file-name (expand-file-name project-root)))
+      (let* ((root (claude-code--normalize-root project-root))
              (args (claude-code--build-args :resume id))
              (default-directory (file-name-as-directory root))
              (buffer (generate-new-buffer
@@ -646,7 +657,7 @@ mode; only alive sessions split by status when grouping by status."
                    claude-code--usage-table))
         (push key order)
         (push session (gethash key buckets))))
-    (setq order (sort (delete-dups (nreverse order)) #'claude-code--group-less-p))
+    (setq order (sort (delete-dups order) #'claude-code--group-less-p))
     (mapcar
      (lambda (key)
        (let* ((rows (nreverse (gethash key buckets)))
@@ -706,15 +717,18 @@ mode; only alive sessions split by status when grouping by status."
   (claude-code--reapply-marks))
 
 (defun claude-code-sessions-toggle-group ()
-  "Collapse or expand the group header on the current line."
+  "Collapse or expand the group at point.
+Works whether point is on a group header or on one of the group's rows: in the
+latter case the row's session determines the enclosing group."
   (interactive)
-  (if-let* ((group (get-text-property (line-beginning-position) 'claude-code-group)))
-      (progn
-        (if (member group claude-code--collapsed)
-            (setq claude-code--collapsed (delete group claude-code--collapsed))
-          (push group claude-code--collapsed))
-        (claude-code-sessions-refresh))
-    (forward-line 1)))
+  (when-let* ((group (or (get-text-property (line-beginning-position)
+                                            'claude-code-group)
+                         (when-let* ((s (claude-code--session-at-point)))
+                           (claude-code--group-key s)))))
+    (if (member group claude-code--collapsed)
+        (setq claude-code--collapsed (delete group claude-code--collapsed))
+      (push group claude-code--collapsed))
+    (claude-code-sessions-refresh)))
 
 (defun claude-code-sessions-visit ()
   "Focus an alive session, offer to resume a dead one, or toggle a group."
@@ -879,8 +893,7 @@ mode; only alive sessions split by status when grouping by status."
 (defun claude-code ()
   "Open the Claude sessions view for the current project."
   (interactive)
-  (let* ((root (directory-file-name
-                (expand-file-name (project-root (project-current t)))))
+  (let* ((root (claude-code--normalize-root (project-root (project-current t))))
          (buffer (get-buffer-create
                   (format "*claude-sessions:%s*" (file-name-nondirectory root)))))
     (with-current-buffer buffer

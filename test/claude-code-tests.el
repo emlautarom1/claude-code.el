@@ -167,6 +167,23 @@ features still load normally."
       ;; A non-integer pid yields nil.
       (should (null (claude-code--process-usage nil))))))
 
+(ert-deftest claude-code-test-normalize-root ()
+  "Root normalisation resolves symlinks so a symlinked root matches Claude's cwd."
+  (let* ((real (make-temp-file "cc-real" t))
+         (link (make-temp-name
+                (expand-file-name "cc-link" temporary-file-directory))))
+    (unwind-protect
+        (progn
+          (make-symbolic-link (directory-file-name real) link)
+          ;; The symlinked path resolves to the real directory...
+          (should (equal (claude-code--normalize-root link)
+                         (directory-file-name (file-truename real))))
+          ;; ...which is not what a bare `expand-file-name' would have produced.
+          (should-not (equal (claude-code--normalize-root link)
+                             (directory-file-name (expand-file-name link)))))
+      (when (file-symlink-p link) (delete-file link))
+      (delete-directory real t))))
+
 (ert-deftest claude-code-test-session-liveness ()
   "Liveness is a three-way classification: alive, external, or dead."
   (should (eq 'alive (claude-code--session-liveness
