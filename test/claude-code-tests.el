@@ -475,7 +475,11 @@ features still load normally."
      (unwind-protect
          (with-current-buffer buf
            (cl-letf (((symbol-function 'claude-code--live-managed)
-                      (lambda (_r) nil)))
+                      (lambda (_r) nil))
+                     ;; Pin the process table empty so the fixture sessions
+                     ;; (pids 1001-1003) never classify as external on a host
+                     ;; that happens to have those pids live.
+                     ((symbol-function 'list-system-processes) (lambda () '())))
              (claude-code-sessions-mode)
              (setq claude-code--project "/home/test/proj")
              (claude-code-sessions-refresh)
