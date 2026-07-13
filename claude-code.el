@@ -83,10 +83,10 @@ session data instead."
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
 The table is keyed by session id; each value is a plist with keys
-:pid, :cwd, :name, :kind, :status and :waiting-for.  This is pure
-parsing of the files Claude writes for every running instance;
-process liveness is decided by the caller.  A missing status field
-yields a nil :status rather than an error."
+:pid, :cwd, :name, :status and :waiting-for.  This is pure parsing of
+the files Claude writes for every running instance; process liveness
+is decided by the caller.  A missing status field yields a nil :status
+rather than an error."
   (let ((dir (expand-file-name "sessions" claude-code-config-dir))
         (table (make-hash-table :test 'equal)))
     (when (file-directory-p dir)
@@ -101,7 +101,6 @@ yields a nil :status rather than an error."
                        (list :pid (gethash "pid" obj)
                              :cwd (gethash "cwd" obj)
                              :name (gethash "name" obj)
-                             :kind (gethash "kind" obj)
                              :status (gethash "status" obj)
                              :waiting-for (gethash "waitingFor" obj))
                        table))))))
@@ -186,16 +185,17 @@ and the worktree name is the single path segment following that prefix."
 (cl-defstruct (claude-code-session (:constructor claude-code-session--create)
                                    (:copier nil))
   "A Claude Code session, alive or dead.
-ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live
-instance, in which case BUFFER holds the Ghostel buffer and PID its
-child process.  STATUS is Claude's native `busy'/`idle'/`waiting'
-string (alive sessions only), with WAITING-FOR set while waiting.
-EXTERNAL-P flags a session whose process is running outside Emacs,
-so it must not be resumed or deleted.  TITLE and
-LAST-PROMPT come from the transcript; WORKTREE-P marks worktree
-sessions; TRANSCRIPT is the absolute `.jsonl' path."
-  id cwd name status waiting-for alive-p pid buffer kind worktree-p
-  title last-prompt started-at transcript external-p)
+ID is the session UUID and CWD its absolute working directory.  NAME is
+Claude's display name, read from the live sessions file.  ALIVE-P is non-nil
+when Emacs manages a live instance, in which case BUFFER holds the Ghostel
+buffer and PID its child process.  STATUS is Claude's native
+`busy'/`idle'/`waiting' string (alive sessions only), with WAITING-FOR set
+while waiting.  EXTERNAL-P flags a session whose process is running outside
+Emacs, so it must not be resumed or deleted.  TITLE and LAST-PROMPT come from
+the transcript; WORKTREE-P marks worktree sessions; TRANSCRIPT is the absolute
+`.jsonl' path."
+  id cwd name status waiting-for alive-p pid buffer worktree-p
+  title last-prompt transcript external-p)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
@@ -278,7 +278,6 @@ is running it and it is dead."
                :name (plist-get info :name)
                :status (plist-get info :status)
                :waiting-for (plist-get info :waiting-for)
-               :kind (plist-get info :kind)
                :worktree-p (or (plist-get tr :worktree-p)
                                (and (plist-get reg :worktree) t))
                :title (plist-get tr :title)
