@@ -482,5 +482,370 @@ transcript) and the next refresh reads it back through
   "Display and select SESSION's instance buffer."
   (pop-to-buffer (claude-code--buffer session)))
 
+
+;;;; View
+;;
+;; A `tabulated-list-mode' buffer listing every session of a project, grouped by
+;; status or by liveness (Emacs 30 `tabulated-list-groups' prints a header line
+;; per group); a collapsed group simply contributes no entry rows.
+
+(defcustom claude-code-refresh-interval 2
+  "Seconds between automatic refreshes of a sessions view.
+nil disables automatic refreshing."
+  :type '(choice (const :tag "Disabled" nil) number))
+
+(defvar-local claude-code--project nil
+  "Project root a sessions view is scoped to.")
+(defvar-local claude-code-group-by 'status
+  "How the sessions view groups rows: `status' or `state'.")
+(defvar-local claude-code--collapsed nil
+  "List of collapsed group names in a sessions view.")
+(defvar-local claude-code--marks nil
+  "List of marked session ids in a sessions view.")
+(defvar-local claude-code--session-table nil
+  "Hash of session id -> struct for the rows currently displayed.")
+(defvar-local claude-code--usage-table nil
+  "Hash of session id -> (CPU . RSS) for the rows currently displayed.")
+(defvar-local claude-code--refresh-timer nil
+  "Repeating timer refreshing a sessions view, if any.")
+
+;;;;; Formatting
+
+(defun claude-code--status-display (session)
+  "Return (STRING . FACE) describing SESSION's liveness and status."
+  (pcase (claude-code--session-liveness session)
+    ('alive (pcase (claude-code-session-status session)
+              ("busy" (cons "busy" 'warning))
+              ("idle" (cons "idle" 'success))
+              ("waiting" (cons "waiting" 'error))
+              (_ (cons "alive" 'default))))
+    ('external (cons "external" 'font-lock-comment-face))
+    ('dead (cons "dead" 'shadow))))
+
+(defun claude-code--dir-label (session)
+  "Return the directory label for SESSION, tagging worktrees."
+  (let ((cwd (claude-code-session-cwd session)))
+    (concat (if (claude-code-session-worktree-p session) "wt:" "")
+            (if cwd (file-name-nondirectory (directory-file-name cwd)) ""))))
+
+(defun claude-code--session-display-name (session)
+  "Return SESSION's display name.
+This is the single authority for a session's name, so it cannot drift: the
+name is always derived from Claude's own data, never cached by this package.
+The sources, in order: the live `name' from the sessions file (which `/rename'
+updates), the transcript TITLE (a user custom title, else Claude's generated
+one), the opening prompt, and finally the short session id."
+  (or (claude-code-session-name session)
+      (claude-code-session-title session)
+      (claude-code-session-last-prompt session)
+      (substring (claude-code-session-id session) 0 8)))
+
+(defun claude-code--format-session (session usage)
+  "Return the column vector for SESSION.
+USAGE is (CPU . RSS) or nil."
+  (let ((status (claude-code--status-display session)))
+    (vector (propertize (car status) 'face (cdr status))
+            (claude-code--session-display-name session)
+            (propertize (substring (claude-code-session-id session) 0 8)
+                        'face 'shadow)
+            (claude-code--dir-label session)
+            (if usage (format "%.1f" (car usage)) "")
+            (if usage (format "%dM" (/ (cdr usage) 1024)) ""))))
+
+;;;;; Grouping
+
+(defun claude-code--group-key (session)
+  "Return the group key of SESSION under the current grouping.
+External and dead sessions form their own groups regardless of the grouping
+mode; only alive sessions split by status when grouping by status."
+  (pcase (claude-code--session-liveness session)
+    ('external "external")
+    ('dead "dead")
+    ('alive (pcase claude-code-group-by
+              ('status (or (claude-code-session-status session) "alive"))
+              (_ "alive")))))
+
+(defun claude-code--group-rank (key)
+  "Return the display rank of group KEY; lower ranks come first."
+  (or (alist-get key '(("waiting" . 0) ("busy" . 1) ("idle" . 2) ("alive" . 3)
+                       ("external" . 8) ("dead" . 9))
+                 nil nil #'equal)
+      5))
+
+(defun claude-code--group-less-p (a b)
+  "Return non-nil when group A should sort before group B."
+  (< (claude-code--group-rank a) (claude-code--group-rank b)))
+
+(defun claude-code--group-header (key count collapsed)
+  "Return the header line for group KEY with COUNT rows and COLLAPSED state."
+  (propertize (format "%s %s (%d)"
+                      (if collapsed "▸" "▾") (capitalize key) count)
+              'claude-code-group key 'face 'bold))
+
+(defun claude-code--num-sorter (field)
+  "Return a tabulated-list sorter comparing the usage FIELD (`cpu'/`mem')."
+  (lambda (a b)
+    (let ((va (gethash (car a) claude-code--usage-table))
+          (vb (gethash (car b) claude-code--usage-table)))
+      (< (or (pcase field ('cpu (car va)) ('mem (cdr va))) -1)
+         (or (pcase field ('cpu (car vb)) ('mem (cdr vb))) -1)))))
+
+(defun claude-code--tabulated-groups ()
+  "Return the grouped rows for the current view, honouring collapse state."
+  (let ((sessions (claude-code-sessions claude-code--project))
+        (snapshot (claude-code--process-snapshot))
+        (buckets (make-hash-table :test 'equal))
+        (order '()))
+    (clrhash claude-code--session-table)
+    (clrhash claude-code--usage-table)
+    (dolist (session sessions)
+      (let ((id (claude-code-session-id session))
+            (key (claude-code--group-key session)))
+        (puthash id session claude-code--session-table)
+        (when (and (claude-code-session-alive-p session)
+                   (claude-code-session-pid session))
+          (puthash id (claude-code--process-usage
+                       (claude-code-session-pid session) snapshot)
+                   claude-code--usage-table))
+        (push key order)
+        (push session (gethash key buckets))))
+    (setq order (sort (delete-dups (nreverse order)) #'claude-code--group-less-p))
+    (mapcar
+     (lambda (key)
+       (let* ((rows (nreverse (gethash key buckets)))
+              (collapsed (and (member key claude-code--collapsed) t)))
+         (cons (claude-code--group-header key (length rows) collapsed)
+               (unless collapsed
+                 (mapcar (lambda (s)
+                           (list (claude-code-session-id s)
+                                 (claude-code--format-session
+                                  s (gethash (claude-code-session-id s)
+                                             claude-code--usage-table))))
+                         rows)))))
+     order)))
+
+;;;;; Marks and refresh
+
+(defun claude-code--session-at-point ()
+  "Return the session on the current line, or nil on a group header."
+  (when-let* ((id (tabulated-list-get-id)))
+    (gethash id claude-code--session-table)))
+
+(defun claude-code--reapply-marks ()
+  "Re-tag rows whose session id is in `claude-code--marks'."
+  (save-excursion
+    (goto-char (point-min))
+    (while (not (eobp))
+      (when-let* ((s (claude-code--session-at-point)))
+        (when (member (claude-code-session-id s) claude-code--marks)
+          (tabulated-list-put-tag "*")))
+      (forward-line 1))))
+
+(defun claude-code--target-sessions ()
+  "Return the marked sessions, or the session at point when none are marked."
+  (if claude-code--marks
+      (delq nil (mapcar (lambda (id) (gethash id claude-code--session-table))
+                        claude-code--marks))
+    (when-let* ((s (claude-code--session-at-point))) (list s))))
+
+(defun claude-code--maybe-refresh (buffer)
+  "Refresh BUFFER when it is live and visible."
+  (when (and (buffer-live-p buffer) (get-buffer-window buffer 'visible))
+    (with-current-buffer buffer
+      (let ((inhibit-message t))
+        (claude-code-sessions-refresh)))))
+
+(defun claude-code--cancel-refresh ()
+  "Cancel the view's refresh timer."
+  (when (timerp claude-code--refresh-timer)
+    (cancel-timer claude-code--refresh-timer)))
+
+;;;;; Commands
+
+(defun claude-code-sessions-refresh ()
+  "Recompute and redraw the sessions view."
+  (interactive)
+  (tabulated-list-print t)
+  (claude-code--reapply-marks))
+
+(defun claude-code-sessions-toggle-group ()
+  "Collapse or expand the group header on the current line."
+  (interactive)
+  (if-let* ((group (get-text-property (line-beginning-position) 'claude-code-group)))
+      (progn
+        (if (member group claude-code--collapsed)
+            (setq claude-code--collapsed (delete group claude-code--collapsed))
+          (push group claude-code--collapsed))
+        (claude-code-sessions-refresh))
+    (forward-line 1)))
+
+(defun claude-code-sessions-visit ()
+  "Focus an alive session, offer to resume a dead one, or toggle a group."
+  (interactive)
+  (let ((session (claude-code--session-at-point)))
+    (cond
+     ((null session) (claude-code-sessions-toggle-group))
+     ((claude-code-session-alive-p session) (claude-code-focus session))
+     ((claude-code-session-external-p session)
+      (user-error "Session runs outside Emacs; cannot attach"))
+     ((y-or-n-p "Session is dead.  Resume it? ")
+      (claude-code-resume claude-code--project (claude-code-session-id session))
+      (claude-code-sessions-refresh)))))
+
+(defun claude-code-sessions-mark ()
+  "Mark the session on the current line."
+  (interactive)
+  (when-let* ((s (claude-code--session-at-point)))
+    (cl-pushnew (claude-code-session-id s) claude-code--marks :test #'equal)
+    (tabulated-list-put-tag "*" t)))
+
+(defun claude-code-sessions-unmark ()
+  "Unmark the session on the current line."
+  (interactive)
+  (when-let* ((s (claude-code--session-at-point)))
+    (setq claude-code--marks (delete (claude-code-session-id s) claude-code--marks))
+    (tabulated-list-put-tag " " t)))
+
+(defun claude-code-sessions-kill ()
+  "Kill the marked instances, or the one at point."
+  (interactive)
+  (let ((targets (seq-filter #'claude-code-session-alive-p
+                             (claude-code--target-sessions))))
+    (if (null targets)
+        (user-error "No alive session selected")
+      (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
+        (mapc #'claude-code-kill targets)
+        (setq claude-code--marks nil)
+        (claude-code-sessions-refresh)))))
+
+(defun claude-code-sessions-delete ()
+  "Delete the marked dead sessions, or the one at point."
+  (interactive)
+  (let ((targets (seq-remove #'claude-code-session-alive-p
+                             (claude-code--target-sessions))))
+    (if (null targets)
+        (user-error "No dead session selected")
+      (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))
+        (mapc #'claude-code-delete targets)
+        (setq claude-code--marks nil)
+        (claude-code-sessions-refresh)))))
+
+(defun claude-code-sessions-rename ()
+  "Rename the session at point."
+  (interactive)
+  (when-let* ((s (claude-code--session-at-point)))
+    (claude-code-rename s (read-string "New name: "))))
+
+(defun claude-code-sessions-interrupt ()
+  "Interrupt (SIGINT) the session at point."
+  (interactive)
+  (when-let* ((s (claude-code--session-at-point)))
+    (claude-code-interrupt s)))
+
+(defun claude-code-sessions-send ()
+  "Send a line of text to the session at point."
+  (interactive)
+  (when-let* ((s (claude-code--session-at-point)))
+    (claude-code-send-text s (read-string "Send: ") t)))
+
+(defun claude-code-sessions-cycle-grouping ()
+  "Toggle grouping between status and alive/dead state."
+  (interactive)
+  (setq claude-code-group-by (if (eq claude-code-group-by 'status) 'state 'status))
+  (claude-code-sessions-refresh))
+
+(defun claude-code-sessions-new (&optional args)
+  "Spawn a new session, reading options from the transient ARGS."
+  (interactive (list (transient-args 'claude-code-menu)))
+  (let ((prompt (read-string "Initial prompt (empty for none): ")))
+    (claude-code-spawn
+     claude-code--project
+     :prompt (and (> (length prompt) 0) prompt)
+     :worktree (and (member "--worktree" args) t)
+     :model (transient-arg-value "--model=" args)
+     :name (transient-arg-value "--name=" args))
+    (claude-code-sessions-refresh)))
+
+;;;;; Mode
+
+(defvar-keymap claude-code-sessions-mode-map
+  :doc "Keymap for `claude-code-sessions-mode'."
+  "g"   #'claude-code-sessions-refresh
+  "RET" #'claude-code-sessions-visit
+  "TAB" #'claude-code-sessions-toggle-group
+  "n"   #'claude-code-sessions-new
+  "k"   #'claude-code-sessions-kill
+  "d"   #'claude-code-sessions-delete
+  "r"   #'claude-code-sessions-rename
+  "i"   #'claude-code-sessions-interrupt
+  "s"   #'claude-code-sessions-send
+  "m"   #'claude-code-sessions-mark
+  "u"   #'claude-code-sessions-unmark
+  "G"   #'claude-code-sessions-cycle-grouping
+  "?"   #'claude-code-menu)
+
+(define-derived-mode claude-code-sessions-mode tabulated-list-mode "Claude"
+  "Major mode listing the Claude Code sessions of a project."
+  (setq-local claude-code--session-table (make-hash-table :test 'equal))
+  (setq-local claude-code--usage-table (make-hash-table :test 'equal))
+  (setq-local tabulated-list-padding 2)
+  (setq-local tabulated-list-format
+              (vector '("Status" 9 t)
+                      '("Name" 26 t)
+                      '("Id" 9 t)
+                      '("Dir" 22 t)
+                      (list "CPU%" 6 (claude-code--num-sorter 'cpu) :right-align t)
+                      (list "Mem" 8 (claude-code--num-sorter 'mem) :right-align t)))
+  (setq-local tabulated-list-sort-key '("Name" . nil))
+  (setq-local tabulated-list-entries #'ignore)
+  (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
+  (tabulated-list-init-header)
+  (when claude-code-refresh-interval
+    (setq-local claude-code--refresh-timer
+                (run-at-time claude-code-refresh-interval
+                             claude-code-refresh-interval
+                             #'claude-code--maybe-refresh (current-buffer))))
+  (add-hook 'kill-buffer-hook #'claude-code--cancel-refresh nil t))
+
+;;;;; Transient
+
+(transient-define-prefix claude-code-menu ()
+			 "Dispatch actions for the Claude sessions view."
+			 ["Spawn options"
+			  ("-w" "Worktree" "--worktree")
+			  ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
+			  ("-n" "Name" "--name=")]
+			 ["Spawn"
+			  ("n" "New session" claude-code-sessions-new)]
+			 [["Session"
+			   ("RET" "Focus / resume" claude-code-sessions-visit)
+			   ("r" "Rename" claude-code-sessions-rename)
+			   ("i" "Interrupt" claude-code-sessions-interrupt)
+			   ("s" "Send text" claude-code-sessions-send)]
+			  ["Manage"
+			   ("k" "Kill" claude-code-sessions-kill)
+			   ("d" "Delete dead" claude-code-sessions-delete)
+			   ("m" "Mark" claude-code-sessions-mark)
+			   ("u" "Unmark" claude-code-sessions-unmark)]
+			  ["View"
+			   ("G" "Cycle grouping" claude-code-sessions-cycle-grouping)
+			   ("TAB" "Toggle group" claude-code-sessions-toggle-group)
+			   ("g" "Refresh" claude-code-sessions-refresh)]])
+
+;;;###autoload
+(defun claude-code ()
+  "Open the Claude sessions view for the current project."
+  (interactive)
+  (let* ((root (directory-file-name
+                (expand-file-name (project-root (project-current t)))))
+         (buffer (get-buffer-create
+                  (format "*claude-sessions:%s*" (file-name-nondirectory root)))))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'claude-code-sessions-mode)
+        (claude-code-sessions-mode))
+      (setq claude-code--project root)
+      (claude-code-sessions-refresh))
+    (pop-to-buffer buffer)))
+
 (provide 'claude-code)
 ;;; claude-code.el ends here

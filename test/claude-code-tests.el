@@ -224,5 +224,217 @@ Clears the transcript cache first so tests do not leak into each other."
                         :type 'user-error))
       (when (file-exists-p file) (delete-file file)))))
 
+;;;; View
+
+(ert-deftest claude-code-test-status-display ()
+  "Status maps to native words and Emacs palette faces."
+  (should (equal (car (claude-code--status-display
+                       (claude-code-session--create :alive-p t :status "idle")))
+                 "idle"))
+  (should (eq (cdr (claude-code--status-display
+                    (claude-code-session--create :alive-p t :status "idle")))
+              'success))
+  (should (eq (cdr (claude-code--status-display
+                    (claude-code-session--create :alive-p t :status "busy")))
+              'warning))
+  (should (eq (cdr (claude-code--status-display
+                    (claude-code-session--create :alive-p t :status "waiting")))
+              'error))
+  (should (equal (car (claude-code--status-display
+                       (claude-code-session--create :alive-p nil)))
+                 "dead"))
+  (should (equal (car (claude-code--status-display
+                       (claude-code-session--create :alive-p nil :external-p t)))
+                 "external")))
+
+(ert-deftest claude-code-test-format-session ()
+  "Columns fall back sensibly and render usage."
+  (let* ((s (claude-code-session--create
+             :id "abcdef01-0000-4000-8000-000000000000"
+             :alive-p nil :title "The Title" :cwd "/home/x/proj"))
+         (v (claude-code--format-session s nil)))
+    (should (equal (substring-no-properties (aref v 0)) "dead"))
+    ;; No name -> title.
+    (should (equal (aref v 1) "The Title"))
+    (should (equal (substring-no-properties (aref v 2)) "abcdef01"))
+    (should (equal (aref v 3) "proj"))
+    (should (equal (aref v 4) ""))
+    (should (equal (aref v 5) "")))
+  (let* ((s (claude-code-session--create
+             :id "11112222-0000-4000-8000-000000000000"
+             :alive-p t :status "busy" :name "worker"
+             :worktree-p t :cwd "/home/x/proj/.claude/worktrees/feat"))
+         (v (claude-code--format-session s '(12.5 . 204800))))
+    (should (equal (substring-no-properties (aref v 0)) "busy"))
+    (should (eq (get-text-property 0 'face (aref v 0)) 'warning))
+    (should (equal (aref v 1) "worker"))
+    (should (equal (aref v 3) "wt:feat"))
+    (should (equal (aref v 4) "12.5"))
+    (should (equal (aref v 5) "200M"))))
+
+(ert-deftest claude-code-test-session-display-name ()
+  "The display name draws on one ordered set of sources."
+  ;; The live name wins over everything.
+  (should (equal "chosen"
+                 (claude-code--session-display-name
+                  (claude-code-session--create
+                   :id "abcdef01-0000-4000-8000-000000000000"
+                   :name "chosen" :title "t" :last-prompt "p"))))
+  ;; Then the transcript title, then the prompt, then the short id.
+  (should (equal "t" (claude-code--session-display-name
+                      (claude-code-session--create
+                       :id "abcdef01-0000-4000-8000-000000000000"
+                       :title "t" :last-prompt "p"))))
+  (should (equal "p" (claude-code--session-display-name
+                      (claude-code-session--create
+                       :id "abcdef01-0000-4000-8000-000000000000"
+                       :last-prompt "p"))))
+  (should (equal "abcdef01"
+                 (claude-code--session-display-name
+                  (claude-code-session--create
+                   :id "abcdef01-0000-4000-8000-000000000000")))))
+
+(ert-deftest claude-code-test-group-key ()
+  "Grouping keys depend on the current grouping mode."
+  (let ((alive (claude-code-session--create :alive-p t :status "busy"))
+        (external (claude-code-session--create :alive-p nil :external-p t))
+        (dead (claude-code-session--create :alive-p nil)))
+    (let ((claude-code-group-by 'status))
+      (should (equal (claude-code--group-key alive) "busy"))
+      (should (equal (claude-code--group-key external) "external"))
+      (should (equal (claude-code--group-key dead) "dead")))
+    (let ((claude-code-group-by 'state))
+      (should (equal (claude-code--group-key alive) "alive"))
+      ;; External keeps its own group even when grouping by state.
+      (should (equal (claude-code--group-key external) "external"))
+      (should (equal (claude-code--group-key dead) "dead")))))
+
+(ert-deftest claude-code-test-group-order ()
+  "Groups sort by urgency, with external and dead last."
+  (should (equal (sort (list "dead" "idle" "external" "waiting" "busy")
+                       #'claude-code--group-less-p)
+                 '("waiting" "busy" "idle" "external" "dead"))))
+
+(ert-deftest claude-code-test-view-renders-and-collapses ()
+  "The view prints group headers and rows, and collapsing hides rows."
+  (claude-code-tests--with-fixtures
+   (let ((claude-code-refresh-interval nil)
+         (buf (get-buffer-create " *cc-view-test*")))
+     (unwind-protect
+         (with-current-buffer buf
+           (cl-letf (((symbol-function 'claude-code--live-managed)
+                      (lambda (_r) nil)))
+             (claude-code-sessions-mode)
+             (setq claude-code--project "/home/test/proj")
+             (claude-code-sessions-refresh)
+             (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+               (should (string-match-p "Dead (3)" text))
+               (should (string-match-p "11111111" text))
+               ;; The worktree session is listed under the parent project.
+               (should (string-match-p "wt:feat" text)))
+             (push "dead" claude-code--collapsed)
+             (claude-code-sessions-refresh)
+             (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+               (should (string-match-p "Dead (3)" text))
+               (should-not (string-match-p "11111111" text)))))
+       (kill-buffer buf)))))
+
+;;;; Integration (real Ghostel + real `claude')
+;;
+;; These exercise the live spawn/kill lifecycle against an actual `claude'
+;; process, so they need Ghostel's native module, network access, and a
+;; logged-in CLI.  `make test' and CI never run them: they skip unless
+;; CLAUDE_CODE_INTEGRATION is set (use `make integration').
+;;
+;; GOTCHA — READ THIS BEFORE DEBUGGING SPAWNING.  A running `claude' exports the
+;; variables in `claude-code-tests--nesting-env-vars' to mark its subprocesses
+;; as nested children.  A `claude' launched with those set does NOT start its
+;; own top-level session: it writes no `sessions/*.json' and no transcript, so
+;; the model reports no status and the whole lifecycle looks broken.  This bites
+;; when debugging the package *from inside a Claude Code session* (e.g. another
+;; Claude Code agent running Emacs).  Strip them before spawning —
+;; `claude-code-tests--with-top-level-env' does exactly that.  A normally
+;; launched Emacs never has these variables, which is why production code does
+;; not touch the environment.
+
+(defconst claude-code-tests--nesting-env-vars
+  '("CLAUDECODE" "CLAUDE_CODE_CHILD_SESSION" "CLAUDE_CODE_ENTRYPOINT"
+    "CLAUDE_CODE_SSE_PORT" "CLAUDE_CODE_SSE_URL" "CLAUDE_CODE_SESSION_ID")
+  "Runtime variables a parent `claude' sets to mark nested children.
+Only relevant to testing/debugging (see the note above).")
+
+(defmacro claude-code-tests--with-top-level-env (&rest body)
+  "Run BODY with the Claude nesting markers removed from the environment.
+This lets a spawned `claude' start a real top-level session even when the
+tests themselves run inside a Claude Code session."
+  (declare (indent 0))
+  `(let ((process-environment
+          (seq-remove
+           (lambda (entry)
+             (seq-some (lambda (var) (string-prefix-p (concat var "=") entry))
+                       claude-code-tests--nesting-env-vars))
+           process-environment)))
+     ,@body))
+
+(defun claude-code-tests--await (pred timeout)
+  "Pump events until PRED is non-nil or TIMEOUT seconds elapse; return PRED."
+  (let ((deadline (+ (float-time) timeout)))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.2)
+      (sleep-for 0.1))
+    (funcall pred)))
+
+(ert-deftest claude-code-test-integration-lifecycle ()
+  "Spawn a real instance, see it register a session, then kill and delete it."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (require 'ghostel)
+  (let* ((root (directory-file-name (expand-file-name default-directory)))
+         buffer id pid)
+    (unwind-protect
+        (claude-code-tests--with-top-level-env
+         (setq buffer (claude-code-spawn
+                       root :prompt "Respond with the single word: pong"
+                       :name "ert-integration"))
+         (maphash (lambda (k v) (when (eq (plist-get v :buffer) buffer) (setq id k)))
+                  claude-code--managed)
+         (should id)
+         (setq pid (buffer-local-value 'ghostel--pid buffer))
+         (should (claude-code--pid-live-p pid))
+         ;; A live status only appears once the child writes its sessions file,
+         ;; which only happens for a real (non-nested) session.
+         (should (member
+                  (claude-code-tests--await
+                   (lambda () (let ((s (claude-code-tests--find-session
+                                        (claude-code-sessions root) id)))
+                                (and s (claude-code-session-status s))))
+                   45)
+                  '("busy" "idle" "waiting")))
+         (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+           (should (claude-code-session-alive-p s))
+           (claude-code-kill s))
+         ;; The model reports it dead immediately (it is no longer managed)...
+         (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+           (should (or (null s) (not (claude-code-session-alive-p s)))))
+         ;; ...and the OS process must actually terminate (Ghostel tears the
+         ;; child down asynchronously, so give its sentinel time to run).
+         (should (claude-code-tests--await
+                  (lambda () (not (claude-code--pid-live-p pid))) 15))
+         ;; The now-dead transcript can be deleted.
+         (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+           (when (and s (claude-code-session-transcript s)
+                      (file-exists-p (claude-code-session-transcript s)))
+             (claude-code-delete s)
+             (should-not (file-exists-p (claude-code-session-transcript s))))))
+      ;; Always clean up: kill the buffer, SIGKILL any survivor so an immediate
+      ;; batch exit never orphans it, and remove any stray transcript.
+      (when (buffer-live-p buffer)
+        (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))
+      (when (and pid (claude-code--pid-live-p pid))
+        (ignore-errors (signal-process pid 'SIGKILL)))
+      (when id
+        (let ((f (expand-file-name (concat id ".jsonl")
+                                   (claude-code--project-dir default-directory))))
+          (when (file-exists-p f) (delete-file f)))))))
+
 (provide 'claude-code-tests)
 ;;; claude-code-tests.el ends here
