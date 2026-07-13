@@ -148,5 +148,81 @@ Clears the transcript cache first so tests do not leak into each other."
   (should (eq 'dead (claude-code--session-liveness
                      (claude-code-session--create :alive-p nil)))))
 
+;;;; Operations
+
+(ert-deftest claude-code-test-build-args-new ()
+  "New-session argument lists are ordered and place the prompt last."
+  (should (equal (claude-code--build-args :session-id "ID")
+                 '("--session-id" "ID")))
+  (should (equal (claude-code--build-args :session-id "ID" :prompt "hello")
+                 '("--session-id" "ID" "hello")))
+  (should (equal (claude-code--build-args
+                  :session-id "ID" :name "n" :model "opus" :prompt "hi")
+                 '("--session-id" "ID" "-n" "n" "--model" "opus" "hi")))
+  (should (equal (claude-code--build-args :session-id "ID" :worktree t)
+                 '("--session-id" "ID" "-w")))
+  (should (equal (claude-code--build-args :session-id "ID" :worktree "feat")
+                 '("--session-id" "ID" "-w" "feat")))
+  ;; Empty prompt is dropped.
+  (should (equal (claude-code--build-args :session-id "ID" :prompt "")
+                 '("--session-id" "ID"))))
+
+(ert-deftest claude-code-test-build-args-resume ()
+  "Resume returns only \"-r ID\" and ignores new-session arguments."
+  (should (equal (claude-code--build-args :resume "ID") '("-r" "ID")))
+  (should (equal (claude-code--build-args :resume "ID" :prompt "x" :name "n")
+                 '("-r" "ID"))))
+
+(ert-deftest claude-code-test-new-uuid ()
+  "Generated ids are valid, distinct version-4 UUIDs."
+  (let ((re (concat "\\`[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-4[0-9a-f]\\{3\\}"
+                    "-[89ab][0-9a-f]\\{3\\}-[0-9a-f]\\{12\\}\\'")))
+    (should (string-match-p re (claude-code--new-uuid)))
+    (should-not (equal (claude-code--new-uuid) (claude-code--new-uuid)))))
+
+(ert-deftest claude-code-test-default-buffer-name ()
+  "Buffer names fall back to the project directory name."
+  (should (equal (claude-code--default-buffer-name "/home/x/proj" "nice")
+                 "*claude:nice*"))
+  (should (equal (claude-code--default-buffer-name "/home/x/proj" nil)
+                 "*claude:proj*")))
+
+(ert-deftest claude-code-test-on-exit-unregisters ()
+  "Process exit removes the instance's registry entry."
+  (let ((claude-code--managed (make-hash-table :test 'equal))
+        (buf (generate-new-buffer " *cc-test-exit*")))
+    (unwind-protect
+        (progn
+          (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
+          (claude-code--on-exit buf "finished\n")
+          (should (zerop (hash-table-count claude-code--managed))))
+      (kill-buffer buf))))
+
+(ert-deftest claude-code-test-delete-guards-and-happy-path ()
+  "Delete removes a dead transcript but refuses unsafe deletions."
+  (let ((file (make-temp-file "cc-transcript" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          ;; Alive sessions cannot be deleted.
+          (should-error (claude-code-delete
+                         (claude-code-session--create :id "a" :alive-p t))
+                        :type 'user-error)
+          ;; Externally-running sessions cannot be deleted.
+          (should-error (claude-code-delete
+                         (claude-code-session--create
+                          :id "b" :alive-p nil :external-p t :transcript file))
+                        :type 'user-error)
+          ;; A dead session with a transcript is deleted.
+          (should (file-exists-p file))
+          (claude-code-delete (claude-code-session--create
+                               :id "c" :alive-p nil :transcript file))
+          (should-not (file-exists-p file))
+          ;; A missing transcript errors rather than silently succeeding.
+          (should-error (claude-code-delete
+                         (claude-code-session--create
+                          :id "d" :alive-p nil :transcript file))
+                        :type 'user-error))
+      (when (file-exists-p file) (delete-file file)))))
+
 (provide 'claude-code-tests)
 ;;; claude-code-tests.el ends here

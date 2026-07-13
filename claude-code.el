@@ -315,5 +315,172 @@ depending on the platform; RSS is in kibibytes."
             (setq stack (nconc (copy-sequence (gethash p children)) stack)))))
       (cons cpu rss))))
 
+
+;;;; Operations
+
+(cl-defun claude-code--build-args
+    (&key session-id resume prompt name worktree model)
+  "Build the argument list for the `claude' CLI.
+
+When RESUME is non-nil it is a session id to resume, and it is returned as
+\"-r ID\" ignoring all new-session arguments.
+
+Otherwise a new session is described:
+SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
+its session up front.  NAME sets the display name (\"-n\").  WORKTREE, when t,
+requests a new worktree (\"-w\"); when a string, names it (\"-w NAME\").  MODEL
+sets \"--model\".  PROMPT, when a non-empty string, is appended as the trailing
+positional argument."
+  (if resume
+      (list "-r" resume)
+    (let (args)
+      (when session-id
+        (setq args (append args (list "--session-id" session-id))))
+      (when name
+        (setq args (append args (list "-n" name))))
+      (when worktree
+        (setq args (append args (if (stringp worktree)
+                                    (list "-w" worktree)
+                                  (list "-w")))))
+      (when model
+        (setq args (append args (list "--model" model))))
+      (when (and prompt (> (length prompt) 0))
+        (setq args (append args (list prompt))))
+      args)))
+
+(defcustom claude-code-buffer-name-function #'claude-code--default-buffer-name
+  "Function that names the buffer hosting a new instance.
+Called with the project root and the requested name (or nil); must
+return a string.  Name clashes are resolved by `generate-new-buffer'."
+  :type 'function)
+
+(defun claude-code--default-buffer-name (root name)
+  "Return a buffer name for an instance in ROOT with display NAME."
+  (format "*claude:%s*" (or name (file-name-nondirectory root))))
+
+(defun claude-code--new-uuid ()
+  "Return a random RFC-4122 version-4 UUID string."
+  (let ((s (md5 (format "%d-%d-%s-%d"
+                        (random most-positive-fixnum)
+                        (emacs-pid)
+                        (current-time-string)
+                        (random most-positive-fixnum)))))
+    (format "%s-%s-4%s-%s%s-%s"
+            (substring s 0 8) (substring s 8 12) (substring s 13 16)
+            (nth (random 4) '("8" "9" "a" "b"))
+            (substring s 17 20) (substring s 20 32))))
+
+(defun claude-code--on-exit (buffer &optional _event)
+  "Unregister the managed session hosted in BUFFER when its process exits."
+  (let (dead)
+    (maphash (lambda (id plist)
+               (when (eq (plist-get plist :buffer) buffer) (push id dead)))
+             claude-code--managed)
+    (dolist (id dead) (remhash id claude-code--managed))))
+
+(defun claude-code--register (id buffer origin cwd worktree)
+  "Record instance ID hosted in BUFFER, launched from ORIGIN with CWD, WORKTREE."
+  (add-hook 'ghostel-exit-functions #'claude-code--on-exit)
+  (puthash id (list :buffer buffer :origin origin :cwd cwd :worktree worktree)
+           claude-code--managed)
+  id)
+
+(defun claude-code--buffer (session)
+  "Return SESSION's live buffer or signal a `user-error'."
+  (let ((buffer (claude-code-session-buffer session)))
+    (unless (buffer-live-p buffer)
+      (user-error "Session %s has no live buffer" (claude-code-session-id session)))
+    buffer))
+
+;;;###autoload
+(cl-defun claude-code-spawn (project-root &key prompt worktree model name)
+  "Spawn a new Claude Code instance for PROJECT-ROOT; return its buffer.
+PROMPT is an optional initial prompt (passed as the positional argument).
+WORKTREE requests a git worktree: t for an auto-named one, or a string to
+name it.  MODEL and NAME set the model and display name.  The session id is
+generated internally and is not exposed."
+  (require 'ghostel)
+  (let* ((root (directory-file-name (expand-file-name project-root)))
+         (id (claude-code--new-uuid))
+         (args (claude-code--build-args :session-id id :prompt prompt
+                                        :worktree worktree :model model
+                                        :name name))
+         (default-directory (file-name-as-directory root))
+         (buffer (generate-new-buffer
+                  (funcall claude-code-buffer-name-function root name))))
+    (ghostel-exec buffer claude-code-cli args)
+    (claude-code--register id buffer root root worktree)
+    buffer))
+
+;;;###autoload
+(defun claude-code-resume (project-root id)
+  "Resume session ID for PROJECT-ROOT in a new instance; return its buffer."
+  (require 'ghostel)
+  (let* ((root (directory-file-name (expand-file-name project-root)))
+         (args (claude-code--build-args :resume id))
+         (default-directory (file-name-as-directory root))
+         (buffer (generate-new-buffer
+                  (funcall claude-code-buffer-name-function root nil))))
+    (ghostel-exec buffer claude-code-cli args)
+    (claude-code--register id buffer root root nil)
+    buffer))
+
+(defun claude-code-kill (session)
+  "Kill the running instance of SESSION and its buffer."
+  (unless (claude-code-session-alive-p session)
+    (user-error "Session %s is not alive" (claude-code-session-id session)))
+  (let ((buffer (claude-code-session-buffer session)))
+    (remhash (claude-code-session-id session) claude-code--managed)
+    (when (buffer-live-p buffer)
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buffer)))))
+
+(defun claude-code-delete (session)
+  "Delete dead SESSION's transcript from disk.
+Refuses alive sessions and sessions running outside Emacs."
+  (when (claude-code-session-alive-p session)
+    (user-error "Refusing to delete an alive session; kill it first"))
+  (when (claude-code-session-external-p session)
+    (user-error "Session %s is running outside Emacs"
+                (claude-code-session-id session)))
+  (let ((file (claude-code-session-transcript session)))
+    (unless (and file (file-exists-p file))
+      (user-error "No transcript on disk for session %s"
+                  (claude-code-session-id session)))
+    (delete-file file)
+    (remhash file claude-code--transcript-cache)))
+
+(defun claude-code-send-text (session text &optional submit)
+  "Send TEXT to SESSION's instance, submitting with RET when SUBMIT is non-nil.
+Any newline in TEXT is delivered with a bracketed paste, so Claude's prompt
+receives it as a literal newline within a single message.  Sending the newline
+as a raw keystroke instead would be read as RET and submit the text early, so
+only SUBMIT sends the RET that actually submits."
+  (require 'ghostel)
+  (with-current-buffer (claude-code--buffer session)
+    (if (string-search "\n" text)
+        (ghostel-paste-string text)
+      (ghostel-send-string text))
+    (when submit (ghostel-send-key "return"))))
+
+(defun claude-code-rename (session name)
+  "Rename SESSION to NAME by sending a /rename command to its instance.
+The new name is not cached: Claude records it (in its sessions file and
+transcript) and the next refresh reads it back through
+`claude-code--session-display-name', so there is one source of truth."
+  (unless (claude-code-session-alive-p session)
+    (user-error "Can only rename an alive session"))
+  (claude-code-send-text session (format "/rename %s" name) t))
+
+(defun claude-code-interrupt (session)
+  "Send an interrupt signal (SIGINT) to SESSION's instance."
+  (require 'ghostel)
+  (with-current-buffer (claude-code--buffer session)
+    (ghostel-send-C-c)))
+
+(defun claude-code-focus (session)
+  "Display and select SESSION's instance buffer."
+  (pop-to-buffer (claude-code--buffer session)))
+
 (provide 'claude-code)
 ;;; claude-code.el ends here
