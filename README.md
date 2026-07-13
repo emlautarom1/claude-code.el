@@ -28,6 +28,14 @@ Put `claude-code.el` on your `load-path` and:
 (require 'claude-code)
 ```
 
+For `use-package` users:
+
+```elisp
+(use-package claude-code
+  :vc (:url "https://github.com/emlautarom1/claude-code.el" :rev :newest)
+  :commands (claude-code))
+```
+
 ## Usage
 
 Run `M-x claude-code` in a project. Keys in the sessions view:
