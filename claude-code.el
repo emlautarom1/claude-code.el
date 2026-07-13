@@ -302,6 +302,10 @@ is running it and it is dead."
                    :id id :alive-p nil
                    :external-p (and info
                                     (claude-code--pid-live-p (plist-get info :pid)))
+                   ;; An external session has a live sessions file, so surface
+                   ;; Claude's own display name; a dead one has no info and
+                   ;; falls back to its transcript title/prompt.
+                   :name (plist-get info :name)
                    :cwd (or (plist-get info :cwd)
                             (plist-get tr :worktree-path)
                             root)

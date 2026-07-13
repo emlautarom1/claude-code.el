@@ -214,14 +214,30 @@ features still load normally."
                  "22222222-2222-4222-8222-222222222222")))
          (should-not (claude-code-session-alive-p s))
          (should (claude-code-session-external-p s))
-         (should (eq 'external (claude-code--session-liveness s)))))
-     ;; With no such live pid the same session is simply dead.
+         (should (eq 'external (claude-code--session-liveness s)))
+         ;; An external session surfaces Claude's live name from its sessions
+         ;; file, in preference to its transcript title.
+         (should (equal (claude-code-session-name s) "proj-2"))
+         (should (equal (claude-code--session-display-name s) "proj-2"))))
+     ;; With no such live pid the same session is dead; its sessions file is
+     ;; still on disk (a crash leftover), so the recorded name is kept.
      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
        (let ((s (claude-code-tests--find-session
                  (claude-code-sessions "/home/test/proj")
                  "22222222-2222-4222-8222-222222222222")))
          (should-not (claude-code-session-external-p s))
-         (should (eq 'dead (claude-code--session-liveness s))))))))
+         (should (eq 'dead (claude-code--session-liveness s)))
+         (should (equal (claude-code-session-name s) "proj-2"))))
+     ;; A dead session with no sessions file at all has no name and falls back
+     ;; to its transcript title.
+     (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+       (let ((s (claude-code-tests--find-session
+                 (claude-code-sessions "/home/test/proj")
+                 "55555555-5555-4555-8555-555555555555")))
+         (should (eq 'dead (claude-code--session-liveness s)))
+         (should-not (claude-code-session-name s))
+         (should (equal (claude-code--session-display-name s)
+                        "Dotted worktree")))))))
 
 ;;;; Operations
 
