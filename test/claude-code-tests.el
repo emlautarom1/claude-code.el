@@ -23,6 +23,24 @@ Clears the transcript cache first so tests do not leak into each other."
      (clrhash claude-code--transcript-cache)
      ,@body))
 
+(defmacro claude-code-tests--recording-ghostel (calls &rest body)
+  "Run BODY with Ghostel send/paste/key stubbed to push onto CALLS.
+Each call pushes (paste STR), (send STR) or (key NAME).  A `require' of
+`ghostel' becomes a no-op (the native module is absent under test), while other
+features still load normally."
+  (declare (indent 1))
+  `(cl-letf* ((orig (symbol-function 'require))
+              ((symbol-function 'require)
+               (lambda (feat &rest args)
+                 (unless (eq feat 'ghostel) (apply orig feat args))))
+              ((symbol-function 'ghostel-paste-string)
+               (lambda (s) (push (list 'paste s) ,calls)))
+              ((symbol-function 'ghostel-send-string)
+               (lambda (s) (push (list 'send s) ,calls)))
+              ((symbol-function 'ghostel-send-key)
+               (lambda (k &rest _) (push (list 'key k) ,calls))))
+     ,@body))
+
 ;;;; Storage adapter
 
 (ert-deftest claude-code-test-encode-cwd ()
@@ -251,6 +269,69 @@ Clears the transcript cache first so tests do not leak into each other."
             ;; No second registry entry was created for the same id.
             (should (= (hash-table-count claude-code--managed) 1))))
       (kill-buffer buf))))
+
+(ert-deftest claude-code-test-kill ()
+  "Killing an alive session drops its registry entry and buffer."
+  (let ((claude-code--managed (make-hash-table :test 'equal))
+        (buf (generate-new-buffer " *cc-kill*")))
+    (unwind-protect
+        (progn
+          (puthash "id-k" (list :buffer buf :origin "/r") claude-code--managed)
+          (claude-code-kill (claude-code-session--create
+                             :id "id-k" :alive-p t :buffer buf))
+          (should-not (gethash "id-k" claude-code--managed))
+          (should-not (buffer-live-p buf))
+          ;; A dead session cannot be killed.
+          (should-error (claude-code-kill
+                         (claude-code-session--create :id "d" :alive-p nil))
+                        :type 'user-error))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest claude-code-test-rename ()
+  "Rename sends exactly the /rename slash command, then submits."
+  (let ((buf (generate-new-buffer " *cc-rename*")) (calls '()))
+    (unwind-protect
+        (progn
+          (claude-code-tests--recording-ghostel calls
+						(claude-code-rename
+						 (claude-code-session--create :id "s" :alive-p t :buffer buf)
+						 "My Name"))
+          (should (equal (reverse calls)
+                         '((send "/rename My Name") (key "return"))))
+          ;; Renaming a dead session is refused.
+          (should-error (claude-code-rename
+                         (claude-code-session--create :id "d" :alive-p nil) "x")
+                        :type 'user-error))
+      (kill-buffer buf))))
+
+(ert-deftest claude-code-test-send-text ()
+  "Newlines paste as one message; single lines type; RET only when submitting."
+  (let ((buf (generate-new-buffer " *cc-send*")) (calls '()))
+    (unwind-protect
+        (let ((s (claude-code-session--create :id "s" :alive-p t :buffer buf)))
+          (claude-code-tests--recording-ghostel calls
+						;; Single line, no submit: typed, no RET.
+						(setq calls nil)
+						(claude-code-send-text s "hello")
+						(should (equal (reverse calls) '((send "hello"))))
+						;; Single line, submit: typed then RET.
+						(setq calls nil)
+						(claude-code-send-text s "hi" t)
+						(should (equal (reverse calls) '((send "hi") (key "return"))))
+						;; Multi-line: bracketed paste, then RET only for the submit.
+						(setq calls nil)
+						(claude-code-send-text s "a\nb" t)
+						(should (equal (reverse calls) '((paste "a\nb") (key "return"))))))
+      (kill-buffer buf))))
+
+(ert-deftest claude-code-test-status-display-unknown ()
+  "An unrecognised non-nil status is surfaced verbatim; nil stays `alive'."
+  (should (equal (car (claude-code--status-display
+                       (claude-code-session--create :alive-p t :status "frobbing")))
+                 "unknown (frobbing)"))
+  (should (equal (car (claude-code--status-display
+                       (claude-code-session--create :alive-p t :status nil)))
+                 "alive")))
 
 (ert-deftest claude-code-test-delete-guards-and-happy-path ()
   "Delete removes a dead transcript but refuses unsafe deletions."

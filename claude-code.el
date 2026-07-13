@@ -554,7 +554,8 @@ rather than adding caching or throttling machinery."
               ("busy" (cons "busy" 'warning))
               ("idle" (cons "idle" 'success))
               ("waiting" (cons "waiting" 'error))
-              (_ (cons "alive" 'default))))
+              ('nil (cons "alive" 'default))
+              (raw (cons (format "unknown (%s)" raw) 'default))))
     ('external (cons "external" 'font-lock-comment-face))
     ('dead (cons "dead" 'shadow))))
 
