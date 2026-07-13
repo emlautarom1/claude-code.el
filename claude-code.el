@@ -521,7 +521,13 @@ transcript) and the next refresh reads it back through
 
 (defcustom claude-code-refresh-interval 2
   "Seconds between automatic refreshes of a sessions view.
-nil disables automatic refreshing."
+nil disables automatic refreshing.
+
+Each refresh reparses the sessions files (a few ms even for ~100 instances, so
+it is not cached) and takes one full snapshot of the system process table for
+CPU/memory.  That snapshot dominates the cost — around 40 ms on a busy machine
+with several hundred processes — so on a very busy host raise this interval
+rather than adding caching or throttling machinery."
   :type '(choice (const :tag "Disabled" nil) number))
 
 (defvar-local claude-code--project nil
