@@ -391,7 +391,9 @@ return a string.  Name clashes are resolved by `generate-new-buffer'."
             (substring s 17 20) (substring s 20 32))))
 
 (defun claude-code--on-exit (buffer &optional _event)
-  "Unregister the managed session hosted in BUFFER when its process exits."
+  "Unregister the managed session hosted in BUFFER when its process exits.
+Registered on `ghostel-exit-functions', which calls its functions with
+\(BUFFER EVENT); the EVENT is unused here."
   (let (dead)
     (maphash (lambda (id plist)
                (when (eq (plist-get plist :buffer) buffer) (push id dead)))
@@ -434,16 +436,24 @@ generated internally and is not exposed."
 
 ;;;###autoload
 (defun claude-code-resume (project-root id)
-  "Resume session ID for PROJECT-ROOT in a new instance; return its buffer."
-  (require 'ghostel)
-  (let* ((root (directory-file-name (expand-file-name project-root)))
-         (args (claude-code--build-args :resume id))
-         (default-directory (file-name-as-directory root))
-         (buffer (generate-new-buffer
-                  (funcall claude-code-buffer-name-function root nil))))
-    (ghostel-exec buffer claude-code-cli args)
-    (claude-code--register id buffer root root nil)
-    buffer))
+  "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
+When Emacs already manages a live instance for ID, focus and return that
+instance rather than starting a second `claude' for the same session."
+  (let* ((reg (gethash id claude-code--managed))
+         (existing (and reg
+                        (claude-code--session-process (plist-get reg :buffer))
+                        (plist-get reg :buffer))))
+    (if existing
+        (progn (pop-to-buffer existing) existing)
+      (require 'ghostel)
+      (let* ((root (directory-file-name (expand-file-name project-root)))
+             (args (claude-code--build-args :resume id))
+             (default-directory (file-name-as-directory root))
+             (buffer (generate-new-buffer
+                      (funcall claude-code-buffer-name-function root nil))))
+        (ghostel-exec buffer claude-code-cli args)
+        (claude-code--register id buffer root root nil)
+        buffer))))
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer."
@@ -825,7 +835,13 @@ mode; only alive sessions split by status when grouping by status."
                 (run-at-time claude-code-refresh-interval
                              claude-code-refresh-interval
                              #'claude-code--maybe-refresh (current-buffer))))
-  (add-hook 'kill-buffer-hook #'claude-code--cancel-refresh nil t))
+  ;; Cancel the timer when the buffer dies or its major mode is replaced.
+  ;; `change-major-mode-hook' runs before `kill-all-local-variables' wipes the
+  ;; timer reference, so re-running the mode (or switching away) cancels the
+  ;; old timer rather than orphaning it.  Both hooks and the
+  ;; `ghostel-exit-functions' entry go through `add-hook', which de-duplicates.
+  (add-hook 'kill-buffer-hook #'claude-code--cancel-refresh nil t)
+  (add-hook 'change-major-mode-hook #'claude-code--cancel-refresh nil t))
 
 ;;;;; Transient
 

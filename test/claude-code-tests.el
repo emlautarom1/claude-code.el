@@ -231,6 +231,27 @@ Clears the transcript cache first so tests do not leak into each other."
           (should (zerop (hash-table-count claude-code--managed))))
       (kill-buffer buf))))
 
+(ert-deftest claude-code-test-resume-focuses-existing ()
+  "Resuming an already-managed live session focuses it and spawns nothing."
+  (let ((claude-code--managed (make-hash-table :test 'equal))
+        (buf (generate-new-buffer " *cc-resume*"))
+        (focused nil) (spawned nil))
+    (unwind-protect
+        (progn
+          (puthash "id-x" (list :buffer buf :origin "/r") claude-code--managed)
+          (cl-letf (((symbol-function 'claude-code--session-process)
+                     (lambda (b) (and (eq b buf) 'proc)))
+                    ((symbol-function 'pop-to-buffer)
+                     (lambda (b &rest _) (setq focused b)))
+                    ((symbol-function 'ghostel-exec)
+                     (lambda (&rest _) (setq spawned t))))
+            (should (eq (claude-code-resume "/r" "id-x") buf))
+            (should (eq focused buf))
+            (should-not spawned)
+            ;; No second registry entry was created for the same id.
+            (should (= (hash-table-count claude-code--managed) 1))))
+      (kill-buffer buf))))
+
 (ert-deftest claude-code-test-delete-guards-and-happy-path ()
   "Delete removes a dead transcript but refuses unsafe deletions."
   (let ((file (make-temp-file "cc-transcript" nil ".jsonl")))
