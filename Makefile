@@ -29,10 +29,11 @@ integration:
 	  -L . -L test -l ert -l $(TESTS) \
 	  --eval '(ert-run-tests-batch-and-exit "integration")'
 
-## Run checkdoc over the sources (informational).
+## Run checkdoc over the sources, failing the build on any diagnostic.
+## `checkdoc-file' only prints and never signals, so we count every error it
+## reports (via `checkdoc-create-error', the one chokepoint) and exit non-zero.
 lint:
-	$(EMACS) -Q --batch -L . \
-	  --eval '(checkdoc-file "claude-code.el")'
+	$(EMACS) -Q --batch -L . --eval '(progn (require (quote checkdoc)) (defvar cc-lint-errors 0) (advice-add (quote checkdoc-create-error) :before (lambda (&rest _) (setq cc-lint-errors (1+ cc-lint-errors)))) (checkdoc-file "claude-code.el") (kill-emacs (if (> cc-lint-errors 0) 1 0)))'
 
 clean:
 	rm -f *.elc test/*.elc
