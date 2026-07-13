@@ -1,0 +1,5 @@
+{"type":"mode","mode":"normal","sessionId":"33333333-3333-4333-8333-333333333333"}
+{"type":"worktree-state","worktreeSession":{"originalCwd":"/home/test/proj","worktreePath":"/home/test/proj/.claude/worktrees/feat","worktreeName":"feat","worktreeBranch":"feat","originalBranch":"main","originalHeadCommit":"abc123","sessionId":"33333333-3333-4333-8333-333333333333"},"sessionId":"33333333-3333-4333-8333-333333333333"}
+{"type":"last-prompt","lastPrompt":"worktree work","leafUuid":"bbbbbbbb-798e-4855-900c-9834bcf43bfc","sessionId":"33333333-3333-4333-8333-333333333333"}
+{"type":"ai-title","aiTitle":"Worktree feature","sessionId":"33333333-3333-4333-8333-333333333333"}
+{"type":"custom-title","customTitle":"Renamed worktree","sessionId":"33333333-3333-4333-8333-333333333333"}
