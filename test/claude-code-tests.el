@@ -89,13 +89,18 @@ features still load normally."
        (should (equal (plist-get s2 :last-prompt) "another task here")))
      (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
        (should (plist-get s3 :worktree-p))
-       ;; The worktree name is captured from the encoded-directory suffix.
-       (should (equal (plist-get s3 :worktree-name) "feat"))
+       ;; The cwd is the lossless worktreePath from the transcript, never
+       ;; the lossy encoded-directory suffix.
+       (should (equal (plist-get s3 :worktree-path)
+                      "/home/test/proj/.claude/worktrees/feat"))
        ;; A user custom title takes precedence over Claude's ai-title.
        (should (equal (plist-get s3 :title) "Renamed worktree")))
      (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
        (should (plist-get s5 :worktree-p))
-       (should (equal (plist-get s5 :worktree-name) "solo"))))))
+       ;; The worktree name has a dot; the encoded suffix would lossily read
+       ;; "my-feat", but the transcript's worktreePath keeps "my.feat".
+       (should (equal (plist-get s5 :worktree-path)
+                      "/home/test/proj/.claude/worktrees/my.feat"))))))
 
 ;;;; Model
 
@@ -120,13 +125,15 @@ features still load normally."
        (should (claude-code-session-worktree-p
                 (claude-code-tests--find-session
                  ss "33333333-3333-4333-8333-333333333333")))
-       ;; A genuinely dead worktree (no sessions/*.json) still labels with its
-       ;; own worktree directory, not the parent project (regression: C1).
+       ;; A genuinely dead worktree (no sessions/*.json) labels with its own
+       ;; worktree directory, not the parent project (regression: C1).  Its cwd
+       ;; comes from the lossless worktreePath, so a dotted name survives
+       ;; (regression: N2 -- never invert the lossy directory encoding).
        (let ((solo (claude-code-tests--find-session
                     ss "55555555-5555-4555-8555-555555555555")))
          (should (equal (claude-code-session-cwd solo)
-                        "/home/test/proj/.claude/worktrees/solo"))
-         (should (equal (claude-code--dir-label solo) "wt:solo")))))))
+                        "/home/test/proj/.claude/worktrees/my.feat"))
+         (should (equal (claude-code--dir-label solo) "wt:my.feat")))))))
 
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
