@@ -25,13 +25,19 @@ fi
 
 emacs_bin="${EMACS:-emacs}"
 for f in "${files[@]}"; do
-  [[ "$f" == *.el ]] || continue
+  # Only touch real `.el' files whose path has no shell/Elisp-hostile characters
+  # (quotes, spaces, backslashes, `$', backticks, newlines).  Belt to the braces
+  # of the environment-variable hand-off below.
+  [[ "$f" =~ ^[A-Za-z0-9._/-]+\.el$ ]] || continue
   [[ -f "$f" ]] || continue
-  "$emacs_bin" -Q --batch \
-    --eval "(progn
-              (find-file \"$f\")
+  # Pass the filename as data through the environment and read it back inside
+  # Emacs with `getenv'.  The `--eval' form is a fixed literal, so a filename can
+  # never be interpolated into the Elisp string and break out of it (a name
+  # containing a quote, backslash, or newline would otherwise inject code).
+  CC_FMT_FILE="$f" "$emacs_bin" -Q --batch \
+    --eval '(with-current-buffer (find-file-noselect (getenv "CC_FMT_FILE"))
               (delete-trailing-whitespace)
               (indent-region (point-min) (point-max))
-              (when (buffer-modified-p) (save-buffer)))" 2>/dev/null
+              (when (buffer-modified-p) (save-buffer)))' 2>/dev/null
 done
 exit 0
