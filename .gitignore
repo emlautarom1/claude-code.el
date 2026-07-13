@@ -7,3 +7,6 @@
 dist/
 *.log
 .DS_Store
+
+# Machine-local Claude Code settings (permissions, sandbox); not shared.
+.claude/settings.local.json
