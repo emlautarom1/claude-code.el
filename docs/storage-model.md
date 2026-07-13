@@ -18,7 +18,6 @@ this package reads:
 | `sessionId`  | the session UUID — the join key to a transcript            |
 | `cwd`        | the real, absolute working directory (never encoded)       |
 | `name`       | display name (Claude-derived or user-set)                  |
-| `kind`       | `interactive` or `bg` (background)                         |
 | `status`     | `idle` \| `busy` \| `waiting` (may be **absent** early on) |
 | `waitingFor` | set only while `waiting`, e.g. `"permission prompt"`       |
 | `pid`        | OS PID (also the filename)                                 |

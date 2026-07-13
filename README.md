@@ -55,7 +55,7 @@ Run `M-x claude-code` in a project. Keys in the sessions view:
 | `i`   | interrupt (SIGINT) the session at point         |
 | `s`   | send a line of text to the session at point     |
 | `m` / `u` | mark / unmark the session at point          |
-| `G`   | cycle grouping (status ↔ alive/dead)            |
+| `G`   | cycle grouping (status ↔ liveness)              |
 | `g`   | refresh                                         |
 | `?`   | open the transient menu                         |
 
