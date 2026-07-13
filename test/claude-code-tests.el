@@ -74,5 +74,79 @@ Clears the transcript cache first so tests do not leak into each other."
        ;; A user custom title takes precedence over Claude's ai-title.
        (should (equal (plist-get s3 :title) "Renamed worktree"))))))
 
+;;;; Model
+
+(defun claude-code-tests--find-session (sessions id)
+  "Return the session in SESSIONS whose id is ID."
+  (seq-find (lambda (s) (equal (claude-code-session-id s) id)) sessions))
+
+(ert-deftest claude-code-test-sessions-all-dead ()
+  "With nothing managed, every transcript is a dead session."
+  (claude-code-tests--with-fixtures
+   (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
+     (let ((ss (claude-code-sessions "/home/test/proj")))
+       (should (= (length ss) 3))
+       (should-not (seq-some #'claude-code-session-alive-p ss))
+       (let ((s1 (claude-code-tests--find-session
+                  ss "11111111-1111-4111-8111-111111111111")))
+         ;; Dead sessions carry no live status, but keep their title.
+         (should (null (claude-code-session-status s1)))
+         (should (equal (claude-code-session-title s1)
+                        "Understand the project layout")))
+       ;; The worktree transcript shows up under the parent project.
+       (should (claude-code-session-worktree-p
+                (claude-code-tests--find-session
+                 ss "33333333-3333-4333-8333-333333333333")))))))
+
+(ert-deftest claude-code-test-sessions-with-alive ()
+  "A managed live instance becomes the alive session, without duplication."
+  (claude-code-tests--with-fixtures
+   (let ((buf (generate-new-buffer " *cc-test*"))
+         (id "11111111-1111-4111-8111-111111111111"))
+     (unwind-protect
+         (progn
+           (with-current-buffer buf (setq-local ghostel--pid 4242))
+           (cl-letf (((symbol-function 'claude-code--live-managed)
+                      (lambda (_r) (list (cons id buf)))))
+             (let* ((ss (claude-code-sessions "/home/test/proj"))
+                    (s1 (claude-code-tests--find-session ss id)))
+               (should (= (length ss) 3))
+               (should (claude-code-session-alive-p s1))
+               (should (eq (claude-code-session-buffer s1) buf))
+               (should (= (claude-code-session-pid s1) 4242))
+               ;; Alive status and name come from the live sessions file.
+               (should (equal (claude-code-session-status s1) "busy"))
+               (should (equal (claude-code-session-name s1) "proj-1"))
+               (should (equal (claude-code-session-title s1)
+                              "Understand the project layout")))))
+       (kill-buffer buf)))))
+
+(ert-deftest claude-code-test-process-usage ()
+  "Usage sums the pcpu/rss of a PID's whole subtree."
+  (let ((tree '((100 . ((ppid . 1) (pcpu . 1.0) (rss . 1000)))
+                (101 . ((ppid . 100) (pcpu . 2.0) (rss . 2000)))
+                (102 . ((ppid . 101) (pcpu . 3.0) (rss . 3000)))
+                (200 . ((ppid . 1) (pcpu . 9.0) (rss . 9000))))))
+    (cl-letf (((symbol-function 'list-system-processes)
+               (lambda () (mapcar #'car tree)))
+              ((symbol-function 'process-attributes)
+               (lambda (p) (alist-get p tree))))
+      (let ((usage (claude-code--process-usage 100)))
+        (should (equal (car usage) 6.0))
+        (should (= (cdr usage) 6000)))
+      ;; A non-integer pid yields nil.
+      (should (null (claude-code--process-usage nil))))))
+
+(ert-deftest claude-code-test-session-liveness ()
+  "Liveness is a three-way classification: alive, external, or dead."
+  (should (eq 'alive (claude-code--session-liveness
+                      (claude-code-session--create :alive-p t))))
+  ;; An unmanaged session whose process runs elsewhere is external, not dead.
+  (should (eq 'external (claude-code--session-liveness
+                         (claude-code-session--create
+                          :alive-p nil :external-p t))))
+  (should (eq 'dead (claude-code--session-liveness
+                     (claude-code-session--create :alive-p nil)))))
+
 (provide 'claude-code-tests)
 ;;; claude-code-tests.el ends here

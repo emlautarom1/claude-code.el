@@ -171,5 +171,149 @@ they are matched by their encoded-directory prefix."
                         result))))))))
     (nreverse result)))
 
+
+;;;; Model
+;;
+;; The rest of the package works with `claude-code-session' structs produced by
+;; `claude-code-sessions'.  A session has one of three liveness states
+;; (`claude-code--session-liveness'): "alive" when Emacs manages a live Ghostel
+;; instance for it, "external" when a `claude' process runs it outside Emacs, and
+;; "dead" when no process is running it at all.
+
+(cl-defstruct (claude-code-session (:constructor claude-code-session--create)
+                                   (:copier nil))
+  "A Claude Code session, alive or dead.
+ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live
+instance, in which case BUFFER holds the Ghostel buffer and PID its
+child process.  STATUS is Claude's native `busy'/`idle'/`waiting'
+string (alive sessions only), with WAITING-FOR set while waiting.
+EXTERNAL-P flags a session whose process is running outside Emacs,
+so it must not be resumed or deleted.  TITLE and
+LAST-PROMPT come from the transcript; WORKTREE-P marks worktree
+sessions; TRANSCRIPT is the absolute `.jsonl' path."
+  id cwd name status waiting-for alive-p pid buffer kind worktree-p
+  title last-prompt started-at transcript external-p)
+
+(defvar claude-code--managed (make-hash-table :test 'equal)
+  "Hash of session id -> plist describing an Emacs-managed instance.
+Keys: :buffer (the Ghostel buffer), :origin (project root the instance
+was launched from, normalised with `directory-file-name'), :cwd and
+:worktree.")
+
+(defun claude-code--session-process (buffer)
+  "Return BUFFER's live Ghostel process, or nil."
+  (and (buffer-live-p buffer)
+       (let ((proc (buffer-local-value 'ghostel--process buffer)))
+         (and (process-live-p proc) proc))))
+
+(defun claude-code--live-managed (project-root)
+  "Return an alist of (ID . BUFFER) for live managed instances of PROJECT-ROOT."
+  (let ((root (directory-file-name (expand-file-name project-root)))
+        (out '()))
+    (maphash (lambda (id plist)
+               (when (and (equal (plist-get plist :origin) root)
+                          (claude-code--session-process (plist-get plist :buffer)))
+                 (push (cons id (plist-get plist :buffer)) out)))
+             claude-code--managed)
+    out))
+
+(defun claude-code--pid-live-p (pid)
+  "Return non-nil when integer PID is a currently running process."
+  (and (integerp pid) (memql pid (list-system-processes)) t))
+
+(defun claude-code--session-liveness (session)
+  "Return SESSION's liveness: `alive', `external', or `dead'.
+`alive' means Emacs manages a live instance for it; `external' means a
+`claude' process is running it outside Emacs; `dead' means no process is
+running it at all.  This is the single classifier the view builds on."
+  (cond ((claude-code-session-alive-p session) 'alive)
+        ((claude-code-session-external-p session) 'external)
+        (t 'dead)))
+
+(defun claude-code-sessions (project-root)
+  "Return the list of `claude-code-session' structs for PROJECT-ROOT.
+A session is alive when Emacs manages a live instance for it.  Every other
+transcript on disk belongs to a session Emacs does not manage: when a
+`claude' process is still running it outside Emacs the session is flagged
+`claude-code-session-external-p' (an external session); otherwise no process
+is running it and it is dead."
+  (let* ((root (directory-file-name (expand-file-name project-root)))
+         (live (claude-code--live-status-table))
+         (managed (claude-code--live-managed root))
+         (transcripts (claude-code--project-transcripts root))
+         (transcript-of (lambda (id)
+                          (seq-find (lambda (d) (equal (plist-get d :id) id))
+                                    transcripts)))
+         (seen (make-hash-table :test 'equal))
+         (sessions '()))
+    (pcase-dolist (`(,id . ,buf) managed)
+      (let ((info (gethash id live))
+            (tr (funcall transcript-of id))
+            (reg (gethash id claude-code--managed)))
+        (puthash id t seen)
+        (push (claude-code-session--create
+               :id id :alive-p t :buffer buf
+               :pid (and (buffer-live-p buf)
+                         (buffer-local-value 'ghostel--pid buf))
+               :cwd (or (plist-get info :cwd) (plist-get reg :cwd))
+               :name (plist-get info :name)
+               :status (plist-get info :status)
+               :waiting-for (plist-get info :waiting-for)
+               :kind (plist-get info :kind)
+               :worktree-p (or (plist-get tr :worktree-p)
+                               (and (plist-get reg :worktree) t))
+               :title (plist-get tr :title)
+               :last-prompt (plist-get tr :last-prompt)
+               :transcript (plist-get tr :transcript))
+              sessions)))
+    (dolist (tr transcripts)
+      (let ((id (plist-get tr :id)))
+        (unless (gethash id seen)
+          (let ((info (gethash id live)))
+            (push (claude-code-session--create
+                   :id id :alive-p nil
+                   :external-p (and info
+                                    (claude-code--pid-live-p (plist-get info :pid)))
+                   :cwd (or (plist-get info :cwd) root)
+                   :worktree-p (plist-get tr :worktree-p)
+                   :title (plist-get tr :title)
+                   :last-prompt (plist-get tr :last-prompt)
+                   :transcript (plist-get tr :transcript))
+                  sessions)))))
+    (nreverse sessions)))
+
+(defun claude-code--process-snapshot ()
+  "Return (ATTRS . CHILDREN) hashes of the current process table.
+ATTRS maps a pid to its `process-attributes' alist; CHILDREN maps a
+pid to the list of its child pids.  Building this once lets several
+subtrees be summed without rescanning the system each time."
+  (let ((attrs (make-hash-table :test 'eql))
+        (children (make-hash-table :test 'eql)))
+    (dolist (p (list-system-processes))
+      (let ((a (process-attributes p)))
+        (when a
+          (puthash p a attrs)
+          (when-let* ((ppid (alist-get 'ppid a)))
+            (push p (gethash ppid children))))))
+    (cons attrs children)))
+
+(defun claude-code--process-usage (pid &optional snapshot)
+  "Return (CPU . RSS) summed over PID's process subtree, or nil.
+SNAPSHOT is a table from `claude-code--process-snapshot'; one is built
+when omitted.  CPU is a percentage that may be a lifetime average
+depending on the platform; RSS is in kibibytes."
+  (when (integerp pid)
+    (let* ((snap (or snapshot (claude-code--process-snapshot)))
+           (attrs (car snap))
+           (children (cdr snap))
+           (cpu 0.0) (rss 0) (stack (list pid)))
+      (while stack
+        (let* ((p (pop stack)) (a (gethash p attrs)))
+          (when a
+            (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
+            (cl-incf rss (or (alist-get 'rss a) 0))
+            (setq stack (nconc (copy-sequence (gethash p children)) stack)))))
+      (cons cpu rss))))
+
 (provide 'claude-code)
 ;;; claude-code.el ends here
