@@ -33,7 +33,8 @@ Append-only JSONL, one JSON object per line. This package extracts three things,
   - a user-set `{"type":"custom-title","customTitle":…}` line (this is what the `/rename` command writes), which **takes precedence** when present, otherwise
   - the last `{"type":"ai-title","aiTitle":…}` line — Claude rewrites its generated title as the conversation evolves, so the *last* one wins.
 - **Last prompt** — the `{"type":"last-prompt","lastPrompt":…}` line (a preview of the opening prompt).
-- **Worktree origin** — a `{"type":"worktree-state","worktreeSession":{…}}` line records `originalCwd` / `worktreePath` for worktree sessions.
+
+Worktree membership is **not** read from the transcript body. Although a `{"type":"worktree-state",…}` line does exist, the package derives worktree-ness (and the worktree name) purely from the encoded **directory name** — see [Worktrees](#worktrees) below.
 
 Reading the whole file in Emacs and scanning backward measured ≈15 ms on the largest real transcript (6 MB); the median (~130 KB) is sub-millisecond. A shell `tac | grep` pipeline was no faster and adds per-file subprocess overhead, so the in-process read + mtime cache is used.
 
@@ -50,7 +51,7 @@ The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code
 
 ## Worktrees
 
-`claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript therefore lands in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, tagging the latter as worktree sessions so they appear under the parent project.
+`claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript therefore lands in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, tagging the latter as worktree sessions so they appear under the parent project. The **worktree name** is the single path segment following that prefix, so a session's worktree directory can be rebuilt as `<root>/.claude/worktrees/<name>` even when it is dead (no live `sessions/*.json` to read a cwd from).
 
 ## Mapping an Emacs buffer to a session
 

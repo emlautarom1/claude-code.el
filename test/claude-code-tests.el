@@ -59,7 +59,7 @@ Clears the transcript cache first so tests do not leak into each other."
    (let* ((ts (claude-code--project-transcripts "/home/test/proj"))
           (by-id (lambda (id)
                    (seq-find (lambda (d) (equal (plist-get d :id) id)) ts))))
-     (should (= (length ts) 3))
+     (should (= (length ts) 4))
      (let ((s1 (funcall by-id "11111111-1111-4111-8111-111111111111")))
        ;; With no custom title, the LAST ai-title wins over earlier ones.
        (should (equal (plist-get s1 :title) "Understand the project layout"))
@@ -71,8 +71,13 @@ Clears the transcript cache first so tests do not leak into each other."
        (should (equal (plist-get s2 :last-prompt) "another task here")))
      (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
        (should (plist-get s3 :worktree-p))
+       ;; The worktree name is captured from the encoded-directory suffix.
+       (should (equal (plist-get s3 :worktree-name) "feat"))
        ;; A user custom title takes precedence over Claude's ai-title.
-       (should (equal (plist-get s3 :title) "Renamed worktree"))))))
+       (should (equal (plist-get s3 :title) "Renamed worktree")))
+     (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
+       (should (plist-get s5 :worktree-p))
+       (should (equal (plist-get s5 :worktree-name) "solo"))))))
 
 ;;;; Model
 
@@ -85,7 +90,7 @@ Clears the transcript cache first so tests do not leak into each other."
   (claude-code-tests--with-fixtures
    (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
      (let ((ss (claude-code-sessions "/home/test/proj")))
-       (should (= (length ss) 3))
+       (should (= (length ss) 4))
        (should-not (seq-some #'claude-code-session-alive-p ss))
        (let ((s1 (claude-code-tests--find-session
                   ss "11111111-1111-4111-8111-111111111111")))
@@ -96,7 +101,14 @@ Clears the transcript cache first so tests do not leak into each other."
        ;; The worktree transcript shows up under the parent project.
        (should (claude-code-session-worktree-p
                 (claude-code-tests--find-session
-                 ss "33333333-3333-4333-8333-333333333333")))))))
+                 ss "33333333-3333-4333-8333-333333333333")))
+       ;; A genuinely dead worktree (no sessions/*.json) still labels with its
+       ;; own worktree directory, not the parent project (regression: C1).
+       (let ((solo (claude-code-tests--find-session
+                    ss "55555555-5555-4555-8555-555555555555")))
+         (should (equal (claude-code-session-cwd solo)
+                        "/home/test/proj/.claude/worktrees/solo"))
+         (should (equal (claude-code--dir-label solo) "wt:solo")))))))
 
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
@@ -110,7 +122,7 @@ Clears the transcript cache first so tests do not leak into each other."
                       (lambda (_r) (list (cons id buf)))))
              (let* ((ss (claude-code-sessions "/home/test/proj"))
                     (s1 (claude-code-tests--find-session ss id)))
-               (should (= (length ss) 3))
+               (should (= (length ss) 4))
                (should (claude-code-session-alive-p s1))
                (should (eq (claude-code-session-buffer s1) buf))
                (should (= (claude-code-session-pid s1) 4242))
@@ -328,14 +340,14 @@ Clears the transcript cache first so tests do not leak into each other."
              (setq claude-code--project "/home/test/proj")
              (claude-code-sessions-refresh)
              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-               (should (string-match-p "Dead (3)" text))
+               (should (string-match-p "Dead (4)" text))
                (should (string-match-p "11111111" text))
                ;; The worktree session is listed under the parent project.
                (should (string-match-p "wt:feat" text)))
              (push "dead" claude-code--collapsed)
              (claude-code-sessions-refresh)
              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-               (should (string-match-p "Dead (3)" text))
+               (should (string-match-p "Dead (4)" text))
                (should-not (string-match-p "11111111" text)))))
        (kill-buffer buf)))))
 

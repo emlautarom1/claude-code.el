@@ -152,22 +152,25 @@ by FILE's modification time."
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :title, :last-prompt,
-:transcript (absolute file) and :worktree-p.  Worktrees are the
-transcript directories Claude creates under CWD's .claude/worktrees;
-they are matched by their encoded-directory prefix."
+:transcript (absolute file), :worktree-p and :worktree-name.  Worktrees
+are the transcript directories Claude creates under CWD's
+.claude/worktrees; they are matched by their encoded-directory prefix,
+and the worktree name is the single path segment following that prefix."
   (let* ((projects (expand-file-name "projects" claude-code-config-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
          (result '()))
     (when (file-directory-p projects)
       (dolist (name (directory-files projects nil nil t))
-        (let ((worktree-p (string-prefix-p wt-prefix name)))
+        (let* ((worktree-p (string-prefix-p wt-prefix name))
+               (wt-name (and worktree-p (substring name (length wt-prefix)))))
           (when (or (equal name base) worktree-p)
             (let ((dir (expand-file-name name projects)))
               (when (file-directory-p dir)
                 (dolist (file (directory-files dir t "\\.jsonl\\'"))
                   (push (append (claude-code--transcript-fields file)
-                                (list :transcript file :worktree-p worktree-p))
+                                (list :transcript file :worktree-p worktree-p
+                                      :worktree-name wt-name))
                         result))))))))
     (nreverse result)))
 
@@ -230,6 +233,14 @@ running it at all.  This is the single classifier the view builds on."
         ((claude-code-session-external-p session) 'external)
         (t 'dead)))
 
+(defun claude-code--worktree-cwd (tr root)
+  "Reconstruct the worktree cwd from transcript descriptor TR under ROOT, or nil.
+A dead worktree session has no live sessions file to read a cwd from, so its
+directory is rebuilt from ROOT and the descriptor's :worktree-name."
+  (when-let* ((name (plist-get tr :worktree-name)))
+    (directory-file-name
+     (expand-file-name (concat ".claude/worktrees/" name) root))))
+
 (defun claude-code-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
 A session is alive when Emacs manages a live instance for it.  Every other
@@ -255,7 +266,9 @@ is running it and it is dead."
                :id id :alive-p t :buffer buf
                :pid (and (buffer-live-p buf)
                          (buffer-local-value 'ghostel--pid buf))
-               :cwd (or (plist-get info :cwd) (plist-get reg :cwd))
+               :cwd (or (plist-get info :cwd)
+                        (claude-code--worktree-cwd tr root)
+                        (plist-get reg :cwd))
                :name (plist-get info :name)
                :status (plist-get info :status)
                :waiting-for (plist-get info :waiting-for)
@@ -274,7 +287,9 @@ is running it and it is dead."
                    :id id :alive-p nil
                    :external-p (and info
                                     (claude-code--pid-live-p (plist-get info :pid)))
-                   :cwd (or (plist-get info :cwd) root)
+                   :cwd (or (plist-get info :cwd)
+                            (claude-code--worktree-cwd tr root)
+                            root)
                    :worktree-p (plist-get tr :worktree-p)
                    :title (plist-get tr :title)
                    :last-prompt (plist-get tr :last-prompt)
