@@ -34,7 +34,7 @@ Append-only JSONL, one JSON object per line. This package extracts three things,
   - a user-set `{"type":"custom-title","customTitle":…}` line (this is what the `/rename` command writes), which **takes precedence** when present, otherwise
   - the last `{"type":"ai-title","aiTitle":…}` line — Claude rewrites its generated title as the conversation evolves, so the *last* one wins.
 - **Last prompt** — the `{"type":"last-prompt","lastPrompt":…}` line (a preview of the opening prompt).
-- **Worktree path** — for a worktree session, the lossless `worktreePath` from the `{"type":"worktree-state",…}` line. It is the session's real cwd (and hence its `wt:` label) even when the session is dead and has no live `sessions/*.json` to read a cwd from — see [Worktrees](#worktrees) below.
+- **Worktree path** — for a worktree session, the lossless `worktreePath` from the `{"type":"worktree-state",…}` line. It is the session's real cwd (and hence the name shown in the *Worktree* column) even when the session is dead and has no live `sessions/*.json` to read a cwd from — see [Worktrees](#worktrees) below.
 
 Worktree *membership* (whether a transcript belongs to a worktree at all) is derived from the encoded **directory name**, not the transcript body; but the worktree's real path is read from the transcript, never by decoding the lossy directory name.
 

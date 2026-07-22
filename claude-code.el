@@ -573,11 +573,12 @@ rather than adding caching or throttling machinery."
     ('external (cons "external" 'font-lock-comment-face))
     ('dead (cons "dead" 'shadow))))
 
-(defun claude-code--dir-label (session)
-  "Return the directory label for SESSION, tagging worktrees."
-  (let ((cwd (claude-code-session-cwd session)))
-    (concat (if (claude-code-session-worktree-p session) "wt:" "")
-            (if cwd (file-name-nondirectory (directory-file-name cwd)) ""))))
+(defun claude-code--worktree-label (session)
+  "Return the worktree label for SESSION, empty for main-tree sessions."
+  (if (claude-code-session-worktree-p session)
+      (let ((cwd (claude-code-session-cwd session)))
+        (if cwd (file-name-nondirectory (directory-file-name cwd)) ""))
+    ""))
 
 (defun claude-code--session-display-name (session)
   "Return SESSION's display name.
@@ -599,7 +600,7 @@ USAGE is (CPU . RSS) or nil."
             (claude-code--session-display-name session)
             (propertize (substring (claude-code-session-id session) 0 8)
                         'face 'shadow)
-            (claude-code--dir-label session)
+            (claude-code--worktree-label session)
             (if usage (format "%.1f" (car usage)) "")
             (if usage (format "%dM" (/ (cdr usage) 1024)) ""))))
 
@@ -847,7 +848,7 @@ latter case the row's session determines the enclosing group."
               (vector '("Status" 9 t)
                       '("Name" 26 t)
                       '("Id" 9 t)
-                      '("Dir" 22 t)
+                      '("Worktree" 14 t)
                       (list "CPU%" 6 (claude-code--num-sorter 'cpu) :right-align t)
                       (list "Mem" 8 (claude-code--num-sorter 'mem) :right-align t)))
   (setq-local tabulated-list-sort-key '("Name" . nil))

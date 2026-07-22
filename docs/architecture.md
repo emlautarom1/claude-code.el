@@ -49,6 +49,6 @@ The struct holds several raw name sources (the live `name`, the transcript `titl
 1. **Custom `tabulated-list-mode`**, not literal `ibuffer.el` (which is tied to buffer objects and cannot represent dead sessions).
 2. **IDE/MCP integration is deferred** — v1 is orchestration only, so the only dependency is Ghostel (a WebSocket IDE server would pull in `websocket`).
 3. **Alive = Emacs-managed only**; all dead sessions are read from disk.
-4. **Worktree sessions appear under their parent project**, tagged `wt:`.
+4. **Worktree sessions appear under their parent project**, with the worktree directory's name in the *Worktree* column.
 5. **Native Claude vocabulary** (`busy`/`idle`/`waiting`) is surfaced verbatim.
 6. **Storage internals are quarantined** in the storage-adapter section.

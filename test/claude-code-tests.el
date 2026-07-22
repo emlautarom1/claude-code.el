@@ -133,7 +133,7 @@ features still load normally."
                     ss "55555555-5555-4555-8555-555555555555")))
          (should (equal (claude-code-session-cwd solo)
                         "/home/test/proj/.claude/worktrees/my.feat"))
-         (should (equal (claude-code--dir-label solo) "wt:my.feat")))))))
+         (should (equal (claude-code--worktree-label solo) "my.feat")))))))
 
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
@@ -432,7 +432,7 @@ features still load normally."
     ;; No name -> title.
     (should (equal (aref v 1) "The Title"))
     (should (equal (substring-no-properties (aref v 2)) "abcdef01"))
-    (should (equal (aref v 3) "proj"))
+    (should (equal (aref v 3) ""))
     (should (equal (aref v 4) ""))
     (should (equal (aref v 5) "")))
   (let* ((s (claude-code-session--create
@@ -443,7 +443,7 @@ features still load normally."
     (should (equal (substring-no-properties (aref v 0)) "busy"))
     (should (eq (get-text-property 0 'face (aref v 0)) 'warning))
     (should (equal (aref v 1) "worker"))
-    (should (equal (aref v 3) "wt:feat"))
+    (should (equal (aref v 3) "feat"))
     (should (equal (aref v 4) "12.5"))
     (should (equal (aref v 5) "200M"))))
 
@@ -510,7 +510,7 @@ features still load normally."
                (should (string-match-p "Dead (4)" text))
                (should (string-match-p "11111111" text))
                ;; The worktree session is listed under the parent project.
-               (should (string-match-p "wt:feat" text)))
+               (should (string-match-p "feat" text)))
              (push "dead" claude-code--collapsed)
              (claude-code-sessions-refresh)
              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
