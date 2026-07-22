@@ -146,26 +146,28 @@ session even when it is dead and has no live sessions file to read."
             (and (hash-table-p ws) (gethash "worktreePath" ws))))))
 
 (defun claude-code--transcript-fields (file)
-  "Return a plist of (:id :title :last-prompt :worktree-path) for transcript FILE.
-The id is the file's base name (the session id).  Results are cached
-by FILE's modification time."
+  "Return a plist of transcript FILE's cached fields.
+The keys are :id (FILE's base name, the session id), :title, :last-prompt,
+:worktree-path, and :last-active (FILE's modification time).  Cached by FILE's
+modification time."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
         (cdr cached)
       (let ((fields (cons :id (cons (file-name-base file)
-                                    (claude-code--read-transcript-fields file)))))
+                                    (append (claude-code--read-transcript-fields file)
+                                            (list :last-active mtime))))))
         (puthash file (cons mtime fields) claude-code--transcript-cache)
         fields))))
 
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :title, :last-prompt,
-:worktree-path, :transcript (absolute file) and :worktree-p.  Worktrees are
-the transcript directories Claude creates under CWD's .claude/worktrees; they
-are matched by their encoded-directory prefix.  A worktree's real cwd comes
-from the lossless :worktree-path in its transcript, never by decoding the
-encoded (lossy) directory name."
+:worktree-path, :last-active, :transcript (absolute file) and :worktree-p.
+Worktrees are the transcript directories Claude creates under CWD's
+.claude/worktrees; they are matched by their encoded-directory prefix.  A
+worktree's real cwd comes from the lossless :worktree-path in its transcript,
+never by decoding the encoded (lossy) directory name."
   (let* ((projects (expand-file-name "projects" claude-code-config-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
@@ -202,9 +204,10 @@ buffer and PID its child process.  STATUS is Claude's native
 while waiting.  EXTERNAL-P flags a session whose process is running outside
 Emacs, so it must not be resumed or deleted.  TITLE and LAST-PROMPT come from
 the transcript; WORKTREE-P marks worktree sessions; TRANSCRIPT is the absolute
-`.jsonl' path."
+`.jsonl' path.  LAST-ACTIVE is the transcript's modification time, the
+session's last activity."
   id cwd name status waiting-for alive-p pid buffer worktree-p
-  title last-prompt transcript external-p)
+  title last-prompt transcript external-p last-active)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
@@ -292,7 +295,8 @@ is running it and it is dead."
                                (and (plist-get reg :worktree) t))
                :title (plist-get tr :title)
                :last-prompt (plist-get tr :last-prompt)
-               :transcript (plist-get tr :transcript))
+               :transcript (plist-get tr :transcript)
+               :last-active (plist-get tr :last-active))
               sessions)))
     (dolist (tr transcripts)
       (let ((id (plist-get tr :id)))
@@ -312,7 +316,8 @@ is running it and it is dead."
                    :worktree-p (plist-get tr :worktree-p)
                    :title (plist-get tr :title)
                    :last-prompt (plist-get tr :last-prompt)
-                   :transcript (plist-get tr :transcript))
+                   :transcript (plist-get tr :transcript)
+                   :last-active (plist-get tr :last-active))
                   sessions)))))
     (nreverse sessions)))
 
@@ -592,17 +597,34 @@ one), the opening prompt, and finally the short session id."
       (claude-code-session-last-prompt session)
       (substring (claude-code-session-id session) 0 8)))
 
+(defun claude-code--format-relative-time (time &optional now)
+  "Return a compact age string for TIME relative to NOW.
+NOW defaults to the current time.  The empty string is returned when TIME is
+nil."
+  (if (null time)
+      ""
+    (let ((secs (max 0 (floor (- (float-time (or now (current-time)))
+                                 (float-time time))))))
+      (cond ((< secs 60) (format "%ds" secs))
+            ((< secs 3600) (format "%dm" (/ secs 60)))
+            ((< secs 86400) (format "%dh" (/ secs 3600)))
+            ((< secs 604800) (format "%dd" (/ secs 86400)))
+            (t (format "%dw" (/ secs 604800)))))))
+
 (defun claude-code--format-session (session usage)
   "Return the column vector for SESSION.
 USAGE is (CPU . RSS) or nil."
   (let ((status (claude-code--status-display session)))
     (vector (propertize (car status) 'face (cdr status))
-            (claude-code--session-display-name session)
+            (propertize (claude-code--format-relative-time
+                         (claude-code-session-last-active session))
+                        'face 'shadow)
             (propertize (substring (claude-code-session-id session) 0 8)
                         'face 'shadow)
             (claude-code--worktree-label session)
             (if usage (format "%.1f" (car usage)) "")
-            (if usage (format "%dM" (/ (cdr usage) 1024)) ""))))
+            (if usage (format "%dM" (/ (cdr usage) 1024)) "")
+            (claude-code--session-display-name session))))
 
 ;;;;; Grouping
 
@@ -641,6 +663,20 @@ mode; only alive sessions split by status when grouping by status."
           (vb (gethash (car b) claude-code--usage-table)))
       (< (or (pcase field ('cpu (car va)) ('mem (cdr va))) -1)
          (or (pcase field ('cpu (car vb)) ('mem (cdr vb))) -1)))))
+
+(defun claude-code--entry-time (entry)
+  "Return the last-active time of ENTRY's session as a float, 0 when unknown.
+ENTRY is a tabulated-list entry whose car is the session id, looked up in
+`claude-code--session-table'."
+  (if-let* ((session (gethash (car entry) claude-code--session-table))
+            (time (claude-code-session-last-active session)))
+      (float-time time)
+    0))
+
+(defun claude-code--time-less-p (a b)
+  "Order tabulated-list entries A and B by their session's last-active time.
+A session without a known time sorts as oldest."
+  (< (claude-code--entry-time a) (claude-code--entry-time b)))
 
 (defun claude-code--tabulated-groups ()
   "Return the grouped rows for the current view, honouring collapse state."
@@ -846,12 +882,16 @@ latter case the row's session determines the enclosing group."
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-format
               (vector '("Status" 9 t)
-                      '("Name" 26 t)
+                      (list "Active" 8 #'claude-code--time-less-p :right-align t)
                       '("Id" 9 t)
                       '("Worktree" 14 t)
                       (list "CPU%" 6 (claude-code--num-sorter 'cpu) :right-align t)
-                      (list "Mem" 8 (claude-code--num-sorter 'mem) :right-align t)))
-  (setq-local tabulated-list-sort-key '("Name" . nil))
+                      (list "Mem" 8 (claude-code--num-sorter 'mem) :right-align t)
+                      ;; Name is last so it is never truncated and fills the
+                      ;; remaining window width.
+                      '("Name" 26 t)))
+  ;; Reverse (`t') so the most recently active session heads each group.
+  (setq-local tabulated-list-sort-key '("Active" . t))
   (setq-local tabulated-list-entries #'ignore)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
   (tabulated-list-init-header)

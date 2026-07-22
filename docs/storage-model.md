@@ -28,13 +28,14 @@ Liveness is a plain `pid ∈ list-system-processes` check; the `procStart` field
 
 ## Transcripts — `projects/<encoded-cwd>/<sessionId>.jsonl`
 
-Append-only JSONL, one JSON object per line. This package extracts three things, by scanning **backward** from the end of the file (the values of interest sit near the tail), cached by file modification time in `claude-code--transcript-cache`:
+Append-only JSONL, one JSON object per line. This package reads **four** fields, all cached by file modification time in `claude-code--transcript-cache`. The first three are extracted by scanning **backward** from the end of the file (the values of interest sit near the tail); the fourth is the file's mtime itself:
 
 - **Title** — a session's display title, resolved from two possible lines:
   - a user-set `{"type":"custom-title","customTitle":…}` line (this is what the `/rename` command writes), which **takes precedence** when present, otherwise
   - the last `{"type":"ai-title","aiTitle":…}` line — Claude rewrites its generated title as the conversation evolves, so the *last* one wins.
 - **Last prompt** — the `{"type":"last-prompt","lastPrompt":…}` line (a preview of the opening prompt).
 - **Worktree path** — for a worktree session, the lossless `worktreePath` from the `{"type":"worktree-state",…}` line. It is the session's real cwd (and hence the name shown in the *Worktree* column) even when the session is dead and has no live `sessions/*.json` to read a cwd from — see [Worktrees](#worktrees) below.
+- **Last-active time** — the transcript file's modification time (`file-attribute-modification-time`), already computed as the cache key above. Because the transcript is append-only, its mtime marks the session's last activity and is surfaced on every session (alive, external, or dead — a dead session's transcript still exists on disk). It drives the view's *Active* column and default most-recent-first sort. This is filesystem metadata, not a field Claude writes, so operations that rewrite mtimes (a fresh `git` checkout, `cp` without `-p`) would reset it — irrelevant for the live `~/.claude` this package watches.
 
 Worktree *membership* (whether a transcript belongs to a worktree at all) is derived from the encoded **directory name**, not the transcript body; but the worktree's real path is read from the transcript, never by decoding the lossy directory name.
 

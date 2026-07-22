@@ -102,6 +102,19 @@ features still load normally."
        (should (equal (plist-get s5 :worktree-path)
                       "/home/test/proj/.claude/worktrees/my.feat"))))))
 
+(ert-deftest claude-code-test-transcript-fields-last-active ()
+  "`:last-active' is the transcript file's modification time."
+  (let ((file (make-temp-file "cc-transcript" nil ".jsonl"))
+        (mtime 1800000000))
+    (unwind-protect
+        (progn
+          (clrhash claude-code--transcript-cache)
+          (set-file-times file mtime)
+          (should (time-equal-p
+                   (plist-get (claude-code--transcript-fields file) :last-active)
+                   mtime)))
+      (delete-file file))))
+
 ;;;; Model
 
 (defun claude-code-tests--find-session (sessions id)
@@ -423,18 +436,21 @@ features still load normally."
                  "external")))
 
 (ert-deftest claude-code-test-format-session ()
-  "Columns fall back sensibly and render usage."
+  "Columns fall back sensibly and render usage.
+Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
   (let* ((s (claude-code-session--create
              :id "abcdef01-0000-4000-8000-000000000000"
              :alive-p nil :title "The Title" :cwd "/home/x/proj"))
          (v (claude-code--format-session s nil)))
     (should (equal (substring-no-properties (aref v 0)) "dead"))
-    ;; No name -> title.
-    (should (equal (aref v 1) "The Title"))
+    ;; No last-active -> empty Active cell.
+    (should (equal (substring-no-properties (aref v 1)) ""))
     (should (equal (substring-no-properties (aref v 2)) "abcdef01"))
     (should (equal (aref v 3) ""))
     (should (equal (aref v 4) ""))
-    (should (equal (aref v 5) "")))
+    (should (equal (aref v 5) ""))
+    ;; No name -> title, shown in the final (Name) column.
+    (should (equal (aref v 6) "The Title")))
   (let* ((s (claude-code-session--create
              :id "11112222-0000-4000-8000-000000000000"
              :alive-p t :status "busy" :name "worker"
@@ -442,10 +458,37 @@ features still load normally."
          (v (claude-code--format-session s '(12.5 . 204800))))
     (should (equal (substring-no-properties (aref v 0)) "busy"))
     (should (eq (get-text-property 0 'face (aref v 0)) 'warning))
-    (should (equal (aref v 1) "worker"))
     (should (equal (aref v 3) "feat"))
     (should (equal (aref v 4) "12.5"))
-    (should (equal (aref v 5) "200M"))))
+    (should (equal (aref v 5) "200M"))
+    (should (equal (aref v 6) "worker"))))
+
+(ert-deftest claude-code-test-format-relative-time ()
+  "Relative ages render compactly; nil renders empty."
+  (let ((now 1800000000))
+    (should (equal "" (claude-code--format-relative-time nil now)))
+    (should (equal "0s" (claude-code--format-relative-time now now)))
+    (should (equal "45s" (claude-code--format-relative-time (- now 45) now)))
+    (should (equal "1m" (claude-code--format-relative-time (- now 90) now)))
+    (should (equal "2h" (claude-code--format-relative-time (- now 7200) now)))
+    (should (equal "3d" (claude-code--format-relative-time
+                         (- now (* 3 86400)) now)))
+    (should (equal "2w" (claude-code--format-relative-time
+                         (- now (* 14 86400)) now)))))
+
+(ert-deftest claude-code-test-time-less-p ()
+  "The Active-column sorter orders older sessions before newer ones."
+  (let ((claude-code--session-table (make-hash-table :test 'equal)))
+    (puthash "old" (claude-code-session--create :id "old" :last-active 100)
+             claude-code--session-table)
+    (puthash "new" (claude-code-session--create :id "new" :last-active 200)
+             claude-code--session-table)
+    (puthash "none" (claude-code-session--create :id "none")
+             claude-code--session-table)
+    (should (claude-code--time-less-p '("old" []) '("new" [])))
+    (should-not (claude-code--time-less-p '("new" []) '("old" [])))
+    ;; A session without a time sorts as oldest.
+    (should (claude-code--time-less-p '("none" []) '("old" [])))))
 
 (ert-deftest claude-code-test-session-display-name ()
   "The display name draws on one ordered set of sources."
