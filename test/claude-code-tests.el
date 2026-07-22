@@ -534,7 +534,7 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
                  '("waiting" "busy" "idle" "external" "dead"))))
 
 (ert-deftest claude-code-test-view-renders-and-collapses ()
-  "The view prints group headers and rows, and collapsing hides rows."
+  "The view prints group headers, folds Dead by default, and toggles rows."
   (claude-code-tests--with-fixtures
    (let ((claude-code-refresh-interval nil)
          (buf (get-buffer-create " *cc-view-test*")))
@@ -549,11 +549,20 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
              (claude-code-sessions-mode)
              (setq claude-code--project "/home/test/proj")
              (claude-code-sessions-refresh)
+             ;; The Dead group starts folded: its header shows but no rows do.
+             (should (member "dead" claude-code--collapsed))
+             (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+               (should (string-match-p "Dead (4)" text))
+               (should-not (string-match-p "11111111" text)))
+             ;; Expanding it reveals every dead row.
+             (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
+             (claude-code-sessions-refresh)
              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
                (should (string-match-p "Dead (4)" text))
                (should (string-match-p "11111111" text))
                ;; The worktree session is listed under the parent project.
                (should (string-match-p "feat" text)))
+             ;; Folding it again hides the rows.
              (push "dead" claude-code--collapsed)
              (claude-code-sessions-refresh)
              (let ((text (buffer-substring-no-properties (point-min) (point-max))))

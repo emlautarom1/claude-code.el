@@ -554,7 +554,9 @@ rather than adding caching or throttling machinery."
 (defvar-local claude-code-group-by 'status
   "How the sessions view groups rows: `status' or `state'.")
 (defvar-local claude-code--collapsed nil
-  "List of collapsed group names in a sessions view.")
+  "List of collapsed group names in a sessions view.
+`claude-code-sessions-mode' seeds this with the \"dead\" group so it starts
+folded.")
 (defvar-local claude-code--marks nil
   "List of marked session ids in a sessions view.")
 (defvar-local claude-code--session-table nil
@@ -879,6 +881,9 @@ latter case the row's session determines the enclosing group."
   "Major mode listing the Claude Code sessions of a project."
   (setq-local claude-code--session-table (make-hash-table :test 'equal))
   (setq-local claude-code--usage-table (make-hash-table :test 'equal))
+  ;; Dead sessions are folded by default.  A fresh list keeps `toggle-group's
+  ;; destructive `delete' from mutating shared state.
+  (setq-local claude-code--collapsed (list "dead"))
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-format
               (vector '("Status" 9 t)
