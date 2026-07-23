@@ -24,13 +24,13 @@ All knowledge of Claude's on-disk formats is quarantined in the *Storage adapter
 
 `claude-code-session` is a `cl-defstruct` describing a session. `claude-code-sessions PROJECT-ROOT` builds the list, and every row falls into one of three liveness states (`claude-code--session-liveness`):
 
-- **Alive** = one entry per live *managed* instance (`claude-code--managed` registry ∩ live Ghostel process), keyed by the UUID we assigned at spawn. Status/name come from the live `sessions/*.json` entry; title/last-prompt from the transcript.
+- **Alive** = one entry per live *managed* instance (`claude-code--managed` registry ∩ live Ghostel process), keyed by the UUID we assigned at spawn. Status comes from the live `sessions/*.json` entry; title/last-prompt (and hence the display name) from the transcript.
 - **External** = a transcript for the project that is *not* an Emacs-managed instance but whose `sessions/*.json` PID is still alive — i.e. a `claude` running the session in some other terminal. It is flagged `external-p`, which blocks resume and delete, and it gets its own group in the view. It is deliberately **not** called "dead": a process is handling it.
 - **Dead** = every remaining transcript — no process, inside or outside Emacs, is running it. Only dead sessions can be resumed or deleted.
 
 This realises the decision that **aliveness is Emacs-managed only**: a session is alive exactly when Emacs holds its terminal, which also guarantees focus and send-text always work on alive rows.
 
-The struct holds several raw name sources (the live `name`, the transcript `title`, the last prompt), but the *displayed* name is computed in exactly one place — `claude-code--session-display-name` — and is never cached, so it always reflects Claude's own data (including a `/rename`) and cannot drift.
+The struct holds the transcript's raw name sources (the `title` and the last prompt), and the *displayed* name is computed in exactly one place — `claude-code--session-display-name` — and is never cached, so it always reflects the transcript (including a `/rename`, which lands as a `custom-title`) and cannot drift.
 
 ### Registry lifecycle
 

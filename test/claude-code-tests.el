@@ -62,7 +62,8 @@ features still load normally."
      (should (= (hash-table-count table) 4))
      (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
        (should (equal (plist-get s1 :status) "busy"))
-       (should (equal (plist-get s1 :name) "proj-1"))
+       ;; The parser exposes only :pid, :cwd, :status and :waiting-for.
+       (should (null (plist-get s1 :name)))
        (should (= (plist-get s1 :pid) 1001)))
      (let ((s3 (gethash "33333333-3333-4333-8333-333333333333" table)))
        (should (equal (plist-get s3 :status) "waiting"))
@@ -164,10 +165,12 @@ features still load normally."
                (should (claude-code-session-alive-p s1))
                (should (eq (claude-code-session-buffer s1) buf))
                (should (= (claude-code-session-pid s1) 4242))
-               ;; Alive status and name come from the live sessions file.
+               ;; Alive status comes from the live sessions file; the display
+               ;; name comes from the transcript title.
                (should (equal (claude-code-session-status s1) "busy"))
-               (should (equal (claude-code-session-name s1) "proj-1"))
                (should (equal (claude-code-session-title s1)
+                              "Understand the project layout"))
+               (should (equal (claude-code--session-display-name s1)
                               "Understand the project layout")))))
        (kill-buffer buf)))))
 
@@ -228,27 +231,23 @@ features still load normally."
          (should-not (claude-code-session-alive-p s))
          (should (claude-code-session-external-p s))
          (should (eq 'external (claude-code--session-liveness s)))
-         ;; An external session surfaces Claude's live name from its sessions
-         ;; file, in preference to its transcript title.
-         (should (equal (claude-code-session-name s) "proj-2"))
-         (should (equal (claude-code--session-display-name s) "proj-2"))))
-     ;; With no such live pid the same session is dead; its sessions file is
-     ;; still on disk (a crash leftover), so the recorded name is kept.
+         ;; The display name comes from the transcript (its `custom-title'),
+         ;; regardless of liveness.
+         (should (equal (claude-code--session-display-name s)
+                        "My renamed session"))))
      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
        (let ((s (claude-code-tests--find-session
                  (claude-code-sessions "/home/test/proj")
                  "22222222-2222-4222-8222-222222222222")))
          (should-not (claude-code-session-external-p s))
          (should (eq 'dead (claude-code--session-liveness s)))
-         (should (equal (claude-code-session-name s) "proj-2"))))
-     ;; A dead session with no sessions file at all has no name and falls back
-     ;; to its transcript title.
+         (should (equal (claude-code--session-display-name s)
+                        "My renamed session"))))
      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
        (let ((s (claude-code-tests--find-session
                  (claude-code-sessions "/home/test/proj")
                  "55555555-5555-4555-8555-555555555555")))
          (should (eq 'dead (claude-code--session-liveness s)))
-         (should-not (claude-code-session-name s))
          (should (equal (claude-code--session-display-name s)
                         "Dotted worktree")))))))
 
@@ -261,8 +260,8 @@ features still load normally."
   (should (equal (claude-code--build-args :session-id "ID" :prompt "hello")
                  '("--session-id" "ID" "hello")))
   (should (equal (claude-code--build-args
-                  :session-id "ID" :name "n" :model "opus" :prompt "hi")
-                 '("--session-id" "ID" "-n" "n" "--model" "opus" "hi")))
+                  :session-id "ID" :model "opus" :prompt "hi")
+                 '("--session-id" "ID" "--model" "opus" "hi")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree t)
                  '("--session-id" "ID" "-w")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree "feat")
@@ -274,7 +273,7 @@ features still load normally."
 (ert-deftest claude-code-test-build-args-resume ()
   "Resume returns only \"-r ID\" and ignores new-session arguments."
   (should (equal (claude-code--build-args :resume "ID") '("-r" "ID")))
-  (should (equal (claude-code--build-args :resume "ID" :prompt "x" :name "n")
+  (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus")
                  '("-r" "ID"))))
 
 (ert-deftest claude-code-test-new-uuid ()
@@ -285,11 +284,28 @@ features still load normally."
     (should-not (equal (claude-code--new-uuid) (claude-code--new-uuid)))))
 
 (ert-deftest claude-code-test-default-buffer-name ()
-  "Buffer names fall back to the project directory name."
-  (should (equal (claude-code--default-buffer-name "/home/x/proj" "nice")
-                 "*claude:nice*"))
-  (should (equal (claude-code--default-buffer-name "/home/x/proj" nil)
-                 "*claude:proj*")))
+  "The pre-title seed name is derived from the project directory name."
+  (should (equal (claude-code--default-buffer-name "/home/x/proj")
+                 "*claude: proj*"))
+  ;; A trailing slash adds no trailing hyphen/segment.
+  (should (equal (claude-code--default-buffer-name "/home/x/proj/")
+                 "*claude: proj*")))
+
+(ert-deftest claude-code-test-ghostel-buffer-name ()
+  "The Ghostel title tracker names the buffer after the terminal title."
+  (should (equal (claude-code--ghostel-buffer-name "My title")
+                 "*claude: My title*"))
+  ;; An empty or absent title declines the rename (nil), as Ghostel expects.
+  (should (null (claude-code--ghostel-buffer-name "")))
+  (should (null (claude-code--ghostel-buffer-name nil))))
+
+(ert-deftest claude-code-test-install-buffer-name-tracking ()
+  "Instrumenting a buffer makes Ghostel name it via the Claude title tracker."
+  (with-temp-buffer
+    (claude-code--install-buffer-name-tracking (current-buffer))
+    (should (local-variable-p 'ghostel-buffer-name-function))
+    (should (eq ghostel-buffer-name-function
+                #'claude-code--ghostel-buffer-name))))
 
 (ert-deftest claude-code-test-on-exit-unregisters ()
   "Process exit removes the instance's registry entry."
@@ -449,11 +465,11 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
     (should (equal (aref v 3) ""))
     (should (equal (aref v 4) ""))
     (should (equal (aref v 5) ""))
-    ;; No name -> title, shown in the final (Name) column.
+    ;; The transcript title is shown in the final (Name) column.
     (should (equal (aref v 6) "The Title")))
   (let* ((s (claude-code-session--create
              :id "11112222-0000-4000-8000-000000000000"
-             :alive-p t :status "busy" :name "worker"
+             :alive-p t :status "busy" :title "Worker task"
              :worktree-p t :cwd "/home/x/proj/.claude/worktrees/feat"))
          (v (claude-code--format-session s '(12.5 . 204800))))
     (should (equal (substring-no-properties (aref v 0)) "busy"))
@@ -461,7 +477,7 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
     (should (equal (aref v 3) "feat"))
     (should (equal (aref v 4) "12.5"))
     (should (equal (aref v 5) "200M"))
-    (should (equal (aref v 6) "worker"))))
+    (should (equal (aref v 6) "Worker task"))))
 
 (ert-deftest claude-code-test-format-relative-time ()
   "Relative ages render compactly; nil renders empty."
@@ -491,14 +507,8 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
     (should (claude-code--time-less-p '("none" []) '("old" [])))))
 
 (ert-deftest claude-code-test-session-display-name ()
-  "The display name draws on one ordered set of sources."
-  ;; The live name wins over everything.
-  (should (equal "chosen"
-                 (claude-code--session-display-name
-                  (claude-code-session--create
-                   :id "abcdef01-0000-4000-8000-000000000000"
-                   :name "chosen" :title "t" :last-prompt "p"))))
-  ;; Then the transcript title, then the prompt, then the short id.
+  "The display name draws on one ordered set of transcript sources."
+  ;; The transcript title wins over the prompt and the id.
   (should (equal "t" (claude-code--session-display-name
                       (claude-code-session--create
                        :id "abcdef01-0000-4000-8000-000000000000"
@@ -624,11 +634,13 @@ tests themselves run inside a Claude Code session."
     (unwind-protect
         (claude-code-tests--with-top-level-env
          (setq buffer (claude-code-spawn
-                       root :prompt "Respond with the single word: pong"
-                       :name "ert-integration"))
+                       root :prompt "Respond with the single word: pong"))
          (maphash (lambda (k v) (when (eq (plist-get v :buffer) buffer) (setq id k)))
                   claude-code--managed)
          (should id)
+         ;; The title tracker survives `ghostel-exec's `ghostel-mode' switch.
+         (should (eq (buffer-local-value 'ghostel-buffer-name-function buffer)
+                     #'claude-code--ghostel-buffer-name))
          (setq pid (buffer-local-value 'ghostel--pid buffer))
          (should (claude-code--pid-live-p pid))
          ;; A live status only appears once the child writes its sessions file,

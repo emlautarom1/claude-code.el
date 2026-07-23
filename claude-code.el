@@ -40,6 +40,7 @@
 (defvar ghostel--pid)
 (defvar ghostel--process)
 (defvar ghostel-exit-functions)
+(defvar ghostel-buffer-name-function)
 
 
 ;;;; Customization
@@ -83,7 +84,7 @@ session data instead."
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
 The table is keyed by session id; each value is a plist with keys
-:pid, :cwd, :name, :status and :waiting-for.  This is pure parsing of
+:pid, :cwd, :status and :waiting-for.  This is pure parsing of
 the files Claude writes for every running instance; process liveness
 is decided by the caller.  A missing status field yields a nil :status
 rather than an error."
@@ -100,7 +101,6 @@ rather than an error."
               (puthash id
                        (list :pid (gethash "pid" obj)
                              :cwd (gethash "cwd" obj)
-                             :name (gethash "name" obj)
                              :status (gethash "status" obj)
                              :waiting-for (gethash "waitingFor" obj))
                        table))))))
@@ -196,17 +196,17 @@ never by decoding the encoded (lossy) directory name."
 (cl-defstruct (claude-code-session (:constructor claude-code-session--create)
                                    (:copier nil))
   "A Claude Code session, alive or dead.
-ID is the session UUID and CWD its absolute working directory.  NAME is
-Claude's display name, read from the live sessions file.  ALIVE-P is non-nil
-when Emacs manages a live instance, in which case BUFFER holds the Ghostel
-buffer and PID its child process.  STATUS is Claude's native
+ID is the session UUID and CWD its absolute working directory.  ALIVE-P is
+non-nil when Emacs manages a live instance, in which case BUFFER holds the
+Ghostel buffer and PID its child process.  STATUS is Claude's native
 `busy'/`idle'/`waiting' string (alive sessions only), with WAITING-FOR set
 while waiting.  EXTERNAL-P flags a session whose process is running outside
 Emacs, so it must not be resumed or deleted.  TITLE and LAST-PROMPT come from
-the transcript; WORKTREE-P marks worktree sessions; TRANSCRIPT is the absolute
-`.jsonl' path.  LAST-ACTIVE is the transcript's modification time, the
-session's last activity."
-  id cwd name status waiting-for alive-p pid buffer worktree-p
+the transcript and, via `claude-code--session-display-name', are the session's
+only display-name sources; WORKTREE-P marks worktree sessions; TRANSCRIPT is
+the absolute `.jsonl' path.  LAST-ACTIVE is the transcript's modification time,
+the session's last activity."
+  id cwd status waiting-for alive-p pid buffer worktree-p
   title last-prompt transcript external-p last-active)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
@@ -288,7 +288,6 @@ is running it and it is dead."
                :cwd (or (plist-get info :cwd)
                         (plist-get tr :worktree-path)
                         (plist-get reg :cwd))
-               :name (plist-get info :name)
                :status (plist-get info :status)
                :waiting-for (plist-get info :waiting-for)
                :worktree-p (or (plist-get tr :worktree-p)
@@ -306,10 +305,6 @@ is running it and it is dead."
                    :id id :alive-p nil
                    :external-p (and info
                                     (claude-code--pid-live-p (plist-get info :pid)))
-                   ;; An external session has a live sessions file, so surface
-                   ;; Claude's own display name; a dead one has no info and
-                   ;; falls back to its transcript title/prompt.
-                   :name (plist-get info :name)
                    :cwd (or (plist-get info :cwd)
                             (plist-get tr :worktree-path)
                             root)
@@ -358,7 +353,7 @@ depending on the platform; RSS is in kibibytes."
 ;;;; Operations
 
 (cl-defun claude-code--build-args
-    (&key session-id resume prompt name worktree model)
+    (&key session-id resume prompt worktree model)
   "Build the argument list for the `claude' CLI.
 
 When RESUME is non-nil it is a session id to resume, and it is returned as
@@ -366,17 +361,14 @@ When RESUME is non-nil it is a session id to resume, and it is returned as
 
 Otherwise a new session is described:
 SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
-its session up front.  NAME sets the display name (\"-n\").  WORKTREE, when t,
-requests a new worktree (\"-w\"); when a string, names it (\"-w NAME\").  MODEL
-sets \"--model\".  PROMPT, when a non-empty string, is appended as the trailing
-positional argument."
+its session up front.  WORKTREE, when t, requests a new worktree (\"-w\"); when
+a string, names it (\"-w NAME\").  MODEL sets \"--model\".  PROMPT, when a
+non-empty string, is appended as the trailing positional argument."
   (if resume
       (list "-r" resume)
     (let (args)
       (when session-id
         (setq args (append args (list "--session-id" session-id))))
-      (when name
-        (setq args (append args (list "-n" name))))
       (when worktree
         (setq args (append args (if (stringp worktree)
                                     (list "-w" worktree)
@@ -388,14 +380,34 @@ positional argument."
       args)))
 
 (defcustom claude-code-buffer-name-function #'claude-code--default-buffer-name
-  "Function that names the buffer hosting a new instance.
-Called with the project root and the requested name (or nil); must
-return a string.  Name clashes are resolved by `generate-new-buffer'."
+  "Function that seeds the name of the buffer hosting a new instance.
+Called with the project root; must return a string.  This is only the
+pre-title seed: once the instance reports a terminal title, Ghostel renames
+the buffer via `claude-code--ghostel-buffer-name' (see
+`claude-code--install-buffer-name-tracking').  Name clashes are resolved by
+`generate-new-buffer'."
   :type 'function)
 
-(defun claude-code--default-buffer-name (root name)
-  "Return a buffer name for an instance in ROOT with display NAME."
-  (format "*claude:%s*" (or name (file-name-nondirectory root))))
+(defun claude-code--default-buffer-name (root)
+  "Return a pre-title seed buffer name for an instance in ROOT."
+  (format "*claude: %s*" (file-name-nondirectory (directory-file-name root))))
+
+(defun claude-code--ghostel-buffer-name (title)
+  "Name a managed instance buffer \"*claude: TITLE*\" from the terminal TITLE.
+A buffer-local `ghostel-buffer-name-function' so Ghostel's own title tracking
+drives the name — Claude sets the OSC 2 title, so no bookkeeping is needed
+here.  Declines (returns nil) on an empty TITLE, like
+`ghostel-buffer-name-by-title'."
+  (and title (not (string= "" title))
+       (format "*claude: %s*" title)))
+
+(defun claude-code--install-buffer-name-tracking (buffer)
+  "Make BUFFER track its Claude terminal title as \"*claude: TITLE*\".
+Installs `claude-code--ghostel-buffer-name' as a buffer-local
+`ghostel-buffer-name-function'.  Must run after `ghostel-exec', whose
+`ghostel-mode' switch would otherwise wipe the buffer-local binding."
+  (with-current-buffer buffer
+    (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name)))
 
 (defun claude-code--new-uuid ()
   "Return a random RFC-4122 version-4 UUID string."
@@ -434,22 +446,22 @@ Registered on `ghostel-exit-functions', which calls its functions with
     buffer))
 
 ;;;###autoload
-(cl-defun claude-code-spawn (project-root &key prompt worktree model name)
+(cl-defun claude-code-spawn (project-root &key prompt worktree model)
   "Spawn a new Claude Code instance for PROJECT-ROOT; return its buffer.
 PROMPT is an optional initial prompt (passed as the positional argument).
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
-name it.  MODEL and NAME set the model and display name.  The session id is
-generated internally and is not exposed."
+name it.  MODEL sets the model.  The session id is generated internally and is
+not exposed."
   (require 'ghostel)
   (let* ((root (claude-code--normalize-root project-root))
          (id (claude-code--new-uuid))
          (args (claude-code--build-args :session-id id :prompt prompt
-                                        :worktree worktree :model model
-                                        :name name))
+                                        :worktree worktree :model model))
          (default-directory (file-name-as-directory root))
          (buffer (generate-new-buffer
-                  (funcall claude-code-buffer-name-function root name))))
+                  (funcall claude-code-buffer-name-function root))))
     (ghostel-exec buffer claude-code-cli args)
+    (claude-code--install-buffer-name-tracking buffer)
     (claude-code--register id buffer root root worktree)
     buffer))
 
@@ -469,8 +481,9 @@ instance rather than starting a second `claude' for the same session."
              (args (claude-code--build-args :resume id))
              (default-directory (file-name-as-directory root))
              (buffer (generate-new-buffer
-                      (funcall claude-code-buffer-name-function root nil))))
+                      (funcall claude-code-buffer-name-function root))))
         (ghostel-exec buffer claude-code-cli args)
+        (claude-code--install-buffer-name-tracking buffer)
         (claude-code--register id buffer root root nil)
         buffer))))
 
@@ -514,8 +527,8 @@ only SUBMIT sends the RET that actually submits."
 
 (defun claude-code-rename (session name)
   "Rename SESSION to NAME by sending a /rename command to its instance.
-The new name is not cached: Claude records it (in its sessions file and
-transcript) and the next refresh reads it back through
+The new name is not cached: Claude records it as a `custom-title' line in the
+transcript and the next refresh reads it back through
 `claude-code--session-display-name', so there is one source of truth."
   (unless (claude-code-session-alive-p session)
     (user-error "Can only rename an alive session"))
@@ -590,12 +603,11 @@ folded.")
 (defun claude-code--session-display-name (session)
   "Return SESSION's display name.
 This is the single authority for a session's name, so it cannot drift: the
-name is always derived from Claude's own data, never cached by this package.
-The sources, in order: the live `name' from the sessions file (which `/rename'
-updates), the transcript TITLE (a user custom title, else Claude's generated
-one), the opening prompt, and finally the short session id."
-  (or (claude-code-session-name session)
-      (claude-code-session-title session)
+name is derived from the transcript on every query, never cached by this
+package.  The sources, in order: the transcript TITLE (a user custom title
+that `/rename' writes, else Claude's generated one), the opening prompt, and
+finally the short session id."
+  (or (claude-code-session-title session)
       (claude-code-session-last-prompt session)
       (substring (claude-code-session-id session) 0 8)))
 
@@ -855,8 +867,7 @@ latter case the row's session determines the enclosing group."
      claude-code--project
      :prompt (and (> (length prompt) 0) prompt)
      :worktree (and (member "--worktree" args) t)
-     :model (transient-arg-value "--model=" args)
-     :name (transient-arg-value "--name=" args))
+     :model (transient-arg-value "--model=" args))
     (claude-code-sessions-refresh)))
 
 ;;;;; Mode
@@ -919,8 +930,7 @@ latter case the row's session determines the enclosing group."
 			 "Dispatch actions for the Claude sessions view."
 			 ["Spawn options"
 			  ("-w" "Worktree" "--worktree")
-			  ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
-			  ("-n" "Name" "--name=")]
+			  ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))]
 			 ["Spawn"
 			  ("n" "New session" claude-code-sessions-new)]
 			 [["Session"

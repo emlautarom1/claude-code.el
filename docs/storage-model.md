@@ -17,12 +17,13 @@ this package reads:
 | ------------ | ---------------------------------------------------------- |
 | `sessionId`  | the session UUID — the join key to a transcript            |
 | `cwd`        | the real, absolute working directory (never encoded)       |
-| `name`       | display name (Claude-derived or user-set)                  |
 | `status`     | `idle` \| `busy` \| `waiting` (may be **absent** early on) |
 | `waitingFor` | set only while `waiting`, e.g. `"permission prompt"`       |
 | `pid`        | OS PID (also the filename)                                 |
 
 `claude-code--live-status-table` parses every such file into a hash keyed by `sessionId`. It is pure parsing: a missing `status` yields nil, and process liveness is decided separately (`claude-code--pid-live-p`). This package treats a session as *alive* only when it manages the instance itself, so this table is used to read a managed session's status and to flag [external](glossary.md#external-session) sessions — not as the source of aliveness.
+
+A session's display name comes entirely from the transcript (see [Transcripts](#transcripts--projectsencoded-cwdsessionidjsonl) and `claude-code--session-display-name`); a `/rename` is reflected there through its `custom-title`. Claude also writes a `name` on this file, but for most sessions that is a directory-derived placeholder (`{"name":"proj-f8","nameSource":"derived"}`) which would shadow the live transcript title — so the transcript is the sole source.
 
 Liveness is a plain `pid ∈ list-system-processes` check; the `procStart` field is deliberately **not** consulted. A stale `sessions/<pid>.json` (left by a crash) whose PID was reused could therefore mis-flag a dead session as external — accepted as a simplicity trade-off, since PID reuse is vanishingly unlikely (`pid_max` defaults to 4194304).
 
