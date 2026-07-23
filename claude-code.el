@@ -396,10 +396,16 @@ the buffer via `claude-code--ghostel-buffer-name' (see
   "Name a managed instance buffer \"*claude: TITLE*\" from the terminal TITLE.
 A buffer-local `ghostel-buffer-name-function' so Ghostel's own title tracking
 drives the name — Claude sets the OSC 2 title, so no bookkeeping is needed
-here.  Declines (returns nil) on an empty TITLE, like
-`ghostel-buffer-name-by-title'."
-  (and title (not (string= "" title))
-       (format "*claude: %s*" title)))
+here.  Claude prefixes the title with a status indicator — a symbol glyph
+\(a spinner frame while busy, an idle marker otherwise) and a space — in the
+form \"<indicator> <title>\".  That leading run of symbol and whitespace
+characters is stripped so only the title remains.  Declines (returns nil)
+when nothing but the indicator is left, like `ghostel-buffer-name-by-title'."
+  (when title
+    (let ((clean (replace-regexp-in-string
+                  "\\`[^[:alnum:][:space:]]+[[:space:]]+" "" title)))
+      (unless (string= "" clean)
+        (format "*claude: %s*" clean)))))
 
 (defun claude-code--install-buffer-name-tracking (buffer)
   "Make BUFFER track its Claude terminal title as \"*claude: TITLE*\".
@@ -954,7 +960,7 @@ latter case the row's session determines the enclosing group."
   (interactive)
   (let* ((root (claude-code--normalize-root (project-root (project-current t))))
          (buffer (get-buffer-create
-                  (format "*claude-sessions:%s*" (file-name-nondirectory root)))))
+                  (format "*claude-sessions: %s*" (file-name-nondirectory root)))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'claude-code-sessions-mode)
         (claude-code-sessions-mode))

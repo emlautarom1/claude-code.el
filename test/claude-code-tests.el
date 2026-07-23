@@ -295,6 +295,22 @@ features still load normally."
   "The Ghostel title tracker names the buffer after the terminal title."
   (should (equal (claude-code--ghostel-buffer-name "My title")
                  "*claude: My title*"))
+  ;; Claude prefixes the title with a status indicator glyph and a space in
+  ;; the form "<indicator> <title>"; the leading symbol/whitespace run is
+  ;; stripped.  The glyph varies (idle marker or any spinner frame), so the
+  ;; strip must not hardcode code points.
+  (should (equal (claude-code--ghostel-buffer-name "✳ Understand the layout")
+                 "*claude: Understand the layout*"))
+  (should (equal (claude-code--ghostel-buffer-name "⠋ Working on it")
+                 "*claude: Working on it*"))
+  ;; A multi-glyph indicator and repeated spaces collapse away too.
+  (should (equal (claude-code--ghostel-buffer-name "✳⠋  Doing things")
+                 "*claude: Doing things*"))
+  ;; A title with no indicator prefix is left untouched — nothing is chopped.
+  (should (equal (claude-code--ghostel-buffer-name "Plain title")
+                 "*claude: Plain title*"))
+  ;; An indicator with no title yet declines, like an empty title.
+  (should (null (claude-code--ghostel-buffer-name "✳ ")))
   ;; An empty or absent title declines the rename (nil), as Ghostel expects.
   (should (null (claude-code--ghostel-buffer-name "")))
   (should (null (claude-code--ghostel-buffer-name nil))))

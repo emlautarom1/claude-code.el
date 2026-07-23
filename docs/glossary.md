@@ -9,7 +9,7 @@ match Claude Code's own vocabulary wherever one exists.
 
 - **Instance** (a.k.a. *claude instance*) — a running `claude` process working on a session. In this package every instance is hosted in a [Ghostel](https://github.com/dakra/ghostel) terminal buffer.
 
-- **Instance buffer** — the Ghostel terminal buffer that hosts a running instance, named `*claude: <title>*` (Ghostel tracks the terminal title Claude sets; before the first title it is seeded as `*claude: <project>*`). This is the buffer you switch to (via *focus*) to talk to a live session directly, as you would in any terminal.
+- **Instance buffer** — the Ghostel terminal buffer that hosts a running instance, named `*claude: <title>*` (Ghostel tracks the terminal title Claude sets; the status-indicator glyph Claude prefixes to that title is stripped, and before the first title the buffer is seeded as `*claude: <project>*`). This is the buffer you switch to (via *focus*) to talk to a live session directly, as you would in any terminal.
 
 - **Managed instance** — an instance this package launched and tracks (it has an instance buffer in Emacs). Only managed instances make a session *alive* in the view.
 
@@ -26,7 +26,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Worktree session** — a session spawned with `--worktree`, running in a git worktree under the project's `.claude/worktrees/`. It is listed under its parent project's view, with the worktree directory's name shown in the *Worktree* column.
 
-- **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named `*claude-sessions:<project>*`, that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code`.
+- **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named `*claude-sessions: <project>*`, that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code`.
 
 - **Project** — the current `project.el` project (usually a git repository). Each project has its own view. Sessions are associated with a project by their working directory.
 
