@@ -112,23 +112,30 @@ Transcripts are append-only, so an unchanged modification time means
 the extracted fields are still valid.")
 
 (defun claude-code--json-line-field (regexp field)
-  "Return FIELD from the last line in the current buffer matching REGEXP.
-Scans backward from the end and inspects only that last match; point is moved.
-Returns nil if no line matches, or if that line does not parse as JSON with
-FIELD."
+  "Return FIELD from the newest line in the current buffer matching REGEXP.
+Scans backward from the end and returns FIELD from the first match whose line
+parses as JSON with a non-nil FIELD, skipping earlier-encountered matches that
+lack it -- e.g. a line where REGEXP hits FIELD inside a nested value rather than
+as a top-level key.  Point is moved.  Returns nil when no such line exists."
   (goto-char (point-max))
-  (when (re-search-backward regexp nil t)
-    (let ((line (buffer-substring-no-properties
-                 (line-beginning-position) (line-end-position))))
-      (ignore-errors (gethash field (json-parse-string line))))))
+  (let (result)
+    (while (and (not result) (re-search-backward regexp nil t))
+      (let* ((line (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position)))
+             (obj (ignore-errors (json-parse-string line))))
+        (when obj (setq result (gethash field obj)))
+        (goto-char (line-beginning-position))))
+    result))
 
 (defun claude-code--read-transcript-fields (file)
-  "Read the title, last-prompt and worktree-path fields from transcript FILE.
+  "Read the title, last-prompt, worktree-path and last-active fields from FILE.
 A user-set custom title (what `/rename' writes) wins over Claude's generated
 title; only when there is no custom title does the last `ai-title' apply.
 The worktree path is the lossless `worktreePath' from the `worktree-state'
 line (nil for a non-worktree session); it is the real cwd of a worktree
-session even when it is dead and has no live sessions file to read."
+session even when it is dead and has no live sessions file to read.
+LAST-ACTIVE is the time of the newest line carrying a real `timestamp' -- the
+last genuine activity -- or nil when the transcript has no timestamped line."
   (with-temp-buffer
     (insert-file-contents file)
     (list :title
@@ -143,20 +150,27 @@ session even when it is dead and has no live sessions file to read."
           (let ((ws (claude-code--json-line-field
                      "\"type\"[[:space:]]*:[[:space:]]*\"worktree-state\""
                      "worktreeSession")))
-            (and (hash-table-p ws) (gethash "worktreePath" ws))))))
+            (and (hash-table-p ws) (gethash "worktreePath" ws)))
+          :last-active
+          (let ((ts (claude-code--json-line-field
+                     "\"timestamp\"[[:space:]]*:" "timestamp")))
+            (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
 (defun claude-code--transcript-fields (file)
   "Return a plist of transcript FILE's cached fields.
 The keys are :id (FILE's base name, the session id), :title, :last-prompt,
-:worktree-path, and :last-active (FILE's modification time).  Cached by FILE's
-modification time."
+:worktree-path, and :last-active (the newest genuine activity, from the last
+timestamped line, falling back to FILE's modification time only when the
+transcript has no timestamped line at all).  Cached by FILE's modification
+time."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
         (cdr cached)
-      (let ((fields (cons :id (cons (file-name-base file)
-                                    (append (claude-code--read-transcript-fields file)
-                                            (list :last-active mtime))))))
+      (let* ((raw (claude-code--read-transcript-fields file))
+             (raw (plist-put raw :last-active
+                             (or (plist-get raw :last-active) mtime)))
+             (fields (cons :id (cons (file-name-base file) raw))))
         (puthash file (cons mtime fields) claude-code--transcript-cache)
         fields))))
 
@@ -204,8 +218,8 @@ while waiting.  EXTERNAL-P flags a session whose process is running outside
 Emacs, so it must not be resumed or deleted.  TITLE and LAST-PROMPT come from
 the transcript and, via `claude-code--session-display-name', are the session's
 only display-name sources; WORKTREE-P marks worktree sessions; TRANSCRIPT is
-the absolute `.jsonl' path.  LAST-ACTIVE is the transcript's modification time,
-the session's last activity."
+the absolute `.jsonl' path.  LAST-ACTIVE is the session's last genuine activity,
+taken from the newest timestamped transcript line."
   id cwd status waiting-for alive-p pid buffer worktree-p
   title last-prompt transcript external-p last-active)
 

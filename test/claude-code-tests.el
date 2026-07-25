@@ -83,7 +83,11 @@ features still load normally."
        ;; With no custom title, the LAST ai-title wins over earlier ones.
        (should (equal (plist-get s1 :title) "Understand the project layout"))
        (should (equal (plist-get s1 :last-prompt) "first prompt"))
-       (should (null (plist-get s1 :worktree-p))))
+       (should (null (plist-get s1 :worktree-p)))
+       ;; Last-active is the newest timestamped (assistant) line, even though an
+       ;; untimestamped ai-title line follows it -- not the file mtime.
+       (should (time-equal-p (plist-get s1 :last-active)
+                             (date-to-time "2026-06-10T13:23:27.697Z"))))
      (let ((s2 (funcall by-id "22222222-2222-4222-8222-222222222222")))
        ;; A custom title supplies the title even with no ai-title line.
        (should (equal (plist-get s2 :title) "My renamed session"))
@@ -103,18 +107,66 @@ features still load normally."
        (should (equal (plist-get s5 :worktree-path)
                       "/home/test/proj/.claude/worktrees/my.feat"))))))
 
+(defmacro claude-code-tests--with-transcript (var lines mtime &rest body)
+  "Bind VAR to a temp .jsonl holding LINES with file mtime MTIME, run BODY.
+LINES is a list of strings (one JSON object per line).  The transcript cache is
+cleared first and the temp file deleted afterwards."
+  (declare (indent 3))
+  `(let ((,var (make-temp-file "cc-transcript" nil ".jsonl")))
+     (unwind-protect
+         (progn
+           (clrhash claude-code--transcript-cache)
+           (with-temp-file ,var
+             (dolist (line ,lines) (insert line "\n")))
+           (set-file-times ,var ,mtime)
+           ,@body)
+       (delete-file ,var))))
+
 (ert-deftest claude-code-test-transcript-fields-last-active ()
-  "`:last-active' is the transcript file's modification time."
-  (let ((file (make-temp-file "cc-transcript" nil ".jsonl"))
-        (mtime 1800000000))
-    (unwind-protect
-        (progn
-          (clrhash claude-code--transcript-cache)
-          (set-file-times file mtime)
-          (should (time-equal-p
-                   (plist-get (claude-code--transcript-fields file) :last-active)
-                   mtime)))
-      (delete-file file))))
+  "`:last-active' is the newest timestamped line, ignoring mtime and metadata.
+The transcript ends in untimestamped metadata and its file mtime is set far in
+the future, yet last-active is the last real event's timestamp."
+  (claude-code-tests--with-transcript file
+				      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:20:00.000Z\"}"
+					"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
+					"{\"type\":\"last-prompt\",\"lastPrompt\":\"q\"}")
+				      1800000000
+				      (should (time-equal-p
+					       (plist-get (claude-code--transcript-fields file) :last-active)
+					       (date-to-time "2026-06-10T13:23:27.697Z")))))
+
+(ert-deftest claude-code-test-transcript-fields-last-active-fallback ()
+  "With no timestamped line at all, `:last-active' falls back to the file mtime."
+  (claude-code-tests--with-transcript file
+				      '("{\"type\":\"ai-title\",\"aiTitle\":\"stub\"}"
+					"{\"type\":\"agent-name\",\"agentName\":\"orphan\"}")
+				      1800000000
+				      (should (time-equal-p
+					       (plist-get (claude-code--transcript-fields file) :last-active)
+					       1800000000))))
+
+(ert-deftest claude-code-test-transcript-fields-last-active-embedded-timestamp ()
+  "A nested `timestamp' in a `file-history-snapshot' line is not mistaken for one.
+The snapshot's embedded timestamp is newer than the real last event, but
+last-active must still be the event's top-level timestamp."
+  (claude-code-tests--with-transcript file
+				      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
+					"{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
+				      1800000000
+				      (should (time-equal-p
+					       (plist-get (claude-code--transcript-fields file) :last-active)
+					       (date-to-time "2026-06-10T13:23:27.697Z")))))
+
+(ert-deftest claude-code-test-transcript-fields-last-active-snapshot-only ()
+  "A transcript of only `file-history-snapshot' lines has no real top-level
+timestamp, so last-active falls back to the file mtime -- never the embedded
+snapshot timestamp."
+  (claude-code-tests--with-transcript file
+				      '("{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
+				      1800000000
+				      (should (time-equal-p
+					       (plist-get (claude-code--transcript-fields file) :last-active)
+					       1800000000))))
 
 ;;;; Model
 
