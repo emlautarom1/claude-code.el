@@ -33,3 +33,11 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 - **Config dir** — Claude Code's state directory, `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when set (`claude-code-config-dir`).
 
 - **Encoded project directory** — the name of a project's transcript directory under `projects/`, produced by replacing every `/` and `.` in the absolute working directory with `-`. The mapping is lossy (see [`storage-model.md`](storage-model.md)).
+
+- **MCP server** — the Model Context Protocol server (`claude-code-mcp.el`) that exposes Emacs *to* the sessions this package spawns. One loopback HTTP server runs per Emacs, shared by every session; each spawned instance is pointed at it with an inline `--mcp-config`. See the [architecture notes](architecture.md#mcp-server).
+
+- **MCP tool** / **tool catalog** — a capability the MCP server advertises to Claude (a name, description, argument schema, and a handler function), registered with `claude-code-mcp-make-tool`. The **tool catalog** is the set of all advertised tools; it is expected to grow.
+
+- **`eval` tool** — an MCP tool that reads and evaluates the Elisp in its `code` argument (every top-level form, lexical binding) in the user's live Emacs and returns the printed value of the last form. Auto-approved by default (see the security decision in the [architecture notes](architecture.md#decisions)).
+
+- **Session-id path token** — the spawn UUID as it appears in the MCP request path `/mcp/<uuid>`. It multiplexes sessions over the one shared server (and keys the real-cwd lookup); it is **not** a security boundary — the full URL is visible on `claude`'s command line to any same-user process.

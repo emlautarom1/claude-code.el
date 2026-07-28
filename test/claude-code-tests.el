@@ -303,22 +303,43 @@ snapshot timestamp."
          (should (equal (claude-code--session-display-name s)
                         "Dotted worktree")))))))
 
+(ert-deftest claude-code-test-session-cwd ()
+  "Session cwd prefers the live file, then the registry, else nil."
+  (claude-code-tests--with-fixtures
+   (let ((claude-code--managed (make-hash-table :test 'equal)))
+     ;; The live sessions file wins.  Session 33333333 is a worktree, so its
+     ;; live cwd is the worktree directory (not the parent project root) -- the
+     ;; whole point of reading the real cwd for a worktree session.
+     (should (equal (claude-code--session-cwd
+                     "33333333-3333-4333-8333-333333333333")
+                    "/home/test/proj/.claude/worktrees/feat"))
+     ;; With no live file, fall back to the managed registry `:cwd'.
+     (puthash "reg-only" (list :cwd "/home/x/proj") claude-code--managed)
+     (should (equal (claude-code--session-cwd "reg-only") "/home/x/proj"))
+     ;; An unknown id yields nil, so `default-directory' is left unchanged.
+     (should (null (claude-code--session-cwd "no-such-id"))))))
+
+
 ;;;; Operations
 
 (ert-deftest claude-code-test-build-args-new ()
-  "New-session argument lists are ordered and place the prompt last."
+  "New-session argument lists place the prompt last behind a \"--\" terminator."
   (should (equal (claude-code--build-args :session-id "ID")
                  '("--session-id" "ID")))
   (should (equal (claude-code--build-args :session-id "ID" :prompt "hello")
-                 '("--session-id" "ID" "hello")))
+                 '("--session-id" "ID" "--" "hello")))
   (should (equal (claude-code--build-args
                   :session-id "ID" :model "opus" :prompt "hi")
-                 '("--session-id" "ID" "--model" "opus" "hi")))
+                 '("--session-id" "ID" "--model" "opus" "--" "hi")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree t)
                  '("--session-id" "ID" "-w")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree "feat")
                  '("--session-id" "ID" "-w" "feat")))
-  ;; Empty prompt is dropped.
+  ;; A worktree prompt is kept off `-w' (which takes an optional name) by "--".
+  (should (equal (claude-code--build-args :session-id "ID" :worktree t
+                                          :prompt "hi")
+                 '("--session-id" "ID" "-w" "--" "hi")))
+  ;; Empty prompt is dropped (and so is the terminator).
   (should (equal (claude-code--build-args :session-id "ID" :prompt "")
                  '("--session-id" "ID"))))
 
@@ -327,6 +348,25 @@ snapshot timestamp."
   (should (equal (claude-code--build-args :resume "ID") '("-r" "ID")))
   (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus")
                  '("-r" "ID"))))
+
+(ert-deftest claude-code-test-build-args-mcp ()
+  "MCP args append verbatim; a nil `:mcp-args' leaves the base list unchanged."
+  ;; Nil MCP args reproduce exactly today's output (both branches).
+  (should (equal (claude-code--build-args :session-id "ID" :mcp-args nil)
+                 '("--session-id" "ID")))
+  (should (equal (claude-code--build-args :resume "ID" :mcp-args nil)
+                 '("-r" "ID")))
+  ;; Non-nil MCP args sit with the options, before the "--" terminator and the
+  ;; prompt, so the variadic MCP flags cannot swallow the positional prompt.
+  (should (equal (claude-code--build-args
+                  :session-id "ID" :prompt "hi"
+                  :mcp-args '("--mcp-config" "{}" "--allowedTools" "x"))
+                 '("--session-id" "ID"
+                   "--mcp-config" "{}" "--allowedTools" "x" "--" "hi")))
+  ;; ...and to the resume list too.
+  (should (equal (claude-code--build-args
+                  :resume "ID" :mcp-args '("--mcp-config" "{}"))
+                 '("-r" "ID" "--mcp-config" "{}"))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."

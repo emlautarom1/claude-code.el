@@ -4,7 +4,7 @@
 
 ;; Author: Lautaro Emanuel
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "30.1") (ghostel "0"))
+;; Package-Requires: ((emacs "30.1") (ghostel "0") (web-server "0.1.2"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/emlautarom1/claude-code.el
 
@@ -41,6 +41,13 @@
 (defvar ghostel--process)
 (defvar ghostel-exit-functions)
 (defvar ghostel-buffer-name-function)
+
+;; The MCP server lives in `claude-code-mcp.el', required lazily in the spawn
+;; path (see `claude-code-spawn').  Declaring its entry points here keeps the
+;; byte-compiler happy without pulling the MCP file (and its `web-server'
+;; dependency) in eagerly, and avoids a load cycle.
+(declare-function claude-code--mcp-cli-args "claude-code-mcp" (id))
+(declare-function claude-code-mcp-stop "claude-code-mcp" ())
 
 
 ;;;; Customization
@@ -363,11 +370,19 @@ depending on the platform; RSS is in kibibytes."
             (setq stack (nconc (copy-sequence (gethash p children)) stack)))))
       (cons cpu rss))))
 
+(defun claude-code--session-cwd (id)
+  "Return the real working directory of the running instance for session ID.
+Prefers the live `sessions/*.json' cwd (the actual worktree directory for a
+worktree session), falls back to the registry `:cwd' (the project root the
+instance was launched from), and is nil for an unknown id."
+  (or (plist-get (gethash id (claude-code--live-status-table)) :cwd)
+      (plist-get (gethash id claude-code--managed) :cwd)))
+
 
 ;;;; Operations
 
 (cl-defun claude-code--build-args
-    (&key session-id resume prompt worktree model)
+    (&key session-id resume prompt worktree model mcp-args)
   "Build the argument list for the `claude' CLI.
 
 When RESUME is non-nil it is a session id to resume, and it is returned as
@@ -377,9 +392,14 @@ Otherwise a new session is described:
 SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
 its session up front.  WORKTREE, when t, requests a new worktree (\"-w\"); when
 a string, names it (\"-w NAME\").  MODEL sets \"--model\".  PROMPT, when a
-non-empty string, is appended as the trailing positional argument."
+non-empty string, is emitted last as a positional argument behind a \"--\"
+option terminator.
+
+MCP-ARGS is a list of extra CLI arguments (the MCP wiring built by
+`claude-code--mcp-cli-args') placed with the other options, before the
+terminator; this function keeps no MCP knowledge of its own."
   (if resume
-      (list "-r" resume)
+      (append (list "-r" resume) mcp-args)
     (let (args)
       (when session-id
         (setq args (append args (list "--session-id" session-id))))
@@ -389,8 +409,9 @@ non-empty string, is appended as the trailing positional argument."
                                   (list "-w")))))
       (when model
         (setq args (append args (list "--model" model))))
+      (setq args (append args mcp-args))
       (when (and prompt (> (length prompt) 0))
-        (setq args (append args (list prompt))))
+        (setq args (append args (list "--" prompt))))
       args)))
 
 (defcustom claude-code-buffer-name-function #'claude-code--default-buffer-name
@@ -449,7 +470,13 @@ Registered on `ghostel-exit-functions', which calls its functions with
     (maphash (lambda (id plist)
                (when (eq (plist-get plist :buffer) buffer) (push id dead)))
              claude-code--managed)
-    (dolist (id dead) (remhash id claude-code--managed))))
+    (dolist (id dead) (remhash id claude-code--managed))
+    ;; The MCP server is shared by all sessions; tear it down once the last
+    ;; managed instance is gone.  `fboundp' guards the case where the MCP file
+    ;; was never loaded, and `claude-code-mcp-stop' is a no-op with no server.
+    (when (and (zerop (hash-table-count claude-code--managed))
+               (fboundp 'claude-code-mcp-stop))
+      (claude-code-mcp-stop))))
 
 (defun claude-code--register (id buffer origin cwd worktree)
   "Record instance ID hosted in BUFFER, launched from ORIGIN with CWD, WORKTREE."
@@ -468,15 +495,17 @@ Registered on `ghostel-exit-functions', which calls its functions with
 ;;;###autoload
 (cl-defun claude-code-spawn (project-root &key prompt worktree model)
   "Spawn a new Claude Code instance for PROJECT-ROOT; return its buffer.
-PROMPT is an optional initial prompt (passed as the positional argument).
+PROMPT is an optional initial prompt.
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
 name it.  MODEL sets the model.  The session id is generated internally and is
 not exposed."
   (require 'ghostel)
+  (require 'claude-code-mcp)
   (let* ((root (claude-code--normalize-root project-root))
          (id (claude-code--new-uuid))
          (args (claude-code--build-args :session-id id :prompt prompt
-                                        :worktree worktree :model model))
+                                        :worktree worktree :model model
+                                        :mcp-args (claude-code--mcp-cli-args id)))
          (default-directory (file-name-as-directory root))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root))))
@@ -497,8 +526,10 @@ instance rather than starting a second `claude' for the same session."
     (if existing
         (progn (pop-to-buffer existing) existing)
       (require 'ghostel)
+      (require 'claude-code-mcp)
       (let* ((root (claude-code--normalize-root project-root))
-             (args (claude-code--build-args :resume id))
+             (args (claude-code--build-args
+                    :resume id :mcp-args (claude-code--mcp-cli-args id)))
              (default-directory (file-name-as-directory root))
              (buffer (generate-new-buffer
                       (funcall claude-code-buffer-name-function root))))

@@ -59,6 +59,18 @@ The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code
 
 The worktree's real directory is **not** reconstructed from that encoded suffix — the encoding is lossy (a worktree named `my.feat` encodes to the suffix `my-feat`). Instead the real cwd is read from the transcript's `worktree-state` line (`worktreePath`), which survives even for a dead worktree that has no live `sessions/*.json`.
 
+## MCP configuration
+
+The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. Each spawned instance is wired to the server entirely through the command line: `claude` is passed `--mcp-config` with an inline JSON blob
+
+```json
+{"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp/<sessionId>"}}}
+```
+
+(plus `--allowedTools` listing every registered tool when auto-approve is on). No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has. Because the JSON is handed to `claude` execvp-style (Ghostel does not go through a shell), it needs no escaping.
+
+The one piece of on-disk state the server *reads* is a running session's real cwd: `claude-code--session-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root in the brief window before that file exists. This is a read through the existing storage adapter — no new format.
+
 ## Mapping an Emacs buffer to a session
 
 When spawning, this package generates a UUID and passes it as `--session-id`, so a Ghostel buffer is bound to its `sessionId` up front — no polling or PID-matching needed. The UUID is internal and never shown to the user. The registry `claude-code--managed` holds `sessionId -> instance` entries.

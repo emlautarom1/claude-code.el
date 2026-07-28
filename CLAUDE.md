@@ -9,12 +9,17 @@ model: `docs/glossary.md`, `docs/storage-model.md`, `docs/architecture.md`.
   shims, no feature-detection fallbacks, no obsolete aliases.
 - **No "history" comments.** Never describe how code "used to" work or that
   something "replaces" a prior approach — Git holds the history.
-- **One dependency only: `ghostel`.** Everything else must be built into Emacs
-  (`cl-lib`, `project`, `tabulated-list`, `transient`, `json`). `ghostel` is
-  loaded lazily and referenced via `declare-function`, so the package
-  byte-compiles and tests without its native module present.
-- **Single file:** all code lives in `claude-code.el`; tests in
-  `test/claude-code-tests.el`.
+- **Two hard dependencies: `ghostel` and `web-server`.** Everything else must be
+  built into Emacs (`cl-lib`, `project`, `tabulated-list`, `transient`, `json`,
+  `eieio`). `ghostel` is loaded lazily and referenced via `declare-function`, so
+  the package byte-compiles and tests without its native module present.
+  `web-server` (the MCP transport) is a real compile-time dependency: it is
+  required at the top level of `claude-code-mcp.el`, installed by `make deps`,
+  and put on `load-path` via `package-initialize` in `make compile`/`test`.
+- **Source split:** the core orchestration lives in `claude-code.el`; the MCP
+  server lives in `claude-code-mcp.el` (loaded lazily by the spawn path, so
+  `claude-code.el` `declare-function`s its two entry points). Tests mirror the
+  split: `test/claude-code-tests.el` and `test/claude-code-mcp-tests.el`.
 - **Naming:** `claude-code-` for public symbols, `claude-code--` for internals.
 
 ## Architecture

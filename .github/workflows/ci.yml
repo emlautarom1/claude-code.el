@@ -17,6 +17,8 @@ jobs:
       - uses: purcell/setup-emacs@master
         with:
           version: ${{ matrix.emacs_version }}
+      - name: Install dependencies
+        run: make deps
       - name: Byte-compile (warnings as errors)
         run: make compile
       - name: Checkdoc

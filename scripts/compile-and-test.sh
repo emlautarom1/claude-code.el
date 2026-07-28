@@ -5,14 +5,15 @@
 # --hook mode: used as a Claude Code `Stop` hook; on failure it exits 2 so the
 # session is blocked from finishing until compile+test are green again.
 #
-# Load path: this delegates to `make`, which uses only `-L .` (and `-L test`).
-# Unlike claude-code-ide.el's script we do NOT probe straight/elpa for
-# dependencies, because we have no external COMPILE-time deps: `transient`,
-# `cl-lib`, `project` and `tabulated-list` are built into Emacs 30, and `ghostel`
-# is declared with `declare-function` and required lazily, so it is never needed
-# to byte-compile or to run the unit tests. Warnings are promoted to errors
-# instead of being suppressed. Only `make integration` needs a real `ghostel`,
-# and it loads it via `package-initialize`.
+# Load path: this delegates to `make`, which uses only `-L .` (and `-L test`)
+# plus `package-initialize` so the one external COMPILE-time dep, `web-server`,
+# is on `load-path`. `claude-code-mcp.el` requires `web-server` at the top level,
+# so it must already be installed locally (this hook does no network install;
+# run `make deps` once). The other libraries -- `transient`, `cl-lib`, `project`
+# and `tabulated-list` -- are built into Emacs 30, and `ghostel` is declared with
+# `declare-function` and required lazily, so it is never needed to byte-compile
+# or to run the unit tests. Warnings are promoted to errors instead of being
+# suppressed. Only `make integration` needs a real `ghostel`.
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
