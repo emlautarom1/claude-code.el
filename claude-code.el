@@ -1010,6 +1010,7 @@ latter case the row's session determines the enclosing group."
       (unless (derived-mode-p 'claude-code-sessions-mode)
         (claude-code-sessions-mode))
       (setq claude-code--project root)
+      (setq default-directory (file-name-as-directory root))
       (claude-code-sessions-refresh))
     (pop-to-buffer buffer)))
 

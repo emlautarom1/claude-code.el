@@ -688,6 +688,30 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
                (should-not (string-match-p "11111111" text)))))
        (kill-buffer buf)))))
 
+(ert-deftest claude-code-test-view-pins-default-directory ()
+  "Opening the view pins `default-directory' to the project root, and the pin
+survives the refresh.  This is what lets project-aware commands (magit,
+`project.el', ...) resolve the current project from the sessions buffer instead
+of prompting."
+  (claude-code-tests--with-fixtures
+   (let ((claude-code-refresh-interval nil)
+         (root "/home/test/proj")
+         (buf nil))
+     (unwind-protect
+         (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
+                   ((symbol-function 'project-root) (lambda (_p) root))
+                   ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq buf b))))
+           ;; `claude' runs a real refresh over the fixtures; the pin must
+           ;; outlive it, so the refresh is deliberately not stubbed out.
+           (claude-code)
+           (with-current-buffer buf
+             (should (derived-mode-p 'claude-code-sessions-mode))
+             (should (equal claude-code--project (claude-code--normalize-root root)))
+             (should (equal default-directory
+                            (file-name-as-directory
+                             (claude-code--normalize-root root))))))
+       (when (buffer-live-p buf) (kill-buffer buf))))))
+
 ;;;; Integration (real Ghostel + real `claude')
 ;;
 ;; These exercise the live spawn/kill lifecycle against an actual `claude'

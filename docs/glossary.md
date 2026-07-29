@@ -28,7 +28,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named `*claude-sessions: <project>*`, that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code`.
 
-- **Project** — the current `project.el` project (usually a git repository). Each project has its own view. Sessions are associated with a project by their working directory.
+- **Project** — the current `project.el` project (usually a git repository). Each project has its own view. Sessions are associated with a project by their working directory. The sessions-view buffer pins its `default-directory` to the project root, so project-aware commands (`magit`, `project.el`, `compile`, …) resolve the current project directly from the view instead of prompting.
 
 - **Config dir** — Claude Code's state directory, `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when set (`claude-code-config-dir`).
 
