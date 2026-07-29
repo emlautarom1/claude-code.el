@@ -530,6 +530,50 @@ parsing a partial request."
 ;; Gated behind CLAUDE_CODE_INTEGRATION (run via `make integration'); strips the
 ;; Claude nesting env vars so the spawned CLI starts a real top-level session.
 
+(defun claude-code-mcp-tests--worktrees (root)
+  "Return an alist of (PATH . BRANCH) for every worktree registered in ROOT.
+BRANCH is the short branch name, or nil for a detached worktree.  Parses the
+output of `git worktree list --porcelain' run in ROOT."
+  (with-temp-buffer
+    (let ((default-directory (file-name-as-directory root)))
+      (when (zerop (call-process "git" nil t nil
+                                 "worktree" "list" "--porcelain"))
+        (goto-char (point-min))
+        (let (result path branch)
+          (while (not (eobp))
+            (let ((line (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position))))
+              (cond
+               ((string-prefix-p "worktree " line)
+                (setq path (substring line 9) branch nil))
+               ((string-prefix-p "branch refs/heads/" line)
+                (setq branch (substring line 18)))
+               ((and (string= line "") path)
+                (push (cons path branch) result)
+                (setq path nil branch nil))))
+            (forward-line 1))
+          (when path (push (cons path branch) result))
+          (nreverse result))))))
+
+(defun claude-code-mcp-tests--remove-new-worktrees (root before)
+  "Remove ROOT worktrees under .claude/worktrees that are absent from BEFORE.
+BEFORE is the list of worktree paths captured before the test spawned.  Each
+newly-appeared worktree is force-removed -- twice-forced so a locked worktree
+goes in one call -- and its actual branch (read back from git, never guessed)
+is deleted.  Every worktree already in BEFORE is left untouched, so a
+developer's real worktrees are never disturbed.  Best-effort: git errors are
+ignored so a partially-created worktree is still cleaned up."
+  (let ((default-directory (file-name-as-directory root)))
+    (dolist (wt (claude-code-mcp-tests--worktrees root))
+      (when (and (string-match-p "/\\.claude/worktrees/" (car wt))
+                 (not (member (car wt) before)))
+        (ignore-errors
+          (call-process "git" nil nil nil
+                        "worktree" "remove" "--force" "--force" (car wt)))
+        (when (cdr wt)
+          (ignore-errors
+            (call-process "git" nil nil nil "branch" "-D" (cdr wt))))))))
+
 (ert-deftest claude-code-test-integration-mcp-handshake ()
   "A spawned instance completes the MCP handshake; a worktree eval sees its cwd."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
@@ -540,6 +584,9 @@ parsing a partial request."
          (probe (lambda (_session-id request)
                   (when (equal (alist-get 'method request) "initialize")
                     (setq initialized t))))
+         ;; Snapshot existing worktrees so teardown removes only what this test
+         ;; creates, never a developer's real worktrees.
+         (worktrees-before (mapcar #'car (claude-code-mcp-tests--worktrees root)))
          buffer id pid)
     (advice-add 'claude-code--mcp-handle-request :before probe)
     (unwind-protect
@@ -580,8 +627,17 @@ parsing a partial request."
       (when (buffer-live-p buffer)
         (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))
       (when (and pid (claude-code--pid-live-p pid))
-        (ignore-errors (signal-process pid 'SIGKILL)))
-      (claude-code-mcp-stop))))
+        (ignore-errors (signal-process pid 'SIGKILL))
+        ;; Let the process and its git children die before touching its worktree.
+        (claude-code-tests--await (lambda () (not (claude-code--pid-live-p pid))) 5))
+      (claude-code-mcp-stop)
+      ;; Spawning with `:worktree t' leaves a locked git worktree behind that the
+      ;; CLI never tears down.  Remove only worktrees that appeared during this
+      ;; test; every pre-existing real worktree stays untouched.  A nil snapshot
+      ;; means the pre-spawn listing failed -- a live repo always lists its main
+      ;; worktree -- so skip cleanup rather than mistake every worktree for new.
+      (when worktrees-before
+        (claude-code-mcp-tests--remove-new-worktrees root worktrees-before)))))
 
 (provide 'claude-code-mcp-tests)
 ;;; claude-code-mcp-tests.el ends here
