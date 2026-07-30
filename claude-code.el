@@ -354,21 +354,26 @@ subtrees be summed without rescanning the system each time."
 
 (defun claude-code--process-usage (pid &optional snapshot)
   "Return (CPU . RSS) summed over PID's process subtree, or nil.
-SNAPSHOT is a table from `claude-code--process-snapshot'; one is built
-when omitted.  CPU is a percentage that may be a lifetime average
-depending on the platform; RSS is in kibibytes."
+Nil means no usage is available: PID is not an integer, or the process
+table holds no entry for it (a dead process, so a caller can tell it
+apart from a live but idle one).  SNAPSHOT is a table from
+`claude-code--process-snapshot'; one is built when omitted.  CPU is a
+percentage that may be a lifetime average depending on the platform;
+RSS is in kibibytes."
   (when (integerp pid)
     (let* ((snap (or snapshot (claude-code--process-snapshot)))
            (attrs (car snap))
-           (children (cdr snap))
-           (cpu 0.0) (rss 0) (stack (list pid)))
-      (while stack
-        (let* ((p (pop stack)) (a (gethash p attrs)))
-          (when a
-            (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
-            (cl-incf rss (or (alist-get 'rss a) 0))
-            (setq stack (nconc (copy-sequence (gethash p children)) stack)))))
-      (cons cpu rss))))
+           (children (cdr snap)))
+      (when (gethash pid attrs)
+        (let ((cpu 0.0) (rss 0) (stack (list pid)))
+          (while stack
+            (let* ((p (pop stack)) (a (gethash p attrs)))
+              (when a
+                (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
+                (cl-incf rss (or (alist-get 'rss a) 0))
+                (setq stack (nconc (copy-sequence (gethash p children))
+                                   stack)))))
+          (cons cpu rss))))))
 
 (defun claude-code--session-cwd (id)
   "Return the real working directory of the running instance for session ID.

@@ -38,7 +38,7 @@ The struct holds the transcript's raw name sources (the `title` and the last pro
 
 ### Resource usage
 
-`claude-code--process-snapshot` builds the process table once per refresh; `claude-code--process-usage` sums `pcpu`/`rss` over a PID's whole subtree (Claude spawns child processes). `pcpu` may be a lifetime average depending on platform.
+`claude-code--process-snapshot` builds the process table once per refresh; `claude-code--process-usage` sums `pcpu`/`rss` over a PID's whole subtree (Claude spawns child processes). `pcpu` may be a lifetime average depending on platform. Usage is nil when the snapshot has no entry for the PID — a process that died before it was sampled reads as unknown, not as idle — and the view leaves those cells empty.
 
 ## The view
 

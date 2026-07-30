@@ -240,7 +240,10 @@ snapshot timestamp."
         (should (equal (car usage) 6.0))
         (should (= (cdr usage) 6000)))
       ;; A non-integer pid yields nil.
-      (should (null (claude-code--process-usage nil))))))
+      (should (null (claude-code--process-usage nil)))
+      ;; So does a pid the process table does not list: a process that died
+      ;; between the snapshot and the sum must not read as an idle one.
+      (should (null (claude-code--process-usage 999999))))))
 
 (ert-deftest claude-code-test-normalize-root ()
   "Root normalisation resolves symlinks so a symlinked root matches Claude's cwd."
