@@ -268,6 +268,49 @@ tool's `setq' does not leak past the test."
   (should-error (claude-code-mcp-make-tool
                  :name "bad" :description "No handler.")))
 
+(ert-deftest claude-code-mcp-test-boolean-args ()
+  "A `boolean' argument reaches its handler as a Lisp truth value.
+The parser renders JSON false as `:json-false'/`:false' and null as `:null',
+all non-nil in Lisp, so each must arrive as nil."
+  (let ((seen 'unset))
+    (unwind-protect
+        (progn
+          (claude-code-mcp-make-tool
+           :name "cc-mcp-test-bool" :description "One optional boolean."
+           :args (list (list :name "flag" :type 'boolean
+                             :description "A flag." :optional t))
+           :handler (lambda (&optional flag) (setq seen flag) "ok"))
+          ;; The advertised schema type is the JSON name of the `:type' symbol.
+          (let ((tools (alist-get 'tools
+                                  (alist-get 'result
+                                             (claude-code--mcp-handle-request
+                                              "sess"
+                                              (claude-code-mcp-tests--request
+                                               "tools/list" 1))))))
+            (should (equal (alist-get
+                            'type
+                            (alist-get 'flag
+                                       (alist-get 'properties
+                                                  (alist-get
+                                                   'inputSchema
+                                                   (seq-find
+                                                    (lambda (tl)
+                                                      (equal (alist-get 'name tl)
+                                                             "cc-mcp-test-bool"))
+                                                    tools)))))
+                           "boolean")))
+          (dolist (case '((:json-false . nil) (:false . nil) (:null . nil) (t . t)))
+            (setq seen 'unset)
+            (claude-code-mcp-tests--isolated
+             (claude-code--mcp-handle-request
+              "sess"
+              (claude-code-mcp-tests--request
+               "tools/call" 2
+               (list (cons 'name "cc-mcp-test-bool")
+                     (cons 'arguments (list (cons 'flag (car case))))))))
+            (should (eq seen (cdr case)))))
+      (remhash "cc-mcp-test-bool" claude-code--mcp-tools))))
+
 ;;;; CLI arg / config builder
 
 (ert-deftest claude-code-mcp-test-cli-args ()

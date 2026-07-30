@@ -234,13 +234,18 @@ Reports `claude-code--mcp-protocol-version'."
 
 (defun claude-code--mcp-validate-args (arg-specs arguments)
   "Return values from ARGUMENTS ordered to match ARG-SPECS.
-ARGUMENTS is the parsed `arguments' object (an alist).  Signals a
+ARGUMENTS is the parsed `arguments' object (an alist).  JSON false and null
+arrive from the parser as `:json-false'/`:false' and `:null', all of which are
+non-nil in Lisp, so they are normalized to nil before a handler sees them --
+a boolean argument therefore reads as a plain Lisp truth value.  Signals a
 `claude-code--mcp-rpc-error' with code -32602 when a required argument is
 missing."
   (mapcar (lambda (spec)
             (let* ((name (plist-get spec :name))
                    (optional (plist-get spec :optional))
                    (value (alist-get (intern name) arguments)))
+              (when (memq value '(:json-false :false :null))
+                (setq value nil))
               (when (and (not optional) (null value))
                 (signal 'claude-code--mcp-rpc-error
                         (list -32602 (format "Missing required argument: %s"
