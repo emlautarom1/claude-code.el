@@ -184,8 +184,7 @@ time."
       (let ((fields (cons :id (cons (file-name-base file)
                                     (claude-code--read-transcript-fields
                                      file worktree-p)))))
-        (unless (plist-get fields :last-active)
-          (setq fields (plist-put fields :last-active mtime)))
+        (plist-put fields :last-active (or (plist-get fields :last-active) mtime))
         (puthash file (cons mtime fields) claude-code--transcript-cache)
         fields))))
 
