@@ -161,19 +161,15 @@ Pass `:null' as ID for a request that could not be parsed."
         (cons 'error (list (cons 'code code) (cons 'message message)))))
 
 (defun claude-code--mcp-args->properties (args)
-  "Return the JSON-Schema `properties' object for argument specs ARGS.
-Returns an alist keyed by argument name symbol, or an empty hash table
-\(encoding as `{}') when ARGS is nil."
-  (if (null args)
-      (make-hash-table :test 'equal)
-    (mapcar (lambda (arg)
-              (let ((name (plist-get arg :name))
-                    (type (plist-get arg :type))
-                    (desc (plist-get arg :description)))
-                (cons (intern name)
-                      (append (list (cons 'type (symbol-name type)))
-                              (when desc (list (cons 'description desc)))))))
-            args)))
+  "Return the JSON-Schema `properties' alist for argument specs ARGS."
+  (mapcar (lambda (arg)
+            (let ((name (plist-get arg :name))
+                  (type (plist-get arg :type))
+                  (desc (plist-get arg :description)))
+              (cons (intern name)
+                    (append (list (cons 'type (symbol-name type)))
+                            (when desc (list (cons 'description desc)))))))
+          args))
 
 (defun claude-code--mcp-required-args (args)
   "Return the required argument names in ARGS as a JSON array vector.
