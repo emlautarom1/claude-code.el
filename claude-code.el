@@ -983,26 +983,26 @@ latter case the row's session determines the enclosing group."
 ;;;;; Transient
 
 (transient-define-prefix claude-code-menu ()
-			 "Dispatch actions for the Claude sessions view."
-			 ["Spawn options"
-			  ("-w" "Worktree" "--worktree")
-			  ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))]
-			 ["Spawn"
-			  ("n" "New session" claude-code-sessions-new)]
-			 [["Session"
-			   ("RET" "Focus / resume" claude-code-sessions-visit)
-			   ("r" "Rename" claude-code-sessions-rename)
-			   ("i" "Interrupt" claude-code-sessions-interrupt)
-			   ("s" "Send text" claude-code-sessions-send)]
-			  ["Manage"
-			   ("k" "Kill" claude-code-sessions-kill)
-			   ("d" "Delete dead" claude-code-sessions-delete)
-			   ("m" "Mark" claude-code-sessions-mark)
-			   ("u" "Unmark" claude-code-sessions-unmark)]
-			  ["View"
-			   ("G" "Cycle grouping" claude-code-sessions-cycle-grouping)
-			   ("TAB" "Toggle group" claude-code-sessions-toggle-group)
-			   ("g" "Refresh" claude-code-sessions-refresh)]])
+  "Dispatch actions for the Claude sessions view."
+  ["Spawn options"
+   ("-w" "Worktree" "--worktree")
+   ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))]
+  ["Spawn"
+   ("n" "New session" claude-code-sessions-new)]
+  [["Session"
+    ("RET" "Focus / resume" claude-code-sessions-visit)
+    ("r" "Rename" claude-code-sessions-rename)
+    ("i" "Interrupt" claude-code-sessions-interrupt)
+    ("s" "Send text" claude-code-sessions-send)]
+   ["Manage"
+    ("k" "Kill" claude-code-sessions-kill)
+    ("d" "Delete dead" claude-code-sessions-delete)
+    ("m" "Mark" claude-code-sessions-mark)
+    ("u" "Unmark" claude-code-sessions-unmark)]
+   ["View"
+    ("G" "Cycle grouping" claude-code-sessions-cycle-grouping)
+    ("TAB" "Toggle group" claude-code-sessions-toggle-group)
+    ("g" "Refresh" claude-code-sessions-refresh)]])
 
 ;;;###autoload
 (defun claude-code ()

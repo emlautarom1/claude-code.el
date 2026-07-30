@@ -38,12 +38,12 @@ table is empty) and rebinds `claude-code--managed' to a fresh table, so
 (defun claude-code-mcp-tests--call-eval (code)
   "Dispatch a `tools/call' of the `eval' tool for CODE and return the response."
   (claude-code-mcp-tests--isolated
-   (claude-code--mcp-handle-request
-    "sess"
-    (claude-code-mcp-tests--request
-     "tools/call" 9
-     (list (cons 'name "eval")
-           (cons 'arguments (list (cons 'code code))))))))
+    (claude-code--mcp-handle-request
+     "sess"
+     (claude-code-mcp-tests--request
+      "tools/call" 9
+      (list (cons 'name "eval")
+            (cons 'arguments (list (cons 'code code))))))))
 
 ;;;; Pure dispatch: initialize / notifications / errors
 
@@ -86,20 +86,20 @@ table is empty) and rebinds `claude-code--managed' to a fresh table, so
     (should (= (alist-get 'code (alist-get 'error resp)) -32601)))
   ;; Unknown tool -> -32602.
   (let ((resp (claude-code-mcp-tests--isolated
-               (claude-code--mcp-handle-request
-                "sess"
-                (claude-code-mcp-tests--request
-                 "tools/call" 8 (list (cons 'name "nope")
-                                      (cons 'arguments nil)))))))
+                (claude-code--mcp-handle-request
+                 "sess"
+                 (claude-code-mcp-tests--request
+                  "tools/call" 8 (list (cons 'name "nope")
+                                       (cons 'arguments nil)))))))
     (should (equal (alist-get 'id resp) 8))
     (should (= (alist-get 'code (alist-get 'error resp)) -32602)))
   ;; Missing required argument -> -32602.
   (let ((resp (claude-code-mcp-tests--isolated
-               (claude-code--mcp-handle-request
-                "sess"
-                (claude-code-mcp-tests--request
-                 "tools/call" 10 (list (cons 'name "eval")
-                                       (cons 'arguments nil)))))))
+                (claude-code--mcp-handle-request
+                 "sess"
+                 (claude-code-mcp-tests--request
+                  "tools/call" 10 (list (cons 'name "eval")
+                                        (cons 'arguments nil)))))))
     (should (equal (alist-get 'id resp) 10))
     (should (= (alist-get 'code (alist-get 'error resp)) -32602))))
 
@@ -167,12 +167,12 @@ serializing to an empty JSON object, and an `:optional' arg staying out of
         ;; Omitting the optional argument runs the tool -- no -32602.
         (let ((result (alist-get 'result
                                  (claude-code-mcp-tests--isolated
-                                  (claude-code--mcp-handle-request
-                                   "sess"
-                                   (claude-code-mcp-tests--request
-                                    "tools/call" 2
-                                    (list (cons 'name "cc-mcp-test-opt")
-                                          (cons 'arguments nil))))))))
+                                   (claude-code--mcp-handle-request
+                                    "sess"
+                                    (claude-code-mcp-tests--request
+                                     "tools/call" 2
+                                     (list (cons 'name "cc-mcp-test-opt")
+                                           (cons 'arguments nil))))))))
           (should (eq (alist-get 'isError result) :json-false))))
     (remhash "cc-mcp-test-noargs" claude-code--mcp-tools)
     (remhash "cc-mcp-test-opt" claude-code--mcp-tools)))
@@ -302,12 +302,12 @@ all non-nil in Lisp, so each must arrive as nil."
           (dolist (case '((:json-false . nil) (:false . nil) (:null . nil) (t . t)))
             (setq seen 'unset)
             (claude-code-mcp-tests--isolated
-             (claude-code--mcp-handle-request
-              "sess"
-              (claude-code-mcp-tests--request
-               "tools/call" 2
-               (list (cons 'name "cc-mcp-test-bool")
-                     (cons 'arguments (list (cons 'flag (car case))))))))
+              (claude-code--mcp-handle-request
+               "sess"
+               (claude-code-mcp-tests--request
+                "tools/call" 2
+                (list (cons 'name "cc-mcp-test-bool")
+                      (cons 'arguments (list (cons 'flag (car case))))))))
             (should (eq seen (cdr case)))))
       (remhash "cc-mcp-test-bool" claude-code--mcp-tools))))
 
@@ -444,15 +444,15 @@ tries to open a server-to-client SSE stream."
 (ert-deftest claude-code-mcp-test-get-returns-405 ()
   "A GET on the MCP endpoint returns HTTP 405 (no SSE stream offered)."
   (claude-code-mcp-tests--isolated
-   (let ((claude-code-mcp-enabled t)
-         (claude-code--mcp-server nil)
-         (claude-code--mcp-port nil))
-     (unwind-protect
-         (let* ((port (claude-code--mcp-ensure-server))
-                (raw (claude-code-mcp-tests--http-get port "/mcp/sess")))
-           (should (integerp port))
-           (should (string-match-p "\\`HTTP/1\\.[01] 405 " raw)))
-       (claude-code-mcp-stop)))))
+    (let ((claude-code-mcp-enabled t)
+          (claude-code--mcp-server nil)
+          (claude-code--mcp-port nil))
+      (unwind-protect
+          (let* ((port (claude-code--mcp-ensure-server))
+                 (raw (claude-code-mcp-tests--http-get port "/mcp/sess")))
+            (should (integerp port))
+            (should (string-match-p "\\`HTTP/1\\.[01] 405 " raw)))
+        (claude-code-mcp-stop)))))
 
 (defun claude-code-mcp-tests--response-body (raw)
   "Parse the JSON body of raw HTTP response RAW to an alist.
@@ -474,72 +474,72 @@ Returns nil for an empty (notification) reply that carries no body."
 (ert-deftest claude-code-mcp-test-socket-e2e ()
   "Drive the real loopback server through initialize/list/call over a socket."
   (claude-code-mcp-tests--isolated
-   (let ((claude-code-mcp-enabled t)
-         (claude-code--mcp-server nil)
-         (claude-code--mcp-port nil))
-     (unwind-protect
-         (let ((port (claude-code--mcp-ensure-server)))
-           (should (integerp port))
-           ;; initialize
-           (let ((resp (claude-code-mcp-tests--rpc
-                        port "sess"
-                        (claude-code-mcp-tests--request
-                         "initialize" 1
-                         (list (cons 'protocolVersion "2025-06-18"))))))
-             (should (equal (alist-get 'id resp) 1))
-             (should (equal (alist-get 'protocolVersion
-                                       (alist-get 'result resp))
-                            "2025-06-18")))
-           ;; notification -> the server MUST still reply, with an empty 202 and
-           ;; no JSON body.  Assert the 202 status line on the wire, so this
-           ;; is not satisfied by a silent no-reply (which also parses to nil).
-           (let* ((raw (claude-code-mcp-tests--http-post
-                        port "/mcp/sess"
-                        (claude-code--mcp-serialize
-                         (claude-code-mcp-tests--request
-                          "notifications/initialized"))))
-                  (body (when (string-match "\r\n\r\n" raw)
-                          (substring raw (match-end 0)))))
-             (should (string-match-p "\\`HTTP/1\\.[01] 202 " raw))
-             (should (equal body "")))
-           ;; tools/list
-           (let* ((resp (claude-code-mcp-tests--rpc
-                         port "sess"
-                         (claude-code-mcp-tests--request "tools/list" 2)))
-                  (tools (alist-get 'tools (alist-get 'result resp))))
-             (should (vectorp tools))
-             (should (seq-find (lambda (tl)
-                                 (equal (alist-get 'name tl) "eval"))
-                               tools)))
-           ;; tools/call eval
-           (let* ((resp (claude-code-mcp-tests--rpc
+    (let ((claude-code-mcp-enabled t)
+          (claude-code--mcp-server nil)
+          (claude-code--mcp-port nil))
+      (unwind-protect
+          (let ((port (claude-code--mcp-ensure-server)))
+            (should (integerp port))
+            ;; initialize
+            (let ((resp (claude-code-mcp-tests--rpc
                          port "sess"
                          (claude-code-mcp-tests--request
-                          "tools/call" 3
-                          (list (cons 'name "eval")
-                                (cons 'arguments
-                                      (list (cons 'code "(+ 40 2)")))))))
-                  (result (alist-get 'result resp)))
-             (should (equal (alist-get 'text
-                                       (aref (alist-get 'content result) 0))
-                            "42"))
-             (should (eq (alist-get 'isError result) :json-false))))
-       (claude-code-mcp-stop)))))
+                          "initialize" 1
+                          (list (cons 'protocolVersion "2025-06-18"))))))
+              (should (equal (alist-get 'id resp) 1))
+              (should (equal (alist-get 'protocolVersion
+                                        (alist-get 'result resp))
+                             "2025-06-18")))
+            ;; notification -> the server MUST still reply, with an empty 202 and
+            ;; no JSON body.  Assert the 202 status line on the wire, so this
+            ;; is not satisfied by a silent no-reply (which also parses to nil).
+            (let* ((raw (claude-code-mcp-tests--http-post
+                         port "/mcp/sess"
+                         (claude-code--mcp-serialize
+                          (claude-code-mcp-tests--request
+                           "notifications/initialized"))))
+                   (body (when (string-match "\r\n\r\n" raw)
+                           (substring raw (match-end 0)))))
+              (should (string-match-p "\\`HTTP/1\\.[01] 202 " raw))
+              (should (equal body "")))
+            ;; tools/list
+            (let* ((resp (claude-code-mcp-tests--rpc
+                          port "sess"
+                          (claude-code-mcp-tests--request "tools/list" 2)))
+                   (tools (alist-get 'tools (alist-get 'result resp))))
+              (should (vectorp tools))
+              (should (seq-find (lambda (tl)
+                                  (equal (alist-get 'name tl) "eval"))
+                                tools)))
+            ;; tools/call eval
+            (let* ((resp (claude-code-mcp-tests--rpc
+                          port "sess"
+                          (claude-code-mcp-tests--request
+                           "tools/call" 3
+                           (list (cons 'name "eval")
+                                 (cons 'arguments
+                                       (list (cons 'code "(+ 40 2)")))))))
+                   (result (alist-get 'result resp)))
+              (should (equal (alist-get 'text
+                                        (aref (alist-get 'content result) 0))
+                             "42"))
+              (should (eq (alist-get 'isError result) :json-false))))
+        (claude-code-mcp-stop)))))
 
 (ert-deftest claude-code-mcp-test-transport-parse-error ()
   "A malformed JSON body is answered with a -32700 error and a null id."
   (claude-code-mcp-tests--isolated
-   (let ((claude-code-mcp-enabled t)
-         (claude-code--mcp-server nil)
-         (claude-code--mcp-port nil))
-     (unwind-protect
-         (let* ((port (claude-code--mcp-ensure-server))
-                (resp (claude-code-mcp-tests--response-body
-                       (claude-code-mcp-tests--http-post
-                        port "/mcp/sess" "{not json"))))
-           (should (eq (alist-get 'id resp) :null))
-           (should (= (alist-get 'code (alist-get 'error resp)) -32700)))
-       (claude-code-mcp-stop)))))
+    (let ((claude-code-mcp-enabled t)
+          (claude-code--mcp-server nil)
+          (claude-code--mcp-port nil))
+      (unwind-protect
+          (let* ((port (claude-code--mcp-ensure-server))
+                 (resp (claude-code-mcp-tests--response-body
+                        (claude-code-mcp-tests--http-post
+                         port "/mcp/sess" "{not json"))))
+            (should (eq (alist-get 'id resp) :null))
+            (should (= (alist-get 'code (alist-get 'error resp)) -32700)))
+        (claude-code-mcp-stop)))))
 
 (ert-deftest claude-code-mcp-test-transport-truncated-body ()
   "A `Content-Length' larger than the delivered body yields a -32700 error.
@@ -547,26 +547,26 @@ Web-server frames the body by the blank line, not `Content-Length', so a body
 split across packets arrives short; the integrity guard rejects it rather than
 parsing a partial request."
   (claude-code-mcp-tests--isolated
-   (let ((claude-code-mcp-enabled t)
-         (claude-code--mcp-server nil)
-         (claude-code--mcp-port nil))
-     (unwind-protect
-         (let* ((port (claude-code--mcp-ensure-server))
-                (body "{\"jsonrpc\":\"2.0\"}")
-                ;; Declare ten more bytes than we actually send.
-                (raw (claude-code-mcp-tests--http-send
-                      port
-                      (format (concat "POST /mcp/sess HTTP/1.1\r\n"
-                                      "Host: 127.0.0.1\r\n"
-                                      "Content-Type: application/json\r\n"
-                                      "Content-Length: %d\r\n"
-                                      "Connection: close\r\n"
-                                      "\r\n%s")
-                              (+ (string-bytes body) 10) body)))
-                (resp (claude-code-mcp-tests--response-body raw)))
-           (should (eq (alist-get 'id resp) :null))
-           (should (= (alist-get 'code (alist-get 'error resp)) -32700)))
-       (claude-code-mcp-stop)))))
+    (let ((claude-code-mcp-enabled t)
+          (claude-code--mcp-server nil)
+          (claude-code--mcp-port nil))
+      (unwind-protect
+          (let* ((port (claude-code--mcp-ensure-server))
+                 (body "{\"jsonrpc\":\"2.0\"}")
+                 ;; Declare ten more bytes than we actually send.
+                 (raw (claude-code-mcp-tests--http-send
+                       port
+                       (format (concat "POST /mcp/sess HTTP/1.1\r\n"
+                                       "Host: 127.0.0.1\r\n"
+                                       "Content-Type: application/json\r\n"
+                                       "Content-Length: %d\r\n"
+                                       "Connection: close\r\n"
+                                       "\r\n%s")
+                               (+ (string-bytes body) 10) body)))
+                 (resp (claude-code-mcp-tests--response-body raw)))
+            (should (eq (alist-get 'id resp) :null))
+            (should (= (alist-get 'code (alist-get 'error resp)) -32700)))
+        (claude-code-mcp-stop)))))
 
 ;;;; Live integration (real `claude' + real MCP handshake)
 ;;
@@ -634,38 +634,38 @@ ignored so a partially-created worktree is still cleaned up."
     (advice-add 'claude-code--mcp-handle-request :before probe)
     (unwind-protect
         (claude-code-tests--with-top-level-env
-         (setq buffer (claude-code-spawn
-                       root :worktree t
-                       :prompt "Respond with the single word: pong"))
-         (maphash (lambda (k v)
-                    (when (eq (plist-get v :buffer) buffer) (setq id k)))
-                  claude-code--managed)
-         (should id)
-         (setq pid (buffer-local-value 'ghostel--pid buffer))
-         ;; The real CLI performs the MCP initialize handshake against us.
-         (should (claude-code-tests--await (lambda () initialized) 45))
-         ;; Once the worktree session's sessions file lands, its real cwd is the
-         ;; worktree dir; an `eval' of `default-directory' returns it.
-         (should (claude-code-tests--await
-                  (lambda ()
-                    (let ((cwd (claude-code--session-cwd id)))
-                      (and cwd (string-match-p "/\\.claude/worktrees/" cwd))))
-                  45))
-         (let* ((cwd (claude-code--session-cwd id))
-                (resp (claude-code--mcp-handle-request
-                       id
-                       (list (cons 'jsonrpc "2.0") (cons 'id 1)
-                             (cons 'method "tools/call")
-                             (cons 'params
-                                   (list (cons 'name "eval")
-                                         (cons 'arguments
-                                               (list (cons 'code
-                                                           "default-directory"))))))))
-                (result (alist-get 'result resp))
-                (text (alist-get 'text (aref (alist-get 'content result) 0))))
-           (should (eq (alist-get 'isError result) :json-false))
-           ;; `text' is `prin1-to-string' of the bound directory (quoted).
-           (should (equal (read text) (file-name-as-directory cwd)))))
+          (setq buffer (claude-code-spawn
+                        root :worktree t
+                        :prompt "Respond with the single word: pong"))
+          (maphash (lambda (k v)
+                     (when (eq (plist-get v :buffer) buffer) (setq id k)))
+                   claude-code--managed)
+          (should id)
+          (setq pid (buffer-local-value 'ghostel--pid buffer))
+          ;; The real CLI performs the MCP initialize handshake against us.
+          (should (claude-code-tests--await (lambda () initialized) 45))
+          ;; Once the worktree session's sessions file lands, its real cwd is the
+          ;; worktree dir; an `eval' of `default-directory' returns it.
+          (should (claude-code-tests--await
+                   (lambda ()
+                     (let ((cwd (claude-code--session-cwd id)))
+                       (and cwd (string-match-p "/\\.claude/worktrees/" cwd))))
+                   45))
+          (let* ((cwd (claude-code--session-cwd id))
+                 (resp (claude-code--mcp-handle-request
+                        id
+                        (list (cons 'jsonrpc "2.0") (cons 'id 1)
+                              (cons 'method "tools/call")
+                              (cons 'params
+                                    (list (cons 'name "eval")
+                                          (cons 'arguments
+                                                (list (cons 'code
+                                                            "default-directory"))))))))
+                 (result (alist-get 'result resp))
+                 (text (alist-get 'text (aref (alist-get 'content result) 0))))
+            (should (eq (alist-get 'isError result) :json-false))
+            ;; `text' is `prin1-to-string' of the bound directory (quoted).
+            (should (equal (read text) (file-name-as-directory cwd)))))
       (advice-remove 'claude-code--mcp-handle-request probe)
       (when (buffer-live-p buffer)
         (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))

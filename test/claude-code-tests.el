@@ -58,54 +58,54 @@ features still load normally."
 (ert-deftest claude-code-test-live-status-table ()
   "Every sessions/ file is parsed and keyed by session id."
   (claude-code-tests--with-fixtures
-   (let ((table (claude-code--live-status-table)))
-     (should (= (hash-table-count table) 4))
-     (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
-       (should (equal (plist-get s1 :status) "busy"))
-       ;; The parser exposes only :pid, :cwd, :status and :waiting-for.
-       (should (null (plist-get s1 :name)))
-       (should (= (plist-get s1 :pid) 1001)))
-     (let ((s3 (gethash "33333333-3333-4333-8333-333333333333" table)))
-       (should (equal (plist-get s3 :status) "waiting"))
-       (should (equal (plist-get s3 :waiting-for) "permission prompt")))
-     ;; A file without a status field yields nil, not an error.
-     (let ((s4 (gethash "44444444-4444-4444-8444-444444444444" table)))
-       (should (null (plist-get s4 :status)))))))
+    (let ((table (claude-code--live-status-table)))
+      (should (= (hash-table-count table) 4))
+      (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
+        (should (equal (plist-get s1 :status) "busy"))
+        ;; The parser exposes only :pid, :cwd, :status and :waiting-for.
+        (should (null (plist-get s1 :name)))
+        (should (= (plist-get s1 :pid) 1001)))
+      (let ((s3 (gethash "33333333-3333-4333-8333-333333333333" table)))
+        (should (equal (plist-get s3 :status) "waiting"))
+        (should (equal (plist-get s3 :waiting-for) "permission prompt")))
+      ;; A file without a status field yields nil, not an error.
+      (let ((s4 (gethash "44444444-4444-4444-8444-444444444444" table)))
+        (should (null (plist-get s4 :status)))))))
 
 (ert-deftest claude-code-test-project-transcripts ()
   "Transcripts of the project and its worktrees are enumerated."
   (claude-code-tests--with-fixtures
-   (let* ((ts (claude-code--project-transcripts "/home/test/proj"))
-          (by-id (lambda (id)
-                   (seq-find (lambda (d) (equal (plist-get d :id) id)) ts))))
-     (should (= (length ts) 4))
-     (let ((s1 (funcall by-id "11111111-1111-4111-8111-111111111111")))
-       ;; With no custom title, the LAST ai-title wins over earlier ones.
-       (should (equal (plist-get s1 :title) "Understand the project layout"))
-       (should (equal (plist-get s1 :last-prompt) "first prompt"))
-       (should (null (plist-get s1 :worktree-p)))
-       ;; Last-active is the newest timestamped (assistant) line, even though an
-       ;; untimestamped ai-title line follows it -- not the file mtime.
-       (should (time-equal-p (plist-get s1 :last-active)
-                             (date-to-time "2026-06-10T13:23:27.697Z"))))
-     (let ((s2 (funcall by-id "22222222-2222-4222-8222-222222222222")))
-       ;; A custom title supplies the title even with no ai-title line.
-       (should (equal (plist-get s2 :title) "My renamed session"))
-       (should (equal (plist-get s2 :last-prompt) "another task here")))
-     (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
-       (should (plist-get s3 :worktree-p))
-       ;; The cwd is the lossless worktreePath from the transcript, never
-       ;; the lossy encoded-directory suffix.
-       (should (equal (plist-get s3 :worktree-path)
-                      "/home/test/proj/.claude/worktrees/feat"))
-       ;; A user custom title takes precedence over Claude's ai-title.
-       (should (equal (plist-get s3 :title) "Renamed worktree")))
-     (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
-       (should (plist-get s5 :worktree-p))
-       ;; The worktree name has a dot; the encoded suffix would lossily read
-       ;; "my-feat", but the transcript's worktreePath keeps "my.feat".
-       (should (equal (plist-get s5 :worktree-path)
-                      "/home/test/proj/.claude/worktrees/my.feat"))))))
+    (let* ((ts (claude-code--project-transcripts "/home/test/proj"))
+           (by-id (lambda (id)
+                    (seq-find (lambda (d) (equal (plist-get d :id) id)) ts))))
+      (should (= (length ts) 4))
+      (let ((s1 (funcall by-id "11111111-1111-4111-8111-111111111111")))
+        ;; With no custom title, the LAST ai-title wins over earlier ones.
+        (should (equal (plist-get s1 :title) "Understand the project layout"))
+        (should (equal (plist-get s1 :last-prompt) "first prompt"))
+        (should (null (plist-get s1 :worktree-p)))
+        ;; Last-active is the newest timestamped (assistant) line, even though an
+        ;; untimestamped ai-title line follows it -- not the file mtime.
+        (should (time-equal-p (plist-get s1 :last-active)
+                              (date-to-time "2026-06-10T13:23:27.697Z"))))
+      (let ((s2 (funcall by-id "22222222-2222-4222-8222-222222222222")))
+        ;; A custom title supplies the title even with no ai-title line.
+        (should (equal (plist-get s2 :title) "My renamed session"))
+        (should (equal (plist-get s2 :last-prompt) "another task here")))
+      (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
+        (should (plist-get s3 :worktree-p))
+        ;; The cwd is the lossless worktreePath from the transcript, never
+        ;; the lossy encoded-directory suffix.
+        (should (equal (plist-get s3 :worktree-path)
+                       "/home/test/proj/.claude/worktrees/feat"))
+        ;; A user custom title takes precedence over Claude's ai-title.
+        (should (equal (plist-get s3 :title) "Renamed worktree")))
+      (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
+        (should (plist-get s5 :worktree-p))
+        ;; The worktree name has a dot; the encoded suffix would lossily read
+        ;; "my-feat", but the transcript's worktreePath keeps "my.feat".
+        (should (equal (plist-get s5 :worktree-path)
+                       "/home/test/proj/.claude/worktrees/my.feat"))))))
 
 (defmacro claude-code-tests--with-transcript (var lines mtime &rest body)
   "Bind VAR to a temp .jsonl holding LINES with file mtime MTIME, run BODY.
@@ -127,46 +127,46 @@ cleared first and the temp file deleted afterwards."
 The transcript ends in untimestamped metadata and its file mtime is set far in
 the future, yet last-active is the last real event's timestamp."
   (claude-code-tests--with-transcript file
-				      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:20:00.000Z\"}"
-					"{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
-					"{\"type\":\"last-prompt\",\"lastPrompt\":\"q\"}")
-				      1800000000
-				      (should (time-equal-p
-					       (plist-get (claude-code--transcript-fields file) :last-active)
-					       (date-to-time "2026-06-10T13:23:27.697Z")))))
+      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:20:00.000Z\"}"
+        "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
+        "{\"type\":\"last-prompt\",\"lastPrompt\":\"q\"}")
+      1800000000
+    (should (time-equal-p
+             (plist-get (claude-code--transcript-fields file) :last-active)
+             (date-to-time "2026-06-10T13:23:27.697Z")))))
 
 (ert-deftest claude-code-test-transcript-fields-last-active-fallback ()
   "With no timestamped line at all, `:last-active' falls back to the file mtime."
   (claude-code-tests--with-transcript file
-				      '("{\"type\":\"ai-title\",\"aiTitle\":\"stub\"}"
-					"{\"type\":\"agent-name\",\"agentName\":\"orphan\"}")
-				      1800000000
-				      (should (time-equal-p
-					       (plist-get (claude-code--transcript-fields file) :last-active)
-					       1800000000))))
+      '("{\"type\":\"ai-title\",\"aiTitle\":\"stub\"}"
+        "{\"type\":\"agent-name\",\"agentName\":\"orphan\"}")
+      1800000000
+    (should (time-equal-p
+             (plist-get (claude-code--transcript-fields file) :last-active)
+             1800000000))))
 
 (ert-deftest claude-code-test-transcript-fields-last-active-embedded-timestamp ()
   "A nested `timestamp' in a `file-history-snapshot' line is not mistaken for one.
 The snapshot's embedded timestamp is newer than the real last event, but
 last-active must still be the event's top-level timestamp."
   (claude-code-tests--with-transcript file
-				      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
-					"{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
-				      1800000000
-				      (should (time-equal-p
-					       (plist-get (claude-code--transcript-fields file) :last-active)
-					       (date-to-time "2026-06-10T13:23:27.697Z")))))
+      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
+        "{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
+      1800000000
+    (should (time-equal-p
+             (plist-get (claude-code--transcript-fields file) :last-active)
+             (date-to-time "2026-06-10T13:23:27.697Z")))))
 
 (ert-deftest claude-code-test-transcript-fields-last-active-snapshot-only ()
   "A transcript of only `file-history-snapshot' lines has no real top-level
 timestamp, so last-active falls back to the file mtime -- never the embedded
 snapshot timestamp."
   (claude-code-tests--with-transcript file
-				      '("{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
-				      1800000000
-				      (should (time-equal-p
-					       (plist-get (claude-code--transcript-fields file) :last-active)
-					       1800000000))))
+      '("{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
+      1800000000
+    (should (time-equal-p
+             (plist-get (claude-code--transcript-fields file) :last-active)
+             1800000000))))
 
 ;;;; Model
 
@@ -177,54 +177,54 @@ snapshot timestamp."
 (ert-deftest claude-code-test-sessions-all-dead ()
   "With nothing managed, every transcript is a dead session."
   (claude-code-tests--with-fixtures
-   (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
-     (let ((ss (claude-code-sessions "/home/test/proj")))
-       (should (= (length ss) 4))
-       (should-not (seq-some #'claude-code-session-alive-p ss))
-       (let ((s1 (claude-code-tests--find-session
-                  ss "11111111-1111-4111-8111-111111111111")))
-         ;; Dead sessions carry no live status, but keep their title.
-         (should (null (claude-code-session-status s1)))
-         (should (equal (claude-code-session-title s1)
-                        "Understand the project layout")))
-       ;; The worktree transcript shows up under the parent project.
-       (should (claude-code-session-worktree-p
-                (claude-code-tests--find-session
-                 ss "33333333-3333-4333-8333-333333333333")))
-       ;; A genuinely dead worktree (no sessions/*.json) labels with its own
-       ;; worktree directory, not the parent project (regression: C1).  Its cwd
-       ;; comes from the lossless worktreePath, so a dotted name survives
-       ;; (regression: N2 -- never invert the lossy directory encoding).
-       (let ((solo (claude-code-tests--find-session
-                    ss "55555555-5555-4555-8555-555555555555")))
-         (should (equal (claude-code-session-cwd solo)
-                        "/home/test/proj/.claude/worktrees/my.feat"))
-         (should (equal (claude-code--worktree-label solo) "my.feat")))))))
+    (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
+      (let ((ss (claude-code-sessions "/home/test/proj")))
+        (should (= (length ss) 4))
+        (should-not (seq-some #'claude-code-session-alive-p ss))
+        (let ((s1 (claude-code-tests--find-session
+                   ss "11111111-1111-4111-8111-111111111111")))
+          ;; Dead sessions carry no live status, but keep their title.
+          (should (null (claude-code-session-status s1)))
+          (should (equal (claude-code-session-title s1)
+                         "Understand the project layout")))
+        ;; The worktree transcript shows up under the parent project.
+        (should (claude-code-session-worktree-p
+                 (claude-code-tests--find-session
+                  ss "33333333-3333-4333-8333-333333333333")))
+        ;; A genuinely dead worktree (no sessions/*.json) labels with its own
+        ;; worktree directory, not the parent project (regression: C1).  Its cwd
+        ;; comes from the lossless worktreePath, so a dotted name survives
+        ;; (regression: N2 -- never invert the lossy directory encoding).
+        (let ((solo (claude-code-tests--find-session
+                     ss "55555555-5555-4555-8555-555555555555")))
+          (should (equal (claude-code-session-cwd solo)
+                         "/home/test/proj/.claude/worktrees/my.feat"))
+          (should (equal (claude-code--worktree-label solo) "my.feat")))))))
 
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
   (claude-code-tests--with-fixtures
-   (let ((buf (generate-new-buffer " *cc-test*"))
-         (id "11111111-1111-4111-8111-111111111111"))
-     (unwind-protect
-         (progn
-           (with-current-buffer buf (setq-local ghostel--pid 4242))
-           (cl-letf (((symbol-function 'claude-code--live-managed)
-                      (lambda (_r) (list (cons id buf)))))
-             (let* ((ss (claude-code-sessions "/home/test/proj"))
-                    (s1 (claude-code-tests--find-session ss id)))
-               (should (= (length ss) 4))
-               (should (claude-code-session-alive-p s1))
-               (should (eq (claude-code-session-buffer s1) buf))
-               (should (= (claude-code-session-pid s1) 4242))
-               ;; Alive status comes from the live sessions file; the display
-               ;; name comes from the transcript title.
-               (should (equal (claude-code-session-status s1) "busy"))
-               (should (equal (claude-code-session-title s1)
-                              "Understand the project layout"))
-               (should (equal (claude-code--session-display-name s1)
-                              "Understand the project layout")))))
-       (kill-buffer buf)))))
+    (let ((buf (generate-new-buffer " *cc-test*"))
+          (id "11111111-1111-4111-8111-111111111111"))
+      (unwind-protect
+          (progn
+            (with-current-buffer buf (setq-local ghostel--pid 4242))
+            (cl-letf (((symbol-function 'claude-code--live-managed)
+                       (lambda (_r) (list (cons id buf)))))
+              (let* ((ss (claude-code-sessions "/home/test/proj"))
+                     (s1 (claude-code-tests--find-session ss id)))
+                (should (= (length ss) 4))
+                (should (claude-code-session-alive-p s1))
+                (should (eq (claude-code-session-buffer s1) buf))
+                (should (= (claude-code-session-pid s1) 4242))
+                ;; Alive status comes from the live sessions file; the display
+                ;; name comes from the transcript title.
+                (should (equal (claude-code-session-status s1) "busy"))
+                (should (equal (claude-code-session-title s1)
+                               "Understand the project layout"))
+                (should (equal (claude-code--session-display-name s1)
+                               "Understand the project layout")))))
+        (kill-buffer buf)))))
 
 (ert-deftest claude-code-test-process-usage ()
   "Usage sums the pcpu/rss of a PID's whole subtree."
@@ -276,51 +276,51 @@ snapshot timestamp."
 (ert-deftest claude-code-test-external-session ()
   "An unmanaged transcript with a live sessions PID is external, else dead."
   (claude-code-tests--with-fixtures
-   (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
-     ;; Session 22222222 has sessions/1002.json (pid 1002).  When Emacs does
-     ;; not manage it but that pid is live, it is external, not dead.
-     (cl-letf (((symbol-function 'list-system-processes) (lambda () '(1002))))
-       (let ((s (claude-code-tests--find-session
-                 (claude-code-sessions "/home/test/proj")
-                 "22222222-2222-4222-8222-222222222222")))
-         (should-not (claude-code-session-alive-p s))
-         (should (claude-code-session-external-p s))
-         (should (eq 'external (claude-code--session-liveness s)))
-         ;; The display name comes from the transcript (its `custom-title'),
-         ;; regardless of liveness.
-         (should (equal (claude-code--session-display-name s)
-                        "My renamed session"))))
-     (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
-       (let ((s (claude-code-tests--find-session
-                 (claude-code-sessions "/home/test/proj")
-                 "22222222-2222-4222-8222-222222222222")))
-         (should-not (claude-code-session-external-p s))
-         (should (eq 'dead (claude-code--session-liveness s)))
-         (should (equal (claude-code--session-display-name s)
-                        "My renamed session"))))
-     (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
-       (let ((s (claude-code-tests--find-session
-                 (claude-code-sessions "/home/test/proj")
-                 "55555555-5555-4555-8555-555555555555")))
-         (should (eq 'dead (claude-code--session-liveness s)))
-         (should (equal (claude-code--session-display-name s)
-                        "Dotted worktree")))))))
+    (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
+      ;; Session 22222222 has sessions/1002.json (pid 1002).  When Emacs does
+      ;; not manage it but that pid is live, it is external, not dead.
+      (cl-letf (((symbol-function 'list-system-processes) (lambda () '(1002))))
+        (let ((s (claude-code-tests--find-session
+                  (claude-code-sessions "/home/test/proj")
+                  "22222222-2222-4222-8222-222222222222")))
+          (should-not (claude-code-session-alive-p s))
+          (should (claude-code-session-external-p s))
+          (should (eq 'external (claude-code--session-liveness s)))
+          ;; The display name comes from the transcript (its `custom-title'),
+          ;; regardless of liveness.
+          (should (equal (claude-code--session-display-name s)
+                         "My renamed session"))))
+      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+        (let ((s (claude-code-tests--find-session
+                  (claude-code-sessions "/home/test/proj")
+                  "22222222-2222-4222-8222-222222222222")))
+          (should-not (claude-code-session-external-p s))
+          (should (eq 'dead (claude-code--session-liveness s)))
+          (should (equal (claude-code--session-display-name s)
+                         "My renamed session"))))
+      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+        (let ((s (claude-code-tests--find-session
+                  (claude-code-sessions "/home/test/proj")
+                  "55555555-5555-4555-8555-555555555555")))
+          (should (eq 'dead (claude-code--session-liveness s)))
+          (should (equal (claude-code--session-display-name s)
+                         "Dotted worktree")))))))
 
 (ert-deftest claude-code-test-session-cwd ()
   "Session cwd prefers the live file, then the registry, else nil."
   (claude-code-tests--with-fixtures
-   (let ((claude-code--managed (make-hash-table :test 'equal)))
-     ;; The live sessions file wins.  Session 33333333 is a worktree, so its
-     ;; live cwd is the worktree directory (not the parent project root) -- the
-     ;; whole point of reading the real cwd for a worktree session.
-     (should (equal (claude-code--session-cwd
-                     "33333333-3333-4333-8333-333333333333")
-                    "/home/test/proj/.claude/worktrees/feat"))
-     ;; With no live file, fall back to the managed registry `:cwd'.
-     (puthash "reg-only" (list :cwd "/home/x/proj") claude-code--managed)
-     (should (equal (claude-code--session-cwd "reg-only") "/home/x/proj"))
-     ;; An unknown id yields nil, so `default-directory' is left unchanged.
-     (should (null (claude-code--session-cwd "no-such-id"))))))
+    (let ((claude-code--managed (make-hash-table :test 'equal)))
+      ;; The live sessions file wins.  Session 33333333 is a worktree, so its
+      ;; live cwd is the worktree directory (not the parent project root) -- the
+      ;; whole point of reading the real cwd for a worktree session.
+      (should (equal (claude-code--session-cwd
+                      "33333333-3333-4333-8333-333333333333")
+                     "/home/test/proj/.claude/worktrees/feat"))
+      ;; With no live file, fall back to the managed registry `:cwd'.
+      (puthash "reg-only" (list :cwd "/home/x/proj") claude-code--managed)
+      (should (equal (claude-code--session-cwd "reg-only") "/home/x/proj"))
+      ;; An unknown id yields nil, so `default-directory' is left unchanged.
+      (should (null (claude-code--session-cwd "no-such-id"))))))
 
 
 ;;;; Operations
@@ -473,9 +473,9 @@ snapshot timestamp."
     (unwind-protect
         (progn
           (claude-code-tests--recording-ghostel calls
-						(claude-code-rename
-						 (claude-code-session--create :id "s" :alive-p t :buffer buf)
-						 "My Name"))
+            (claude-code-rename
+             (claude-code-session--create :id "s" :alive-p t :buffer buf)
+             "My Name"))
           (should (equal (reverse calls)
                          '((send "/rename My Name") (key "return"))))
           ;; Renaming a dead session is refused.
@@ -490,18 +490,18 @@ snapshot timestamp."
     (unwind-protect
         (let ((s (claude-code-session--create :id "s" :alive-p t :buffer buf)))
           (claude-code-tests--recording-ghostel calls
-						;; Single line, no submit: typed, no RET.
-						(setq calls nil)
-						(claude-code-send-text s "hello")
-						(should (equal (reverse calls) '((send "hello"))))
-						;; Single line, submit: typed then RET.
-						(setq calls nil)
-						(claude-code-send-text s "hi" t)
-						(should (equal (reverse calls) '((send "hi") (key "return"))))
-						;; Multi-line: bracketed paste, then RET only for the submit.
-						(setq calls nil)
-						(claude-code-send-text s "a\nb" t)
-						(should (equal (reverse calls) '((paste "a\nb") (key "return"))))))
+            ;; Single line, no submit: typed, no RET.
+            (setq calls nil)
+            (claude-code-send-text s "hello")
+            (should (equal (reverse calls) '((send "hello"))))
+            ;; Single line, submit: typed then RET.
+            (setq calls nil)
+            (claude-code-send-text s "hi" t)
+            (should (equal (reverse calls) '((send "hi") (key "return"))))
+            ;; Multi-line: bracketed paste, then RET only for the submit.
+            (setq calls nil)
+            (claude-code-send-text s "a\nb" t)
+            (should (equal (reverse calls) '((paste "a\nb") (key "return"))))))
       (kill-buffer buf))))
 
 (ert-deftest claude-code-test-status-display-unknown ()
@@ -667,39 +667,39 @@ computed for every row, so one odd id would abort a whole view refresh."
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."
   (claude-code-tests--with-fixtures
-   (let ((claude-code-refresh-interval nil)
-         (buf (get-buffer-create " *cc-view-test*")))
-     (unwind-protect
-         (with-current-buffer buf
-           (cl-letf (((symbol-function 'claude-code--live-managed)
-                      (lambda (_r) nil))
-                     ;; Pin the process table empty so the fixture sessions
-                     ;; (pids 1001-1003) never classify as external on a host
-                     ;; that happens to have those pids live.
-                     ((symbol-function 'list-system-processes) (lambda () '())))
-             (claude-code-sessions-mode)
-             (setq claude-code--project "/home/test/proj")
-             (claude-code-sessions-refresh)
-             ;; The Dead group starts folded: its header shows but no rows do.
-             (should (member "dead" claude-code--collapsed))
-             (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-               (should (string-match-p "Dead (4)" text))
-               (should-not (string-match-p "11111111" text)))
-             ;; Expanding it reveals every dead row.
-             (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
-             (claude-code-sessions-refresh)
-             (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-               (should (string-match-p "Dead (4)" text))
-               (should (string-match-p "11111111" text))
-               ;; The worktree session is listed under the parent project.
-               (should (string-match-p "feat" text)))
-             ;; Folding it again hides the rows.
-             (push "dead" claude-code--collapsed)
-             (claude-code-sessions-refresh)
-             (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-               (should (string-match-p "Dead (4)" text))
-               (should-not (string-match-p "11111111" text)))))
-       (kill-buffer buf)))))
+    (let ((claude-code-refresh-interval nil)
+          (buf (get-buffer-create " *cc-view-test*")))
+      (unwind-protect
+          (with-current-buffer buf
+            (cl-letf (((symbol-function 'claude-code--live-managed)
+                       (lambda (_r) nil))
+                      ;; Pin the process table empty so the fixture sessions
+                      ;; (pids 1001-1003) never classify as external on a host
+                      ;; that happens to have those pids live.
+                      ((symbol-function 'list-system-processes) (lambda () '())))
+              (claude-code-sessions-mode)
+              (setq claude-code--project "/home/test/proj")
+              (claude-code-sessions-refresh)
+              ;; The Dead group starts folded: its header shows but no rows do.
+              (should (member "dead" claude-code--collapsed))
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (string-match-p "Dead (4)" text))
+                (should-not (string-match-p "11111111" text)))
+              ;; Expanding it reveals every dead row.
+              (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
+              (claude-code-sessions-refresh)
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (string-match-p "Dead (4)" text))
+                (should (string-match-p "11111111" text))
+                ;; The worktree session is listed under the parent project.
+                (should (string-match-p "feat" text)))
+              ;; Folding it again hides the rows.
+              (push "dead" claude-code--collapsed)
+              (claude-code-sessions-refresh)
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (string-match-p "Dead (4)" text))
+                (should-not (string-match-p "11111111" text)))))
+        (kill-buffer buf)))))
 
 (ert-deftest claude-code-test-view-pins-default-directory ()
   "Opening the view pins `default-directory' to the project root, and the pin
@@ -707,23 +707,23 @@ survives the refresh.  This is what lets project-aware commands (magit,
 `project.el', ...) resolve the current project from the sessions buffer instead
 of prompting."
   (claude-code-tests--with-fixtures
-   (let ((claude-code-refresh-interval nil)
-         (root "/home/test/proj")
-         (buf nil))
-     (unwind-protect
-         (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
-                   ((symbol-function 'project-root) (lambda (_p) root))
-                   ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq buf b))))
-           ;; `claude' runs a real refresh over the fixtures; the pin must
-           ;; outlive it, so the refresh is deliberately not stubbed out.
-           (claude-code)
-           (with-current-buffer buf
-             (should (derived-mode-p 'claude-code-sessions-mode))
-             (should (equal claude-code--project (claude-code--normalize-root root)))
-             (should (equal default-directory
-                            (file-name-as-directory
-                             (claude-code--normalize-root root))))))
-       (when (buffer-live-p buf) (kill-buffer buf))))))
+    (let ((claude-code-refresh-interval nil)
+          (root "/home/test/proj")
+          (buf nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
+                    ((symbol-function 'project-root) (lambda (_p) root))
+                    ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq buf b))))
+            ;; `claude' runs a real refresh over the fixtures; the pin must
+            ;; outlive it, so the refresh is deliberately not stubbed out.
+            (claude-code)
+            (with-current-buffer buf
+              (should (derived-mode-p 'claude-code-sessions-mode))
+              (should (equal claude-code--project (claude-code--normalize-root root)))
+              (should (equal default-directory
+                             (file-name-as-directory
+                              (claude-code--normalize-root root))))))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
 
 ;;;; Integration (real Ghostel + real `claude')
 ;;
@@ -778,41 +778,41 @@ tests themselves run inside a Claude Code session."
          buffer id pid)
     (unwind-protect
         (claude-code-tests--with-top-level-env
-         (setq buffer (claude-code-spawn
-                       root :prompt "Respond with the single word: pong"))
-         (maphash (lambda (k v) (when (eq (plist-get v :buffer) buffer) (setq id k)))
-                  claude-code--managed)
-         (should id)
-         ;; The title tracker survives `ghostel-exec's `ghostel-mode' switch.
-         (should (eq (buffer-local-value 'ghostel-buffer-name-function buffer)
-                     #'claude-code--ghostel-buffer-name))
-         (setq pid (buffer-local-value 'ghostel--pid buffer))
-         (should (claude-code--pid-live-p pid))
-         ;; A live status only appears once the child writes its sessions file,
-         ;; which only happens for a real (non-nested) session.
-         (should (member
-                  (claude-code-tests--await
-                   (lambda () (let ((s (claude-code-tests--find-session
-                                        (claude-code-sessions root) id)))
-                                (and s (claude-code-session-status s))))
-                   45)
-                  '("busy" "idle" "waiting")))
-         (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
-           (should (claude-code-session-alive-p s))
-           (claude-code-kill s))
-         ;; The model reports it dead immediately (it is no longer managed)...
-         (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
-           (should (or (null s) (not (claude-code-session-alive-p s)))))
-         ;; ...and the OS process must actually terminate (Ghostel tears the
-         ;; child down asynchronously, so give its sentinel time to run).
-         (should (claude-code-tests--await
-                  (lambda () (not (claude-code--pid-live-p pid))) 15))
-         ;; The now-dead transcript can be deleted.
-         (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
-           (when (and s (claude-code-session-transcript s)
-                      (file-exists-p (claude-code-session-transcript s)))
-             (claude-code-delete s)
-             (should-not (file-exists-p (claude-code-session-transcript s))))))
+          (setq buffer (claude-code-spawn
+                        root :prompt "Respond with the single word: pong"))
+          (maphash (lambda (k v) (when (eq (plist-get v :buffer) buffer) (setq id k)))
+                   claude-code--managed)
+          (should id)
+          ;; The title tracker survives `ghostel-exec's `ghostel-mode' switch.
+          (should (eq (buffer-local-value 'ghostel-buffer-name-function buffer)
+                      #'claude-code--ghostel-buffer-name))
+          (setq pid (buffer-local-value 'ghostel--pid buffer))
+          (should (claude-code--pid-live-p pid))
+          ;; A live status only appears once the child writes its sessions file,
+          ;; which only happens for a real (non-nested) session.
+          (should (member
+                   (claude-code-tests--await
+                    (lambda () (let ((s (claude-code-tests--find-session
+                                         (claude-code-sessions root) id)))
+                                 (and s (claude-code-session-status s))))
+                    45)
+                   '("busy" "idle" "waiting")))
+          (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+            (should (claude-code-session-alive-p s))
+            (claude-code-kill s))
+          ;; The model reports it dead immediately (it is no longer managed)...
+          (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+            (should (or (null s) (not (claude-code-session-alive-p s)))))
+          ;; ...and the OS process must actually terminate (Ghostel tears the
+          ;; child down asynchronously, so give its sentinel time to run).
+          (should (claude-code-tests--await
+                   (lambda () (not (claude-code--pid-live-p pid))) 15))
+          ;; The now-dead transcript can be deleted.
+          (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+            (when (and s (claude-code-session-transcript s)
+                       (file-exists-p (claude-code-session-transcript s)))
+              (claude-code-delete s)
+              (should-not (file-exists-p (claude-code-session-transcript s))))))
       ;; Always clean up: kill the buffer, SIGKILL any survivor so an immediate
       ;; batch exit never orphans it, and remove any stray transcript.
       (when (buffer-live-p buffer)

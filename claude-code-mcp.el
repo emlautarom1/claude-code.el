@@ -281,7 +281,7 @@ than crashing the server."
                       (alist-get 'arguments params))))
       (condition-case err
           (let ((result (claude-code--mcp-with-session session-id
-                                                       (apply (plist-get tool :handler) call-args))))
+                          (apply (plist-get tool :handler) call-args))))
             (list (cons 'content
                         (vector (list (cons 'type "text")
                                       (cons 'text
@@ -360,29 +360,29 @@ Parses the JSON-RPC body, dispatches it through
 `id') is acknowledged with an empty 202.  A truncated body or a JSON parse
 error is answered with a -32700 error before any bytes are written."
   (with-slots (process headers body) request
-              (let* ((path (cdr (assoc :POST headers)))
-                     (session-id (and path
-                                      (string-match "^/mcp/\\([^/]+\\)" path)
-                                      (match-string 1 path)))
-                     (declared (cdr (assoc :CONTENT-LENGTH headers))))
-                ;; Body-integrity guard: web-server frames the body by the header blank
-                ;; line, not Content-Length, so a body split across packets is delivered
-                ;; truncated.  Reject rather than parse a partial body.
-                (if (and declared
-                         (/= (string-bytes body) (string-to-number declared)))
-                    (claude-code--mcp-send
-                     process
-                     (claude-code--mcp-error :null -32700 "Truncated request body"))
-                  (let ((parsed (condition-case nil
-                                    (json-parse-string body :object-type 'alist)
-                                  (error 'claude-code--mcp-parse-error))))
-                    (if (eq parsed 'claude-code--mcp-parse-error)
-                        (claude-code--mcp-send
-                         process (claude-code--mcp-error :null -32700 "Parse error"))
-                      (let ((response (claude-code--mcp-handle-request session-id parsed)))
-                        (if response
-                            (claude-code--mcp-send process response)
-                          (claude-code--mcp-send-empty process)))))))))
+    (let* ((path (cdr (assoc :POST headers)))
+           (session-id (and path
+                            (string-match "^/mcp/\\([^/]+\\)" path)
+                            (match-string 1 path)))
+           (declared (cdr (assoc :CONTENT-LENGTH headers))))
+      ;; Body-integrity guard: web-server frames the body by the header blank
+      ;; line, not Content-Length, so a body split across packets is delivered
+      ;; truncated.  Reject rather than parse a partial body.
+      (if (and declared
+               (/= (string-bytes body) (string-to-number declared)))
+          (claude-code--mcp-send
+           process
+           (claude-code--mcp-error :null -32700 "Truncated request body"))
+        (let ((parsed (condition-case nil
+                          (json-parse-string body :object-type 'alist)
+                        (error 'claude-code--mcp-parse-error))))
+          (if (eq parsed 'claude-code--mcp-parse-error)
+              (claude-code--mcp-send
+               process (claude-code--mcp-error :null -32700 "Parse error"))
+            (let ((response (claude-code--mcp-handle-request session-id parsed)))
+              (if response
+                  (claude-code--mcp-send process response)
+                (claude-code--mcp-send-empty process)))))))))
 
 (defun claude-code--mcp-handle-get (request)
   "Answer a Streamable-HTTP GET REQUEST on the MCP endpoint with HTTP 405.
@@ -390,8 +390,8 @@ A client MAY open a server-to-client SSE stream with GET; we push no
 server-initiated messages, so the spec requires 405 Method Not Allowed here to
 signal that no stream is offered.  Every JSON-RPC message travels over POST."
   (with-slots (process) request
-              (ws-response-header process 405 '("Content-Length" . "0"))
-              (throw 'close-connection nil)))
+    (ws-response-header process 405 '("Content-Length" . "0"))
+    (throw 'close-connection nil)))
 
 (defun claude-code--mcp-ensure-server ()
   "Ensure the MCP server is running and return its port, or nil.
