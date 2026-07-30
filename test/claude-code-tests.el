@@ -716,11 +716,11 @@ computed for every row, so one odd id would abort a whole view refresh."
   (let ((alive (claude-code-session--create :alive-p t :status "busy"))
         (external (claude-code-session--create :alive-p nil :external-p t))
         (dead (claude-code-session--create :alive-p nil)))
-    (let ((claude-code-group-by 'status))
+    (let ((claude-code--group-by 'status))
       (should (equal (claude-code--group-key alive) "busy"))
       (should (equal (claude-code--group-key external) "external"))
       (should (equal (claude-code--group-key dead) "dead")))
-    (let ((claude-code-group-by 'state))
+    (let ((claude-code--group-by 'state))
       (should (equal (claude-code--group-key alive) "alive"))
       ;; External keeps its own group even when grouping by state.
       (should (equal (claude-code--group-key external) "external"))

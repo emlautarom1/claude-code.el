@@ -635,7 +635,7 @@ rather than adding caching or throttling machinery."
 
 (defvar-local claude-code--project nil
   "Project root a sessions view is scoped to.")
-(defvar-local claude-code-group-by 'status
+(defvar-local claude-code--group-by 'status
   "How the sessions view groups rows: `status' or `state'.")
 (defvar-local claude-code--collapsed nil
   "List of collapsed group names in a sessions view.
@@ -715,14 +715,13 @@ USAGE is (CPU . RSS) or nil."
 
 (defun claude-code--group-key (session)
   "Return the group key of SESSION under the current grouping.
-External and dead sessions form their own groups regardless of the grouping
-mode; only alive sessions split by status when grouping by status."
-  (pcase (claude-code--session-liveness session)
-    ('external "external")
-    ('dead "dead")
-    ('alive (pcase claude-code-group-by
-              ('status (or (claude-code-session-status session) "alive"))
-              (_ "alive")))))
+The key is the name of SESSION's liveness state, so external and dead sessions
+form their own groups regardless of the grouping mode; only an alive session
+splits out by status, and only when grouping by status."
+  (let ((liveness (claude-code--session-liveness session)))
+    (if (and (eq liveness 'alive) (eq claude-code--group-by 'status))
+        (or (claude-code-session-status session) "alive")
+      (symbol-name liveness))))
 
 (defun claude-code--group-rank (key)
   "Return the display rank of group KEY; lower ranks come first."
@@ -741,13 +740,13 @@ mode; only alive sessions split by status when grouping by status."
                       (if collapsed "▸" "▾") (capitalize key) count)
               'claude-code-group key 'face 'bold))
 
-(defun claude-code--num-sorter (field)
-  "Return a tabulated-list sorter comparing the usage FIELD (`cpu'/`mem')."
+(defun claude-code--num-sorter (get)
+  "Return a tabulated-list sorter over usage values read with GET.
+GET picks the compared number out of a (CPU . RSS) pair; a row with no usage
+sorts lowest."
   (lambda (a b)
-    (let ((va (gethash (car a) claude-code--usage-table))
-          (vb (gethash (car b) claude-code--usage-table)))
-      (< (or (pcase field ('cpu (car va)) ('mem (cdr va))) -1)
-         (or (pcase field ('cpu (car vb)) ('mem (cdr vb))) -1)))))
+    (< (or (funcall get (gethash (car a) claude-code--usage-table)) -1)
+       (or (funcall get (gethash (car b) claude-code--usage-table)) -1))))
 
 (defun claude-code--entry-time (entry)
   "Return the last-active time of ENTRY's session as a float, 0 when unknown.
@@ -935,7 +934,8 @@ still running it."
 (defun claude-code-sessions-cycle-grouping ()
   "Toggle grouping between status and alive/dead state."
   (interactive)
-  (setq claude-code-group-by (if (eq claude-code-group-by 'status) 'state 'status))
+  (setq claude-code--group-by
+        (if (eq claude-code--group-by 'status) 'state 'status))
   (claude-code-sessions-refresh))
 
 (defun claude-code-sessions-new (&optional args)
@@ -980,8 +980,10 @@ still running it."
                       (list "Active" 8 #'claude-code--time-less-p :right-align t)
                       '("Id" 9 t)
                       '("Worktree" 14 t)
-                      (list "CPU%" 6 (claude-code--num-sorter 'cpu) :right-align t)
-                      (list "Mem" 8 (claude-code--num-sorter 'mem) :right-align t)
+                      (list "CPU%" 6 (claude-code--num-sorter #'car)
+                            :right-align t)
+                      (list "Mem" 8 (claude-code--num-sorter #'cdr)
+                            :right-align t)
                       ;; Name is last so it is never truncated and fills the
                       ;; remaining window width.
                       '("Name" 26 t)))
