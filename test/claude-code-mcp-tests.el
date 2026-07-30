@@ -371,6 +371,32 @@ all non-nil in Lisp, so each must arrive as nil."
     (should (null claude-code--mcp-server))
     (should (null (claude-code--mcp-port)))))
 
+(ert-deftest claude-code-mcp-test-stops-with-the-last-instance ()
+  "The shared server is torn down by the last instance to exit, not the first.
+Lifetime is this module's own concern: it hooks
+`claude-code-last-instance-exit-hook', which the core runs once its registry
+empties, so the core carries no MCP knowledge."
+  (should (memq #'claude-code-mcp-stop claude-code-last-instance-exit-hook))
+  (claude-code-tests--with-managed-buffer buf
+    (let ((claude-code-mcp-enabled t)
+          (claude-code--mcp-server nil)
+          (other (generate-new-buffer " *cc-other*")))
+      (unwind-protect
+          (progn
+            (should (integerp (claude-code--mcp-ensure-server)))
+            (puthash "a" (list :buffer buf) claude-code--managed)
+            (puthash "b" (list :buffer other) claude-code--managed)
+            ;; One of two exiting leaves the server up for the survivor.
+            (claude-code--on-exit buf)
+            (should (= (hash-table-count claude-code--managed) 1))
+            (should claude-code--mcp-server)
+            ;; The last one takes it down.
+            (claude-code--on-exit other)
+            (should (zerop (hash-table-count claude-code--managed)))
+            (should-not claude-code--mcp-server))
+        (when (buffer-live-p other) (kill-buffer other))
+        (claude-code-mcp-stop)))))
+
 (ert-deftest claude-code-mcp-test-ensure-server-idempotent ()
   "Ensuring twice yields one listener on the same port; stop tears it down."
   (let ((claude-code-mcp-enabled t)

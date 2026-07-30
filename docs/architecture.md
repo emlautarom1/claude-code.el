@@ -1,6 +1,6 @@
 # Architecture
 
-The package is two files. `claude-code.el` is the core, organized as four layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its two entry points, so the dependency stays one-way and acyclic.
+The package is two files. `claude-code.el` is the core, organized as four layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
 
 ```
 Storage adapter   ~/.claude parsing + cwd encoding   (Claude internals live here)
@@ -56,7 +56,7 @@ All JSON crosses the wire through the C built-ins `json-serialize`/`json-parse-s
 
 **Session context.** Each tool runs with `default-directory` bound to the calling session's *real* cwd, resolved by `claude-code--mcp-with-session` through the model accessor `claude-code--session-cwd id`. For a worktree session that real cwd is the worktree directory, not the parent project root the instance was launched from — binding it makes `default-directory`-relative operations land in the right tree (best-effort context for an arbitrary-Elisp tool, not a sandbox). This accessor is the **one deliberate exception** to the structs-only convention: it is keyed by the id *string* (the path token the transport hands over), because the MCP file never builds `claude-code-session` structs — it reaches session state only through this single function.
 
-**Lifecycle.** The server starts lazily on the first spawn (idempotent ensure; a live listener's port is reused) and `claude-code--on-exit` stops it once the last managed instance exits. `claude-code-mcp-stop` is a clean no-op when nothing is live, so it is safe to call unconditionally.
+**Lifecycle.** The server starts lazily on the first spawn (idempotent ensure; a live listener's port is reused) and lives exactly as long as the last managed instance. This module owns both ends of that itself: it puts `claude-code-mcp-stop` on `claude-code-last-instance-exit-hook`, which the core runs when its registry empties, so the core holds no MCP knowledge beyond building the CLI arguments. `claude-code-mcp-stop` is a clean no-op when nothing is live, so it is safe to call unconditionally.
 
 ## Decisions
 

@@ -43,11 +43,11 @@
 (defvar ghostel-buffer-name-function)
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the spawn
-;; path (see `claude-code-spawn').  Declaring its entry points here keeps the
+;; path (see `claude-code-spawn').  Declaring its one entry point here keeps the
 ;; byte-compiler happy without pulling the MCP file (and its `web-server'
-;; dependency) in eagerly, and avoids a load cycle.
+;; dependency) in eagerly, and avoids a load cycle.  Its teardown is its own
+;; concern: it hooks `claude-code-last-instance-exit-hook'.
 (declare-function claude-code--mcp-cli-args "claude-code-mcp" (id))
-(declare-function claude-code-mcp-stop "claude-code-mcp" ())
 
 
 ;;;; Customization
@@ -476,6 +476,11 @@ Installs `claude-code--ghostel-buffer-name' as a buffer-local
             (nth (random 4) '("8" "9" "a" "b"))
             (substring s 17 20) (substring s 20 32))))
 
+(defvar claude-code-last-instance-exit-hook nil
+  "Hook run once the last managed instance has exited.
+Lets a resource shared by every instance — the MCP server, say — be owned and
+torn down by the layer that created it, without this one knowing about it.")
+
 (defun claude-code--on-exit (buffer &optional _event)
   "Unregister the managed session hosted in BUFFER when its process exits.
 Registered on `ghostel-exit-functions', which calls its functions with
@@ -485,12 +490,8 @@ Registered on `ghostel-exit-functions', which calls its functions with
                (when (eq (plist-get plist :buffer) buffer) (push id dead)))
              claude-code--managed)
     (dolist (id dead) (remhash id claude-code--managed))
-    ;; The MCP server is shared by all sessions; tear it down once the last
-    ;; managed instance is gone.  `fboundp' guards the case where the MCP file
-    ;; was never loaded, and `claude-code-mcp-stop' is a no-op with no server.
-    (when (and (zerop (hash-table-count claude-code--managed))
-               (fboundp 'claude-code-mcp-stop))
-      (claude-code-mcp-stop))))
+    (when (zerop (hash-table-count claude-code--managed))
+      (run-hooks 'claude-code-last-instance-exit-hook))))
 
 (defun claude-code--register (id buffer origin cwd worktree)
   "Record instance ID hosted in BUFFER, launched from ORIGIN with CWD, WORKTREE."

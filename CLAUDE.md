@@ -18,7 +18,7 @@ model: `docs/glossary.md`, `docs/storage-model.md`, `docs/architecture.md`.
   and put on `load-path` via `package-initialize` in `make compile`/`test`.
 - **Source split:** the core orchestration lives in `claude-code.el`; the MCP
   server lives in `claude-code-mcp.el` (loaded lazily by the spawn path, so
-  `claude-code.el` `declare-function`s its two entry points). Tests mirror the
+  `claude-code.el` `declare-function`s its one entry point). Tests mirror the
   split: `test/claude-code-tests.el` and `test/claude-code-mcp-tests.el`.
 - **Naming:** `claude-code-` for public symbols, `claude-code--` for internals.
 
