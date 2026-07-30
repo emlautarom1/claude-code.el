@@ -83,10 +83,13 @@ session data instead."
   (replace-regexp-in-string
    "[/.]" "-" (directory-file-name (expand-file-name path))))
 
+(defun claude-code--projects-dir ()
+  "Return the directory holding every project's transcript directory."
+  (expand-file-name "projects" claude-code-config-dir))
+
 (defun claude-code--project-dir (cwd)
   "Return the transcript directory under `claude-code-config-dir' for CWD."
-  (expand-file-name (claude-code--encode-cwd cwd)
-                    (expand-file-name "projects" claude-code-config-dir)))
+  (expand-file-name (claude-code--encode-cwd cwd) (claude-code--projects-dir)))
 
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
@@ -134,13 +137,15 @@ as a top-level key.  Point is moved.  Returns nil when no such line exists."
         (goto-char (line-beginning-position))))
     result))
 
-(defun claude-code--read-transcript-fields (file)
+(defun claude-code--read-transcript-fields (file worktree-p)
   "Read the title, last-prompt, worktree-path and last-active fields from FILE.
 A user-set custom title (what `/rename' writes) wins over Claude's generated
 title; only when there is no custom title does the last `ai-title' apply.
-The worktree path is the lossless `worktreePath' from the `worktree-state'
-line (nil for a non-worktree session); it is the real cwd of a worktree
-session even when it is dead and has no live sessions file to read.
+WORKTREE-P asks for the lossless `worktreePath' of the `worktree-state' line --
+the real cwd of a worktree session even when it is dead and has no live sessions
+file to read.  Only a worktree transcript carries that line, so for any other
+transcript the scan is skipped rather than reading the whole file for a
+guaranteed miss.
 LAST-ACTIVE is the time of the newest line carrying a real `timestamp' -- the
 last genuine activity -- or nil when the transcript has no timestamped line."
   (with-temp-buffer
@@ -154,30 +159,33 @@ last genuine activity -- or nil when the transcript has no timestamped line."
           (claude-code--json-line-field
            "\"type\"[[:space:]]*:[[:space:]]*\"last-prompt\"" "lastPrompt")
           :worktree-path
-          (let ((ws (claude-code--json-line-field
-                     "\"type\"[[:space:]]*:[[:space:]]*\"worktree-state\""
-                     "worktreeSession")))
-            (and (hash-table-p ws) (gethash "worktreePath" ws)))
+          (when worktree-p
+            (let ((ws (claude-code--json-line-field
+                       "\"type\"[[:space:]]*:[[:space:]]*\"worktree-state\""
+                       "worktreeSession")))
+              (and (hash-table-p ws) (gethash "worktreePath" ws))))
           :last-active
           (let ((ts (claude-code--json-line-field
                      "\"timestamp\"[[:space:]]*:" "timestamp")))
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
-(defun claude-code--transcript-fields (file)
+(defun claude-code--transcript-fields (file &optional worktree-p)
   "Return a plist of transcript FILE's cached fields.
 The keys are :id (FILE's base name, the session id), :title, :last-prompt,
-:worktree-path, and :last-active (the newest genuine activity, from the last
-timestamped line, falling back to FILE's modification time only when the
+:worktree-path (read only when WORKTREE-P is non-nil, since only a worktree
+transcript carries one), and :last-active (the newest genuine activity, from the
+last timestamped line, falling back to FILE's modification time only when the
 transcript has no timestamped line at all).  Cached by FILE's modification
 time."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
         (cdr cached)
-      (let* ((raw (claude-code--read-transcript-fields file))
-             (raw (plist-put raw :last-active
-                             (or (plist-get raw :last-active) mtime)))
-             (fields (cons :id (cons (file-name-base file) raw))))
+      (let ((fields (cons :id (cons (file-name-base file)
+                                    (claude-code--read-transcript-fields
+                                     file worktree-p)))))
+        (unless (plist-get fields :last-active)
+          (setq fields (plist-put fields :last-active mtime)))
         (puthash file (cons mtime fields) claude-code--transcript-cache)
         fields))))
 
@@ -189,7 +197,7 @@ Worktrees are the transcript directories Claude creates under CWD's
 .claude/worktrees; they are matched by their encoded-directory prefix.  A
 worktree's real cwd comes from the lossless :worktree-path in its transcript,
 never by decoding the encoded (lossy) directory name."
-  (let* ((projects (expand-file-name "projects" claude-code-config-dir))
+  (let* ((projects (claude-code--projects-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
          (result '()))
@@ -200,7 +208,7 @@ never by decoding the encoded (lossy) directory name."
             (let ((dir (expand-file-name name projects)))
               (when (file-directory-p dir)
                 (dolist (file (directory-files dir t "\\.jsonl\\'"))
-                  (push (append (claude-code--transcript-fields file)
+                  (push (append (claude-code--transcript-fields file worktree-p)
                                 (list :transcript file :worktree-p worktree-p))
                         result))))))))
     (nreverse result)))
@@ -262,15 +270,14 @@ root a later query normalises the same way."
              claude-code--managed)
     out))
 
-(defun claude-code--pid-live-p (pid)
+(defun claude-code--pid-live-p (pid &optional pids)
   "Return non-nil when integer PID is a currently running process.
-This is a bare membership test against `list-system-processes'; it does not
-verify the live process is the same `claude' the sessions file recorded.  A
-stale sessions/*.json (left by a crash) whose PID has since been reused could
-therefore mis-flag a dead session as external.  PID reuse is vanishingly
-unlikely in practice (Linux `pid_max' defaults to 4194304), so this is an
-accepted simplicity trade-off rather than comparing process start times."
-  (and (integerp pid) (memql pid (list-system-processes)) t))
+PIDS is a `list-system-processes' list read in advance, so a caller testing
+several pids scans the process table once; it is read here when omitted.  This
+is a bare membership test and does not verify the live process is the same
+`claude' the sessions file recorded -- see docs/storage-model.md for the
+PID-reuse trade-off that buys."
+  (and (integerp pid) (memql pid (or pids (list-system-processes))) t))
 
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
@@ -295,6 +302,7 @@ is running it and it is dead."
          (transcript-of (lambda (id)
                           (seq-find (lambda (d) (equal (plist-get d :id) id))
                                     transcripts)))
+         (pids (list-system-processes))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (pcase-dolist (`(,id . ,buf) managed)
@@ -325,7 +333,8 @@ is running it and it is dead."
             (push (claude-code-session--create
                    :id id :alive-p nil
                    :external-p (and info
-                                    (claude-code--pid-live-p (plist-get info :pid)))
+                                    (claude-code--pid-live-p
+                                     (plist-get info :pid) pids))
                    :cwd (or (plist-get info :cwd)
                             (plist-get tr :worktree-path)
                             root)
