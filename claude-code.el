@@ -189,6 +189,11 @@ time."
         (puthash file (cons mtime fields) claude-code--transcript-cache)
         fields))))
 
+(defun claude-code--delete-transcript (file)
+  "Remove transcript FILE from disk along with its cached fields."
+  (delete-file file)
+  (remhash file claude-code--transcript-cache))
+
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :title, :last-prompt,
@@ -576,8 +581,7 @@ Refuses alive sessions and sessions running outside Emacs."
     (unless (and file (file-exists-p file))
       (user-error "No transcript on disk for session %s"
                   (claude-code-session-id session)))
-    (delete-file file)
-    (remhash file claude-code--transcript-cache)))
+    (claude-code--delete-transcript file)))
 
 (defun claude-code-send-text (session text &optional submit)
   "Send TEXT to SESSION's instance, submitting with RET when SUBMIT is non-nil.
@@ -810,12 +814,20 @@ A session without a known time sorts as oldest."
           (tabulated-list-put-tag "*")))
       (forward-line 1))))
 
-(defun claude-code--target-sessions ()
-  "Return the marked sessions, or the session at point when none are marked."
-  (if claude-code--marks
-      (delq nil (mapcar (lambda (id) (gethash id claude-code--session-table))
-                        claude-code--marks))
-    (when-let* ((s (claude-code--session-at-point))) (list s))))
+(defun claude-code--target-sessions (&optional liveness)
+  "Return the marked sessions, or the session at point when none are marked.
+LIVENESS, when given, keeps only the sessions in that state
+\(`claude-code--session-liveness'), so a command's targets are exactly the ones
+its model operation accepts."
+  (let ((targets (if claude-code--marks
+                     (delq nil (mapcar (lambda (id)
+                                         (gethash id claude-code--session-table))
+                                       claude-code--marks))
+                   (when-let* ((s (claude-code--session-at-point))) (list s)))))
+    (if liveness
+        (seq-filter (lambda (s) (eq liveness (claude-code--session-liveness s)))
+                    targets)
+      targets)))
 
 (defun claude-code--maybe-refresh (buffer)
   "Refresh BUFFER when it is live and visible."
@@ -881,8 +893,7 @@ latter case the row's session determines the enclosing group."
 (defun claude-code-sessions-kill ()
   "Kill the marked instances, or the one at point."
   (interactive)
-  (let ((targets (seq-filter #'claude-code-session-alive-p
-                             (claude-code--target-sessions))))
+  (let ((targets (claude-code--target-sessions 'alive)))
     (if (null targets)
         (user-error "No alive session selected")
       (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
@@ -891,10 +902,11 @@ latter case the row's session determines the enclosing group."
         (claude-code-sessions-refresh)))))
 
 (defun claude-code-sessions-delete ()
-  "Delete the marked dead sessions, or the one at point."
+  "Delete the marked dead sessions, or the one at point.
+An external session is not a deletable target: a `claude' outside Emacs is
+still running it."
   (interactive)
-  (let ((targets (seq-remove #'claude-code-session-alive-p
-                             (claude-code--target-sessions))))
+  (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
         (user-error "No dead session selected")
       (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))

@@ -732,6 +732,25 @@ computed for every row, so one odd id would abort a whole view refresh."
                        #'claude-code--group-less-p)
                  '("waiting" "busy" "idle" "external" "dead"))))
 
+(ert-deftest claude-code-test-target-sessions-by-liveness ()
+  "Marked targets are filtered to the liveness a command's operation accepts.
+An external session is neither a killable nor a deletable target, so batch
+delete cannot pick one up and abort partway through `claude-code-delete'."
+  (let ((claude-code--session-table (make-hash-table :test 'equal))
+        (claude-code--marks '("a" "e" "d")))
+    (dolist (s (list (claude-code-session--create :id "a" :alive-p t)
+                     (claude-code-session--create :id "e" :external-p t)
+                     (claude-code-session--create :id "d")))
+      (puthash (claude-code-session-id s) s claude-code--session-table))
+    (let ((ids (lambda (liveness)
+                 (mapcar #'claude-code-session-id
+                         (claude-code--target-sessions liveness)))))
+      (should (equal (funcall ids nil) '("a" "e" "d")))
+      (should (equal (funcall ids 'alive) '("a")))
+      (should (equal (funcall ids 'external) '("e")))
+      ;; The external row must not be offered up as dead.
+      (should (equal (funcall ids 'dead) '("d"))))))
+
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."
   (claude-code-tests--with-fixtures
