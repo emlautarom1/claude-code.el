@@ -502,6 +502,29 @@ instance, and install title tracking; only the CLI argument list differs."
         ;; No second registry entry was created for the same id.
         (should (= (hash-table-count claude-code--managed) 1))))))
 
+(ert-deftest claude-code-test-resume-refuses-external ()
+  "Resuming a session a `claude' outside Emacs is running is refused.
+The guard is in the model, not in the view, so a headless caller cannot attach
+a second process to a session another one is already driving.  Fixture session
+22222222 has sessions/1002.json, so pinning pid 1002 live makes it external."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer _buf
+      (let ((execs '()))
+        (claude-code-tests--recording-launch execs
+          (cl-letf (((symbol-function 'list-system-processes) (lambda () '(1002))))
+            (should-error (claude-code-resume
+                           "/home/test/proj"
+                           "22222222-2222-4222-8222-222222222222")
+                          :type 'user-error))
+          ;; Nothing was launched, and with that pid gone it resumes normally.
+          (should (null execs))
+          (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+            (claude-code-resume "/home/test/proj"
+                                "22222222-2222-4222-8222-222222222222"))
+          (should (= (length execs) 1))
+          (dolist (call execs)
+            (when (buffer-live-p (nth 0 call)) (kill-buffer (nth 0 call)))))))))
+
 (ert-deftest claude-code-test-kill ()
   "Killing an alive session drops its registry entry and buffer."
   (claude-code-tests--with-managed-buffer buf

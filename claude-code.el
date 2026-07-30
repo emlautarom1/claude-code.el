@@ -537,17 +537,22 @@ not exposed."
 (defun claude-code-resume (project-root id)
   "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
 When Emacs already manages a live instance for ID, focus and return that
-instance rather than starting a second `claude' for the same session."
+instance rather than starting a second `claude' for the same session.  Refuses a
+session a `claude' outside Emacs is running, so this never attaches a second
+process to a session another one is already driving."
   (let* ((reg (gethash id claude-code--managed))
          (existing (and reg
                         (claude-code--session-process (plist-get reg :buffer))
                         (plist-get reg :buffer))))
-    (if existing
-        (progn (pop-to-buffer existing) existing)
-      (claude-code--launch
-       id project-root nil
-       (lambda (mcp-args)
-         (claude-code--build-args :resume id :mcp-args mcp-args))))))
+    (cond
+     (existing (pop-to-buffer existing) existing)
+     ((claude-code--pid-live-p
+       (plist-get (gethash id (claude-code--live-status-table)) :pid))
+      (user-error "Session %s is running outside Emacs" id))
+     (t (claude-code--launch
+         id project-root nil
+         (lambda (mcp-args)
+           (claude-code--build-args :resume id :mcp-args mcp-args)))))))
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer."
