@@ -234,6 +234,22 @@ tool's `setq' does not leak past the test."
     (should (equal (alist-get 'text (aref (alist-get 'content result) 0)) "42"))
     (should (eq (alist-get 'isError result) :json-false))))
 
+(ert-deftest claude-code-mcp-test-eval-semicolons-in-code ()
+  "A `;' inside a character literal or a string is code, not a comment.
+Skipping between forms is the Elisp reader's job, so the cases where scanning
+for a bare `;' would truncate a form are pinned here."
+  (dolist (case '(("?;" . "59")
+                  ("(list ?; 5)" . "(59 5)")
+                  ("\"a;b\"" . "\"a;b\"")
+                  ;; A leading comment, and a comment between two forms.
+                  (";; lead\n(+ 1 2) ; mid\n(* 2 3)" . "6")
+                  ;; Nothing but comments evaluates to nil, not a read error.
+                  (";; just a comment" . "nil")))
+    (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval (car case)))))
+      (should (eq (alist-get 'isError result) :json-false))
+      (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
+                     (cdr case))))))
+
 ;;;; Wire serialization (arrays are vectors, false is JSON false)
 
 (ert-deftest claude-code-mcp-test-serialize-shapes ()

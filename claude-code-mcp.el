@@ -119,35 +119,25 @@ The tool is stored in `claude-code--mcp-tools' under :name and also returned."
       (puthash name tool claude-code--mcp-tools)
       tool)))
 
-(defun claude-code--mcp-next-form-pos (code pos)
-  "Return the index of the next top-level form in CODE at or after POS, or nil.
-Skips whitespace and `;' line comments, returning nil when only those remain,
-so a trailing comment is not mistaken for an unread form."
-  (let ((len (length code)) (start nil))
-    (while (and (null start) (< pos len))
-      (let ((ch (aref code pos)))
-        (cond ((memq ch '(?\s ?\t ?\n ?\r ?\f)) (setq pos (1+ pos)))
-              ((eq ch ?\;)
-               (setq pos (if (string-match "\n" code pos) (match-end 0) len)))
-              (t (setq start pos)))))
-    start))
-
 (defun claude-code--mcp-tool-eval (code)
   "Evaluate CODE, a string of Elisp, and return the last value as a string.
 Reads and evaluates every top-level form in CODE with lexical binding, under a
 `claude-code-mcp-eval-timeout'-second timeout, and returns `prin1-to-string'
-of the final form's value.  Whitespace and comments between and after forms are
-skipped; a malformed form -- including an incomplete final form -- surfaces its
+of the final form's value.  Reading happens in a buffer under the Elisp syntax
+table, so `forward-comment' skips whitespace and comments between and after
+forms; a malformed form -- including an incomplete final form -- surfaces its
 read error to the caller, which reports it as an MCP tool error."
   (with-timeout (claude-code-mcp-eval-timeout
                  (error "Evaluation timed out after %s seconds"
                         claude-code-mcp-eval-timeout))
-    (let ((pos 0) (value nil) start)
-      (while (setq start (claude-code--mcp-next-form-pos code pos))
-        (let ((read-result (read-from-string code start)))
-          (setq value (eval (car read-result) t)
-                pos (cdr read-result))))
-      (prin1-to-string value))))
+    (with-temp-buffer
+      (insert code)
+      (goto-char (point-min))
+      (let ((value nil))
+        (with-syntax-table emacs-lisp-mode-syntax-table
+          (while (progn (forward-comment (point-max)) (not (eobp)))
+            (setq value (eval (read (current-buffer)) t))))
+        (prin1-to-string value)))))
 
 (claude-code-mcp-make-tool
  :name "eval"
