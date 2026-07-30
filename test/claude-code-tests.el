@@ -50,6 +50,22 @@ features still load normally."
                (lambda (k &rest _) (push (list 'key k) ,calls))))
      ,@body))
 
+(defmacro claude-code-tests--recording-launch (execs &rest body)
+  "Run BODY with the launch path stubbed, pushing (BUFFER ARGS) onto EXECS.
+Neither Ghostel's native module nor the MCP server is wanted under test, so a
+`require' of either is a no-op and the MCP CLI arguments are a fixed stand-in."
+  (declare (indent 1))
+  `(cl-letf* ((orig (symbol-function 'require))
+              ((symbol-function 'require)
+               (lambda (feat &rest args)
+                 (unless (memq feat '(ghostel claude-code-mcp))
+                   (apply orig feat args))))
+              ((symbol-function 'claude-code--mcp-cli-args)
+               (lambda (_id) '("--mcp-config" "{}")))
+              ((symbol-function 'ghostel-exec)
+               (lambda (buffer _program args) (push (list buffer args) ,execs))))
+     ,@body))
+
 ;;;; Storage adapter
 
 (ert-deftest claude-code-test-encode-cwd ()
@@ -430,6 +446,44 @@ snapshot timestamp."
     (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
     (claude-code--on-exit buf "finished\n")
     (should (zerop (hash-table-count claude-code--managed)))))
+
+(ert-deftest claude-code-test-launch-shared-by-spawn-and-resume ()
+  "Spawn and resume host their instance through one launch path.
+Both reach `ghostel-exec' with the MCP arguments threaded in, register the
+instance, and install title tracking; only the CLI argument list differs."
+  (let ((claude-code--managed (make-hash-table :test 'equal))
+        (execs '())
+        (buffers '()))
+    (unwind-protect
+        (claude-code-tests--recording-launch execs
+          (push (claude-code-spawn "/r" :worktree "feat" :model "opus") buffers)
+          (push (claude-code-resume "/r" "given-id") buffers)
+          (let* ((calls (reverse execs))
+                 (spawn-args (nth 1 (nth 0 calls)))
+                 (resume-args (nth 1 (nth 1 calls))))
+            (should (= (length calls) 2))
+            ;; Resume ignores new-session options; spawn keeps them.
+            (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
+            (should (equal spawn-args
+                           (append (list "--session-id"
+                                         (nth 1 (member "--session-id" spawn-args)))
+                                   '("-w" "feat" "--model" "opus"
+                                     "--mcp-config" "{}"))))
+            ;; Both registered; only spawn recorded a worktree.  The spawned id
+            ;; is generated, so it is the entry that is not the resumed one.
+            (should (= (hash-table-count claude-code--managed) 2))
+            (should (null (plist-get (gethash "given-id" claude-code--managed)
+                                     :worktree)))
+            (let ((spawned-id (nth 1 (member "--session-id" spawn-args))))
+              (should (equal (plist-get (gethash spawned-id claude-code--managed)
+                                        :worktree)
+                             "feat")))
+            ;; Title tracking survives on both buffers.
+            (dolist (call calls)
+              (should (eq (buffer-local-value 'ghostel-buffer-name-function
+                                              (nth 0 call))
+                          #'claude-code--ghostel-buffer-name)))))
+      (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))
 
 (ert-deftest claude-code-test-resume-focuses-existing ()
   "Resuming an already-managed live session focuses it and spawns nothing."

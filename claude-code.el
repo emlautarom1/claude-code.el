@@ -29,7 +29,7 @@
 (require 'tabulated-list)
 (require 'transient)
 
-;; Ghostel is required lazily in the spawn path (see `claude-code-spawn').
+;; Ghostel is required lazily in the launch path (see `claude-code--launch').
 ;; Declaring its API here keeps the byte-compiler happy without the native
 ;; module being present, so the package compiles and tests in CI.
 (declare-function ghostel-exec "ghostel" (buffer program &optional args))
@@ -42,9 +42,9 @@
 (defvar ghostel-exit-functions)
 (defvar ghostel-buffer-name-function)
 
-;; The MCP server lives in `claude-code-mcp.el', required lazily in the spawn
-;; path (see `claude-code-spawn').  Declaring its one entry point here keeps the
-;; byte-compiler happy without pulling the MCP file (and its `web-server'
+;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
+;; path (see `claude-code--launch').  Declaring its one entry point here keeps
+;; the byte-compiler happy without pulling the MCP file (and its `web-server'
 ;; dependency) in eagerly, and avoids a load cycle.  Its teardown is its own
 ;; concern: it hooks `claude-code-last-instance-exit-hook'.
 (declare-function claude-code--mcp-cli-args "claude-code-mcp" (id))
@@ -414,19 +414,13 @@ MCP-ARGS is a list of extra CLI arguments (the MCP wiring built by
 terminator; this function keeps no MCP knowledge of its own."
   (if resume
       (append (list "-r" resume) mcp-args)
-    (let (args)
-      (when session-id
-        (setq args (append args (list "--session-id" session-id))))
-      (when worktree
-        (setq args (append args (if (stringp worktree)
-                                    (list "-w" worktree)
-                                  (list "-w")))))
-      (when model
-        (setq args (append args (list "--model" model))))
-      (setq args (append args mcp-args))
-      (when (and prompt (> (length prompt) 0))
-        (setq args (append args (list "--" prompt))))
-      args)))
+    (append (when session-id (list "--session-id" session-id))
+            (when worktree
+              (if (stringp worktree) (list "-w" worktree) (list "-w")))
+            (when model (list "--model" model))
+            mcp-args
+            (unless (or (null prompt) (string-empty-p prompt))
+              (list "--" prompt)))))
 
 (defcustom claude-code-buffer-name-function #'claude-code--default-buffer-name
   "Function that seeds the name of the buffer hosting a new instance.
@@ -497,14 +491,31 @@ Registered on `ghostel-exit-functions', which calls its functions with
   "Record instance ID hosted in BUFFER, launched from ORIGIN with CWD, WORKTREE."
   (add-hook 'ghostel-exit-functions #'claude-code--on-exit)
   (puthash id (list :buffer buffer :origin origin :cwd cwd :worktree worktree)
-           claude-code--managed)
-  id)
+           claude-code--managed))
 
 (defun claude-code--buffer (session)
   "Return SESSION's live buffer or signal a `user-error'."
   (let ((buffer (claude-code-session-buffer session)))
     (unless (buffer-live-p buffer)
       (user-error "Session %s has no live buffer" (claude-code-session-id session)))
+    buffer))
+
+(defun claude-code--launch (id project-root worktree build-args)
+  "Host a `claude' instance for session ID in a new buffer; return the buffer.
+PROJECT-ROOT is the directory it is launched from and recorded as the instance's
+origin; WORKTREE is the registry's record of the worktree request.  BUILD-ARGS
+is called with the MCP CLI arguments for ID and must return the full argument
+list -- the one thing that differs between starting a session and resuming one."
+  (require 'ghostel)
+  (require 'claude-code-mcp)
+  (let* ((root (claude-code--normalize-root project-root))
+         (args (funcall build-args (claude-code--mcp-cli-args id)))
+         (default-directory (file-name-as-directory root))
+         (buffer (generate-new-buffer
+                  (funcall claude-code-buffer-name-function root))))
+    (ghostel-exec buffer claude-code-cli args)
+    (claude-code--install-buffer-name-tracking buffer)
+    (claude-code--register id buffer root root worktree)
     buffer))
 
 ;;;###autoload
@@ -514,20 +525,13 @@ PROMPT is an optional initial prompt.
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
 name it.  MODEL sets the model.  The session id is generated internally and is
 not exposed."
-  (require 'ghostel)
-  (require 'claude-code-mcp)
-  (let* ((root (claude-code--normalize-root project-root))
-         (id (claude-code--new-uuid))
-         (args (claude-code--build-args :session-id id :prompt prompt
-                                        :worktree worktree :model model
-                                        :mcp-args (claude-code--mcp-cli-args id)))
-         (default-directory (file-name-as-directory root))
-         (buffer (generate-new-buffer
-                  (funcall claude-code-buffer-name-function root))))
-    (ghostel-exec buffer claude-code-cli args)
-    (claude-code--install-buffer-name-tracking buffer)
-    (claude-code--register id buffer root root worktree)
-    buffer))
+  (let ((id (claude-code--new-uuid)))
+    (claude-code--launch
+     id project-root worktree
+     (lambda (mcp-args)
+       (claude-code--build-args :session-id id :prompt prompt
+                                :worktree worktree :model model
+                                :mcp-args mcp-args)))))
 
 ;;;###autoload
 (defun claude-code-resume (project-root id)
@@ -540,18 +544,10 @@ instance rather than starting a second `claude' for the same session."
                         (plist-get reg :buffer))))
     (if existing
         (progn (pop-to-buffer existing) existing)
-      (require 'ghostel)
-      (require 'claude-code-mcp)
-      (let* ((root (claude-code--normalize-root project-root))
-             (args (claude-code--build-args
-                    :resume id :mcp-args (claude-code--mcp-cli-args id)))
-             (default-directory (file-name-as-directory root))
-             (buffer (generate-new-buffer
-                      (funcall claude-code-buffer-name-function root))))
-        (ghostel-exec buffer claude-code-cli args)
-        (claude-code--install-buffer-name-tracking buffer)
-        (claude-code--register id buffer root root nil)
-        buffer))))
+      (claude-code--launch
+       id project-root nil
+       (lambda (mcp-args)
+         (claude-code--build-args :resume id :mcp-args mcp-args))))))
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer."
@@ -931,7 +927,7 @@ latter case the row's session determines the enclosing group."
   (let ((prompt (read-string "Initial prompt (empty for none): ")))
     (claude-code-spawn
      claude-code--project
-     :prompt (and (> (length prompt) 0) prompt)
+     :prompt (unless (string-empty-p prompt) prompt)
      :worktree (and (member "--worktree" args) t)
      :model (transient-arg-value "--model=" args))
     (claude-code-sessions-refresh)))
