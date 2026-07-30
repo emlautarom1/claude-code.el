@@ -40,4 +40,4 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **`eval` tool** — an MCP tool that reads and evaluates the Elisp in its `code` argument (every top-level form, lexical binding) in the user's live Emacs and returns the printed value of the last form. Auto-approved by default (see the security decision in the [architecture notes](architecture.md#decisions)).
 
-- **Session-id path token** — the spawn UUID as it appears in the MCP request path `/mcp/<uuid>`. It multiplexes sessions over the one shared server (and keys the real-cwd lookup); it is **not** a security boundary — the full URL is visible on `claude`'s command line to any same-user process.
+- **Session-id path token** — the spawn UUID as it appears in the MCP request path `/mcp/<uuid>`. It multiplexes sessions over the one shared server and keys the real-cwd lookup. It is **not** a security boundary (see the [security decision](architecture.md#decisions)).

@@ -559,10 +559,7 @@ Returns nil for an empty (notification) reply that carries no body."
       (should (= (alist-get 'code (alist-get 'error resp)) -32700)))))
 
 (ert-deftest claude-code-mcp-test-transport-truncated-body ()
-  "A `Content-Length' larger than the delivered body yields a -32700 error.
-Web-server frames the body by the blank line, not `Content-Length', so a body
-split across packets arrives short; the integrity guard rejects it rather than
-parsing a partial request."
+  "A `Content-Length' larger than the delivered body yields a -32700 error."
   (claude-code-mcp-tests--with-server port
     (let* ((body "{\"jsonrpc\":\"2.0\"}")
            ;; Declare ten more bytes than we actually send.

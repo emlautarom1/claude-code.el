@@ -217,9 +217,9 @@ snapshot timestamp."
                  (claude-code-tests--find-session
                   ss "33333333-3333-4333-8333-333333333333")))
         ;; A genuinely dead worktree (no sessions/*.json) labels with its own
-        ;; worktree directory, not the parent project (regression: C1).  Its cwd
-        ;; comes from the lossless worktreePath, so a dotted name survives
-        ;; (regression: N2 -- never invert the lossy directory encoding).
+        ;; worktree directory, not the parent project.  Its cwd comes from the
+        ;; lossless worktreePath, so a dotted name survives -- the lossy
+        ;; directory encoding is never inverted.
         (let ((solo (claude-code-tests--find-session
                      ss "55555555-5555-4555-8555-555555555555")))
           (should (equal (claude-code-session-cwd solo)
@@ -376,7 +376,7 @@ snapshot timestamp."
 
 (ert-deftest claude-code-test-build-args-mcp ()
   "MCP args append verbatim; a nil `:mcp-args' leaves the base list unchanged."
-  ;; Nil MCP args reproduce exactly today's output (both branches).
+  ;; A nil `:mcp-args' adds nothing to either branch.
   (should (equal (claude-code--build-args :session-id "ID" :mcp-args nil)
                  '("--session-id" "ID")))
   (should (equal (claude-code--build-args :resume "ID" :mcp-args nil)
@@ -819,22 +819,13 @@ of prompting."
 ;; logged-in CLI.  `make test' and CI never run them: they skip unless
 ;; CLAUDE_CODE_INTEGRATION is set (use `make integration').
 ;;
-;; GOTCHA — READ THIS BEFORE DEBUGGING SPAWNING.  A running `claude' exports the
-;; variables in `claude-code-tests--nesting-env-vars' to mark its subprocesses
-;; as nested children.  A `claude' launched with those set does NOT start its
-;; own top-level session: it writes no `sessions/*.json' and no transcript, so
-;; the model reports no status and the whole lifecycle looks broken.  This bites
-;; when debugging the package *from inside a Claude Code session* (e.g. another
-;; Claude Code agent running Emacs).  Strip them before spawning —
-;; `claude-code-tests--with-top-level-env' does exactly that.  A normally
-;; launched Emacs never has these variables, which is why production code does
-;; not touch the environment.
+;; BEFORE DEBUGGING SPAWNING, read the nesting-env-var gotcha in CLAUDE.md — it
+;; is why `claude-code-tests--with-top-level-env' exists.
 
 (defconst claude-code-tests--nesting-env-vars
   '("CLAUDECODE" "CLAUDE_CODE_CHILD_SESSION" "CLAUDE_CODE_ENTRYPOINT"
     "CLAUDE_CODE_SSE_PORT" "CLAUDE_CODE_SSE_URL" "CLAUDE_CODE_SESSION_ID")
-  "Runtime variables a parent `claude' sets to mark nested children.
-Only relevant to testing/debugging (see the note above).")
+  "Runtime variables a parent `claude' sets to mark nested children.")
 
 (defmacro claude-code-tests--with-top-level-env (&rest body)
   "Run BODY with the Claude nesting markers removed from the environment.

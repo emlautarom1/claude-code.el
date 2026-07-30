@@ -85,7 +85,7 @@ Run `M-x claude-code` in a project. Keys in the sessions view:
 
 Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.io) server inside Emacs — one per Emacs, shared by every session — so Claude can act on the editor it is running under. The catalog holds a single tool, `eval`: it reads and evaluates the Elisp you pass it in your live Emacs and returns the printed result, with `default-directory` bound to the calling session's working directory.
 
-> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. The `/mcp/<uuid>` path is a multiplexing key, not a security boundary — the full URL sits on `claude`'s command line, readable by any same-user process. What protects you is the loopback bind plus single-user trust; see the [threat model](docs/architecture.md#decisions).
+> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. What protects you is the loopback bind plus single-user trust — read the [threat model](docs/architecture.md#decisions) before relying on it.
 
 | Variable                       | Default | Effect                                                 |
 | ------------------------------ | ------- | ------------------------------------------------------ |

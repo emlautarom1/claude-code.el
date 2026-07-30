@@ -28,11 +28,9 @@
 ;; Session state is reached ONLY through the `claude-code.el' model
 ;; (`claude-code--session-cwd'); this file never re-parses `~/.claude'.
 ;;
-;; SECURITY.  With the default auto-approve, a spawned `claude' can run
-;; arbitrary Elisp in the user's Emacs through the `eval' tool.  The server
-;; binds to loopback only and the `/mcp/<uuid>' path is a multiplexing key, not
-;; a security boundary, so this is acceptable only under a single-user trusted
-;; machine assumption.  See docs/architecture.md for the full threat model.
+;; SECURITY.  This server executes arbitrary Elisp on behalf of a local process
+;; and its only real boundary is the loopback bind.  Read the threat model in
+;; docs/architecture.md before changing anything here.
 
 ;;; Code:
 
@@ -57,9 +55,7 @@ Set to nil to spawn instances with no `--mcp-config' at all."
 (defcustom claude-code-mcp-auto-approve t
   "When non-nil, auto-approve every registered MCP tool for spawned instances.
 This adds an `--allowedTools' entry for each tool the server advertises, so
-Claude calls them without prompting.  With this enabled, any same-user local
-process driving a spawned `claude' can drive those tools -- including running
-arbitrary Elisp in your live Emacs; see the security discussion in
+Claude calls them without prompting.  Weigh it against the threat model in
 docs/architecture.md."
   :type 'boolean
   :group 'claude-code-mcp)
