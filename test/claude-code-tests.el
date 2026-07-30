@@ -372,6 +372,8 @@ snapshot timestamp."
   "Resume returns only \"-r ID\" and ignores new-session arguments."
   (should (equal (claude-code--build-args :resume "ID") '("-r" "ID")))
   (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus")
+                 '("-r" "ID")))
+  (should (equal (claude-code--build-args :resume "ID" :session-id "ID")
                  '("-r" "ID"))))
 
 (ert-deftest claude-code-test-build-args-mcp ()

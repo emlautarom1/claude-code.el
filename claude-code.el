@@ -505,22 +505,25 @@ Registered on `ghostel-exit-functions', which calls its functions with
       (user-error "Session %s has no live buffer" (claude-code-session-id session)))
     buffer))
 
-(defun claude-code--launch (id project-root worktree build-args)
+(defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
-origin; WORKTREE is the registry's record of the worktree request.  BUILD-ARGS
-is called with the MCP CLI arguments for ID and must return the full argument
-list -- the one thing that differs between starting a session and resuming one."
+origin.  OPTS are `:prompt', `:worktree' and `:model' as
+`claude-code--build-args' takes them, or `:resume' ID to resume that session
+rather than start it; the `:worktree' request is also recorded in the registry."
   (require 'ghostel)
   (require 'claude-code-mcp)
   (let* ((root (claude-code--normalize-root project-root))
-         (args (funcall build-args (claude-code--mcp-cli-args id)))
+         (args (apply #'claude-code--build-args
+                      :session-id id
+                      :mcp-args (claude-code--mcp-cli-args id)
+                      opts))
          (default-directory (file-name-as-directory root))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root))))
     (ghostel-exec buffer claude-code-cli args)
     (claude-code--install-buffer-name-tracking buffer)
-    (claude-code--register id buffer root root worktree)
+    (claude-code--register id buffer root root (plist-get opts :worktree))
     buffer))
 
 ;;;###autoload
@@ -530,13 +533,8 @@ PROMPT is an optional initial prompt.
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
 name it.  MODEL sets the model.  The session id is generated internally and is
 not exposed."
-  (let ((id (claude-code--new-uuid)))
-    (claude-code--launch
-     id project-root worktree
-     (lambda (mcp-args)
-       (claude-code--build-args :session-id id :prompt prompt
-                                :worktree worktree :model model
-                                :mcp-args mcp-args)))))
+  (claude-code--launch (claude-code--new-uuid) project-root
+                       :prompt prompt :worktree worktree :model model))
 
 ;;;###autoload
 (defun claude-code-resume (project-root id)
@@ -554,10 +552,7 @@ process to a session another one is already driving."
      ((claude-code--pid-live-p
        (plist-get (gethash id (claude-code--live-status-table)) :pid))
       (user-error "Session %s is running outside Emacs" id))
-     (t (claude-code--launch
-         id project-root nil
-         (lambda (mcp-args)
-           (claude-code--build-args :resume id :mcp-args mcp-args)))))))
+     (t (claude-code--launch id project-root :resume id)))))
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer."
