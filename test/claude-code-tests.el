@@ -32,6 +32,19 @@ The buffer is killed afterwards even when BODY already killed it."
      (unwind-protect (progn ,@body)
        (when (buffer-live-p ,var) (kill-buffer ,var)))))
 
+(defmacro claude-code-tests--with-live-pids (pids &rest body)
+  "Run BODY with exactly the pids in PIDS reading as live processes.
+Pinning the process table keeps a fixture pid that happens to be live on the
+host from classifying its session as external.  Every pinned pid parents to 0,
+so no pid is its own ancestor and a subtree walk always terminates."
+  (declare (indent 1))
+  (let ((live (gensym "live")))
+    `(let ((,live ,pids))
+       (cl-letf (((symbol-function 'list-system-processes) (lambda () ,live))
+                 ((symbol-function 'process-attributes)
+                  (lambda (p) (and (memql p ,live) '((ppid . 0))))))
+         ,@body))))
+
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
   "Run BODY with Ghostel send/paste/key stubbed to push onto CALLS.
 Each call pushes (paste STR), (send STR) or (key NAME).  A `require' of
@@ -301,7 +314,7 @@ snapshot timestamp."
     (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
       ;; Session 22222222 has sessions/1002.json (pid 1002).  When Emacs does
       ;; not manage it but that pid is live, it is external, not dead.
-      (cl-letf (((symbol-function 'list-system-processes) (lambda () '(1002))))
+      (claude-code-tests--with-live-pids '(1002)
         (let ((s (claude-code-tests--find-session
                   (claude-code-sessions "/home/test/proj")
                   "22222222-2222-4222-8222-222222222222")))
@@ -312,7 +325,7 @@ snapshot timestamp."
           ;; regardless of liveness.
           (should (equal (claude-code--session-display-name s)
                          "My renamed session"))))
-      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+      (claude-code-tests--with-live-pids '()
         (let ((s (claude-code-tests--find-session
                   (claude-code-sessions "/home/test/proj")
                   "22222222-2222-4222-8222-222222222222")))
@@ -320,7 +333,7 @@ snapshot timestamp."
           (should (eq 'dead (claude-code--session-liveness s)))
           (should (equal (claude-code--session-display-name s)
                          "My renamed session"))))
-      (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+      (claude-code-tests--with-live-pids '()
         (let ((s (claude-code-tests--find-session
                   (claude-code-sessions "/home/test/proj")
                   "55555555-5555-4555-8555-555555555555")))
@@ -513,14 +526,14 @@ a second process to a session another one is already driving.  Fixture session
     (claude-code-tests--with-managed-buffer _buf
       (let ((execs '()))
         (claude-code-tests--recording-launch execs
-          (cl-letf (((symbol-function 'list-system-processes) (lambda () '(1002))))
+          (claude-code-tests--with-live-pids '(1002)
             (should-error (claude-code-resume
                            "/home/test/proj"
                            "22222222-2222-4222-8222-222222222222")
                           :type 'user-error))
           ;; Nothing was launched, and with that pid gone it resumes normally.
           (should (null execs))
-          (cl-letf (((symbol-function 'list-system-processes) (lambda () '())))
+          (claude-code-tests--with-live-pids '()
             (claude-code-resume "/home/test/proj"
                                 "22222222-2222-4222-8222-222222222222"))
           (should (= (length execs) 1))
@@ -761,33 +774,30 @@ delete cannot pick one up and abort partway through `claude-code-delete'."
       (unwind-protect
           (with-current-buffer buf
             (cl-letf (((symbol-function 'claude-code--live-managed)
-                       (lambda (_r) nil))
-                      ;; Pin the process table empty so the fixture sessions
-                      ;; (pids 1001-1003) never classify as external on a host
-                      ;; that happens to have those pids live.
-                      ((symbol-function 'list-system-processes) (lambda () '())))
-              (claude-code-sessions-mode)
-              (setq claude-code--project "/home/test/proj")
-              (claude-code-sessions-refresh)
-              ;; The Dead group starts folded: its header shows but no rows do.
-              (should (member "dead" claude-code--collapsed))
-              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                (should (string-match-p "Dead (4)" text))
-                (should-not (string-match-p "11111111" text)))
-              ;; Expanding it reveals every dead row.
-              (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
-              (claude-code-sessions-refresh)
-              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                (should (string-match-p "Dead (4)" text))
-                (should (string-match-p "11111111" text))
-                ;; The worktree session is listed under the parent project.
-                (should (string-match-p "feat" text)))
-              ;; Folding it again hides the rows.
-              (push "dead" claude-code--collapsed)
-              (claude-code-sessions-refresh)
-              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                (should (string-match-p "Dead (4)" text))
-                (should-not (string-match-p "11111111" text)))))
+                       (lambda (_r) nil)))
+              (claude-code-tests--with-live-pids '()
+                (claude-code-sessions-mode)
+                (setq claude-code--project "/home/test/proj")
+                (claude-code-sessions-refresh)
+                ;; The Dead group starts folded: its header shows but no rows do.
+                (should (member "dead" claude-code--collapsed))
+                (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                  (should (string-match-p "Dead (4)" text))
+                  (should-not (string-match-p "11111111" text)))
+                ;; Expanding it reveals every dead row.
+                (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
+                (claude-code-sessions-refresh)
+                (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                  (should (string-match-p "Dead (4)" text))
+                  (should (string-match-p "11111111" text))
+                  ;; The worktree session is listed under the parent project.
+                  (should (string-match-p "feat" text)))
+                ;; Folding it again hides the rows.
+                (push "dead" claude-code--collapsed)
+                (claude-code-sessions-refresh)
+                (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                  (should (string-match-p "Dead (4)" text))
+                  (should-not (string-match-p "11111111" text))))))
         (kill-buffer buf)))))
 
 (ert-deftest claude-code-test-view-pins-default-directory ()

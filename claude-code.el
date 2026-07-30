@@ -275,14 +275,12 @@ root a later query normalises the same way."
              claude-code--managed)
     out))
 
-(defun claude-code--pid-live-p (pid &optional pids)
+(defun claude-code--pid-live-p (pid)
   "Return non-nil when integer PID is a currently running process.
-PIDS is a `list-system-processes' list read in advance, so a caller testing
-several pids scans the process table once; it is read here when omitted.  This
-is a bare membership test and does not verify the live process is the same
+This is a bare existence check and does not verify the live process is the same
 `claude' the sessions file recorded -- see docs/storage-model.md for the
 PID-reuse trade-off that buys."
-  (and (integerp pid) (memql pid (or pids (list-system-processes))) t))
+  (and (integerp pid) (process-attributes pid) t))
 
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
@@ -307,7 +305,6 @@ is running it and it is dead."
          (transcript-of (lambda (id)
                           (seq-find (lambda (d) (equal (plist-get d :id) id))
                                     transcripts)))
-         (pids (list-system-processes))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (pcase-dolist (`(,id . ,buf) managed)
@@ -339,7 +336,7 @@ is running it and it is dead."
                    :id id :alive-p nil
                    :external-p (and info
                                     (claude-code--pid-live-p
-                                     (plist-get info :pid) pids))
+                                     (plist-get info :pid)))
                    :cwd (or (plist-get info :cwd)
                             (plist-get tr :worktree-path)
                             root)

@@ -25,7 +25,7 @@ this package reads:
 
 A session's display name comes entirely from the transcript (see [Transcripts](#transcripts--projectsencoded-cwdsessionidjsonl) and `claude-code--session-display-name`); a `/rename` is reflected there through its `custom-title`. Claude also writes a `name` on this file, but for most sessions that is a directory-derived placeholder (`{"name":"proj-f8","nameSource":"derived"}`) which would shadow the live transcript title — so the transcript is the sole source.
 
-Liveness is a plain `pid ∈ list-system-processes` check; the `procStart` field is deliberately **not** consulted. A stale `sessions/<pid>.json` (left by a crash) whose PID was reused could therefore mis-flag a dead session as external — accepted as a simplicity trade-off, since PID reuse is vanishingly unlikely (`pid_max` defaults to 4194304).
+Liveness is a plain per-PID `process-attributes` existence check; the `procStart` field is deliberately **not** consulted. A stale `sessions/<pid>.json` (left by a crash) whose PID was reused could therefore mis-flag a dead session as external — accepted as a simplicity trade-off, since PID reuse is vanishingly unlikely (`pid_max` defaults to 4194304).
 
 ## Transcripts — `projects/<encoded-cwd>/<sessionId>.jsonl`
 
