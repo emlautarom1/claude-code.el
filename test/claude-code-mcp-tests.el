@@ -357,8 +357,7 @@ all non-nil in Lisp, so each must arrive as nil."
 (ert-deftest claude-code-mcp-test-ensure-server-disabled ()
   "`claude-code--mcp-ensure-server' returns nil and starts nothing when off."
   (let ((claude-code-mcp-enabled nil)
-        (claude-code--mcp-server nil)
-        (claude-code--mcp-port nil))
+        (claude-code--mcp-server nil))
     (should (null (claude-code--mcp-ensure-server)))
     (should (null claude-code--mcp-server))))
 
@@ -366,18 +365,16 @@ all non-nil in Lisp, so each must arrive as nil."
 
 (ert-deftest claude-code-mcp-test-stop-is-a-noop-when-stopped ()
   "`claude-code-mcp-stop' is a clean no-op when no server is live."
-  (let ((claude-code--mcp-server nil)
-        (claude-code--mcp-port nil))
+  (let ((claude-code--mcp-server nil))
     ;; Must not error and must leave state nil.
     (claude-code-mcp-stop)
     (should (null claude-code--mcp-server))
-    (should (null claude-code--mcp-port))))
+    (should (null (claude-code--mcp-port)))))
 
 (ert-deftest claude-code-mcp-test-ensure-server-idempotent ()
   "Ensuring twice yields one listener on the same port; stop tears it down."
   (let ((claude-code-mcp-enabled t)
-        (claude-code--mcp-server nil)
-        (claude-code--mcp-port nil))
+        (claude-code--mcp-server nil))
     (unwind-protect
         (let ((port1 (claude-code--mcp-ensure-server))
               (server1 claude-code--mcp-server)
@@ -388,7 +385,7 @@ all non-nil in Lisp, so each must arrive as nil."
           (should (equal port1 port2)))
       (claude-code-mcp-stop))
     (should (null claude-code--mcp-server))
-    (should (null claude-code--mcp-port))))
+    (should (null (claude-code--mcp-port)))))
 
 ;;;; In-Emacs socket end-to-end (real loopback, no claude/ghostel)
 
@@ -399,8 +396,7 @@ every caller starts from a listening server."
   (declare (indent 1))
   `(claude-code-mcp-tests--isolated
      (let ((claude-code-mcp-enabled t)
-           (claude-code--mcp-server nil)
-           (claude-code--mcp-port nil))
+           (claude-code--mcp-server nil))
        (unwind-protect
            (let ((,port (claude-code--mcp-ensure-server)))
              (should (integerp ,port))

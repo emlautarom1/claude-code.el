@@ -164,10 +164,6 @@ Pass `:null' as ID for a request that could not be parsed."
         (cons 'id id)
         (cons 'error (list (cons 'code code) (cons 'message message)))))
 
-(defun claude-code--mcp-format-result (result)
-  "Return RESULT as a string suitable for MCP text content."
-  (if (stringp result) result (format "%s" result)))
-
 (defun claude-code--mcp-args->properties (args)
   "Return the JSON-Schema `properties' object for argument specs ARGS.
 Returns an alist keyed by argument name symbol, or an empty hash table
@@ -179,11 +175,8 @@ Returns an alist keyed by argument name symbol, or an empty hash table
                     (type (plist-get arg :type))
                     (desc (plist-get arg :description)))
                 (cons (intern name)
-                      (append
-                       (list (cons 'type (if (symbolp type)
-                                             (symbol-name type)
-                                           type)))
-                       (when desc (list (cons 'description desc)))))))
+                      (append (list (cons 'type (symbol-name type)))
+                              (when desc (list (cons 'description desc)))))))
             args)))
 
 (defun claude-code--mcp-required-args (args)
@@ -274,9 +267,7 @@ than crashing the server."
                           (apply (plist-get tool :handler) call-args))))
             (list (cons 'content
                         (vector (list (cons 'type "text")
-                                      (cons 'text
-                                            (claude-code--mcp-format-result
-                                             result)))))
+                                      (cons 'text (format "%s" result)))))
                   (cons 'isError :json-false)))
         ((error quit)
          (list (cons 'content
@@ -323,8 +314,10 @@ error envelope echoing the request `id'."
 (defvar claude-code--mcp-server nil
   "The live `ws-server' object for the MCP server, or nil when stopped.")
 
-(defvar claude-code--mcp-port nil
-  "The TCP port the MCP server listens on, or nil when stopped.")
+(defun claude-code--mcp-port ()
+  "Return the TCP port the MCP server listens on, or nil when stopped."
+  (and claude-code--mcp-server
+       (process-contact (ws-process claude-code--mcp-server) :service)))
 
 (defun claude-code--mcp-serialize (envelope)
   "Serialize response ENVELOPE alist to a JSON string for the wire.
@@ -355,24 +348,25 @@ error is answered with a -32700 error before any bytes are written."
                             (string-match "^/mcp/\\([^/]+\\)" path)
                             (match-string 1 path)))
            (declared (cdr (assoc :CONTENT-LENGTH headers))))
+      ;; Every error branch below ends in `claude-code--mcp-send', which throws
+      ;; `close-connection', so these read as sequential guards.
+      ;;
       ;; Body-integrity guard: web-server frames the body by the header blank
       ;; line, not Content-Length, so a body split across packets is delivered
       ;; truncated.  Reject rather than parse a partial body.
-      (if (and declared
-               (/= (string-bytes body) (string-to-number declared)))
-          (claude-code--mcp-send
-           process
-           (claude-code--mcp-error :null -32700 "Truncated request body"))
-        (let ((parsed (condition-case nil
-                          (json-parse-string body :object-type 'alist)
-                        (error 'claude-code--mcp-parse-error))))
-          (if (eq parsed 'claude-code--mcp-parse-error)
-              (claude-code--mcp-send
-               process (claude-code--mcp-error :null -32700 "Parse error"))
-            (let ((response (claude-code--mcp-handle-request session-id parsed)))
-              (if response
-                  (claude-code--mcp-send process response)
-                (claude-code--mcp-send-empty process)))))))))
+      (when (and declared (/= (string-bytes body) (string-to-number declared)))
+        (claude-code--mcp-send
+         process (claude-code--mcp-error :null -32700 "Truncated request body")))
+      (let* ((parsed (condition-case nil
+                         (json-parse-string body :object-type 'alist)
+                       (error (claude-code--mcp-send
+                               process
+                               (claude-code--mcp-error
+                                :null -32700 "Parse error")))))
+             (response (claude-code--mcp-handle-request session-id parsed)))
+        (if response
+            (claude-code--mcp-send process response)
+          (claude-code--mcp-send-empty process))))))
 
 (defun claude-code--mcp-handle-get (request)
   "Answer a Streamable-HTTP GET REQUEST on the MCP endpoint with HTTP 405.
@@ -386,18 +380,16 @@ signal that no stream is offered.  Every JSON-RPC message travels over POST."
 (defun claude-code--mcp-ensure-server ()
   "Ensure the MCP server is running and return its port, or nil.
 Returns nil when `claude-code-mcp-enabled' is nil.  Starting is idempotent: a
-live server's cached port is returned without opening a second listener."
+live server's port is returned without opening a second listener."
   (when claude-code-mcp-enabled
     (unless (and claude-code--mcp-server
                  (process-live-p (ws-process claude-code--mcp-server)))
-      (let ((server (ws-start
-                     (list (cons (cons :GET "^/mcp/") #'claude-code--mcp-handle-get)
-                           (cons (cons :POST "^/mcp/") #'claude-code--mcp-handle))
-                     0 nil :host "127.0.0.1")))
-        (setq claude-code--mcp-server server
-              claude-code--mcp-port
-              (process-contact (ws-process server) :service))))
-    claude-code--mcp-port))
+      (setq claude-code--mcp-server
+            (ws-start
+             (list (cons (cons :GET "^/mcp/") #'claude-code--mcp-handle-get)
+                   (cons (cons :POST "^/mcp/") #'claude-code--mcp-handle))
+             0 nil :host "127.0.0.1")))
+    (claude-code--mcp-port)))
 
 
 ;;;; Lifecycle and CLI wiring
@@ -443,8 +435,7 @@ session has spawned."
   (interactive)
   (when claude-code--mcp-server
     (ignore-errors (ws-stop claude-code--mcp-server))
-    (setq claude-code--mcp-server nil
-          claude-code--mcp-port nil)))
+    (setq claude-code--mcp-server nil)))
 
 (provide 'claude-code-mcp)
 ;;; claude-code-mcp.el ends here
