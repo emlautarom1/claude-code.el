@@ -23,6 +23,15 @@ Clears the transcript cache first so tests do not leak into each other."
      (clrhash claude-code--transcript-cache)
      ,@body))
 
+(defmacro claude-code-tests--with-managed-buffer (var &rest body)
+  "Run BODY with VAR bound to a fresh buffer and an empty managed registry.
+The buffer is killed afterwards even when BODY already killed it."
+  (declare (indent 1))
+  `(let ((claude-code--managed (make-hash-table :test 'equal))
+         (,var (generate-new-buffer " *cc-test*")))
+     (unwind-protect (progn ,@body)
+       (when (buffer-live-p ,var) (kill-buffer ,var)))))
+
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
   "Run BODY with Ghostel send/paste/key stubbed to push onto CALLS.
 Each call pushes (paste STR), (send STR) or (key NAME).  A `require' of
@@ -204,27 +213,24 @@ snapshot timestamp."
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
   (claude-code-tests--with-fixtures
-    (let ((buf (generate-new-buffer " *cc-test*"))
-          (id "11111111-1111-4111-8111-111111111111"))
-      (unwind-protect
-          (progn
-            (with-current-buffer buf (setq-local ghostel--pid 4242))
-            (cl-letf (((symbol-function 'claude-code--live-managed)
-                       (lambda (_r) (list (cons id buf)))))
-              (let* ((ss (claude-code-sessions "/home/test/proj"))
-                     (s1 (claude-code-tests--find-session ss id)))
-                (should (= (length ss) 4))
-                (should (claude-code-session-alive-p s1))
-                (should (eq (claude-code-session-buffer s1) buf))
-                (should (= (claude-code-session-pid s1) 4242))
-                ;; Alive status comes from the live sessions file; the display
-                ;; name comes from the transcript title.
-                (should (equal (claude-code-session-status s1) "busy"))
-                (should (equal (claude-code-session-title s1)
-                               "Understand the project layout"))
-                (should (equal (claude-code--session-display-name s1)
-                               "Understand the project layout")))))
-        (kill-buffer buf)))))
+    (claude-code-tests--with-managed-buffer buf
+      (let ((id "11111111-1111-4111-8111-111111111111"))
+        (with-current-buffer buf (setq-local ghostel--pid 4242))
+        (cl-letf (((symbol-function 'claude-code--live-managed)
+                   (lambda (_r) (list (cons id buf)))))
+          (let* ((ss (claude-code-sessions "/home/test/proj"))
+                 (s1 (claude-code-tests--find-session ss id)))
+            (should (= (length ss) 4))
+            (should (claude-code-session-alive-p s1))
+            (should (eq (claude-code-session-buffer s1) buf))
+            (should (= (claude-code-session-pid s1) 4242))
+            ;; Alive status comes from the live sessions file; the display
+            ;; name comes from the transcript title.
+            (should (equal (claude-code-session-status s1) "busy"))
+            (should (equal (claude-code-session-title s1)
+                           "Understand the project layout"))
+            (should (equal (claude-code--session-display-name s1)
+                           "Understand the project layout"))))))))
 
 (ert-deftest claude-code-test-process-usage ()
   "Usage sums the pcpu/rss of a PID's whole subtree."
@@ -420,89 +426,74 @@ snapshot timestamp."
 
 (ert-deftest claude-code-test-on-exit-unregisters ()
   "Process exit removes the instance's registry entry."
-  (let ((claude-code--managed (make-hash-table :test 'equal))
-        (buf (generate-new-buffer " *cc-test-exit*")))
-    (unwind-protect
-        (progn
-          (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
-          (claude-code--on-exit buf "finished\n")
-          (should (zerop (hash-table-count claude-code--managed))))
-      (kill-buffer buf))))
+  (claude-code-tests--with-managed-buffer buf
+    (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
+    (claude-code--on-exit buf "finished\n")
+    (should (zerop (hash-table-count claude-code--managed)))))
 
 (ert-deftest claude-code-test-resume-focuses-existing ()
   "Resuming an already-managed live session focuses it and spawns nothing."
-  (let ((claude-code--managed (make-hash-table :test 'equal))
-        (buf (generate-new-buffer " *cc-resume*"))
-        (focused nil) (spawned nil))
-    (unwind-protect
-        (progn
-          (puthash "id-x" (list :buffer buf :origin "/r") claude-code--managed)
-          (cl-letf (((symbol-function 'claude-code--session-process)
-                     (lambda (b) (and (eq b buf) 'proc)))
-                    ((symbol-function 'pop-to-buffer)
-                     (lambda (b &rest _) (setq focused b)))
-                    ((symbol-function 'ghostel-exec)
-                     (lambda (&rest _) (setq spawned t))))
-            (should (eq (claude-code-resume "/r" "id-x") buf))
-            (should (eq focused buf))
-            (should-not spawned)
-            ;; No second registry entry was created for the same id.
-            (should (= (hash-table-count claude-code--managed) 1))))
-      (kill-buffer buf))))
+  (claude-code-tests--with-managed-buffer buf
+    (let ((focused nil) (spawned nil))
+      (puthash "id-x" (list :buffer buf :origin "/r") claude-code--managed)
+      (cl-letf (((symbol-function 'claude-code--session-process)
+                 (lambda (b) (and (eq b buf) 'proc)))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (b &rest _) (setq focused b)))
+                ((symbol-function 'ghostel-exec)
+                 (lambda (&rest _) (setq spawned t))))
+        (should (eq (claude-code-resume "/r" "id-x") buf))
+        (should (eq focused buf))
+        (should-not spawned)
+        ;; No second registry entry was created for the same id.
+        (should (= (hash-table-count claude-code--managed) 1))))))
 
 (ert-deftest claude-code-test-kill ()
   "Killing an alive session drops its registry entry and buffer."
-  (let ((claude-code--managed (make-hash-table :test 'equal))
-        (buf (generate-new-buffer " *cc-kill*")))
-    (unwind-protect
-        (progn
-          (puthash "id-k" (list :buffer buf :origin "/r") claude-code--managed)
-          (claude-code-kill (claude-code-session--create
-                             :id "id-k" :alive-p t :buffer buf))
-          (should-not (gethash "id-k" claude-code--managed))
-          (should-not (buffer-live-p buf))
-          ;; A dead session cannot be killed.
-          (should-error (claude-code-kill
-                         (claude-code-session--create :id "d" :alive-p nil))
-                        :type 'user-error))
-      (when (buffer-live-p buf) (kill-buffer buf)))))
+  (claude-code-tests--with-managed-buffer buf
+    (puthash "id-k" (list :buffer buf :origin "/r") claude-code--managed)
+    (claude-code-kill (claude-code-session--create
+                       :id "id-k" :alive-p t :buffer buf))
+    (should-not (gethash "id-k" claude-code--managed))
+    (should-not (buffer-live-p buf))
+    ;; A dead session cannot be killed.
+    (should-error (claude-code-kill
+                   (claude-code-session--create :id "d" :alive-p nil))
+                  :type 'user-error)))
 
 (ert-deftest claude-code-test-rename ()
   "Rename sends exactly the /rename slash command, then submits."
-  (let ((buf (generate-new-buffer " *cc-rename*")) (calls '()))
-    (unwind-protect
-        (progn
-          (claude-code-tests--recording-ghostel calls
-            (claude-code-rename
-             (claude-code-session--create :id "s" :alive-p t :buffer buf)
-             "My Name"))
-          (should (equal (reverse calls)
-                         '((send "/rename My Name") (key "return"))))
-          ;; Renaming a dead session is refused.
-          (should-error (claude-code-rename
-                         (claude-code-session--create :id "d" :alive-p nil) "x")
-                        :type 'user-error))
-      (kill-buffer buf))))
+  (claude-code-tests--with-managed-buffer buf
+    (let ((calls '()))
+      (claude-code-tests--recording-ghostel calls
+        (claude-code-rename
+         (claude-code-session--create :id "s" :alive-p t :buffer buf)
+         "My Name"))
+      (should (equal (reverse calls)
+                     '((send "/rename My Name") (key "return"))))
+      ;; Renaming a dead session is refused.
+      (should-error (claude-code-rename
+                     (claude-code-session--create :id "d" :alive-p nil) "x")
+                    :type 'user-error))))
 
 (ert-deftest claude-code-test-send-text ()
   "Newlines paste as one message; single lines type; RET only when submitting."
-  (let ((buf (generate-new-buffer " *cc-send*")) (calls '()))
-    (unwind-protect
-        (let ((s (claude-code-session--create :id "s" :alive-p t :buffer buf)))
-          (claude-code-tests--recording-ghostel calls
-            ;; Single line, no submit: typed, no RET.
-            (setq calls nil)
-            (claude-code-send-text s "hello")
-            (should (equal (reverse calls) '((send "hello"))))
-            ;; Single line, submit: typed then RET.
-            (setq calls nil)
-            (claude-code-send-text s "hi" t)
-            (should (equal (reverse calls) '((send "hi") (key "return"))))
-            ;; Multi-line: bracketed paste, then RET only for the submit.
-            (setq calls nil)
-            (claude-code-send-text s "a\nb" t)
-            (should (equal (reverse calls) '((paste "a\nb") (key "return"))))))
-      (kill-buffer buf))))
+  (claude-code-tests--with-managed-buffer buf
+    (let ((calls '())
+          (s (claude-code-session--create :id "s" :alive-p t :buffer buf)))
+      (claude-code-tests--recording-ghostel calls
+        ;; Single line, no submit: typed, no RET.
+        (setq calls nil)
+        (claude-code-send-text s "hello")
+        (should (equal (reverse calls) '((send "hello"))))
+        ;; Single line, submit: typed then RET.
+        (setq calls nil)
+        (claude-code-send-text s "hi" t)
+        (should (equal (reverse calls) '((send "hi") (key "return"))))
+        ;; Multi-line: bracketed paste, then RET only for the submit.
+        (setq calls nil)
+        (claude-code-send-text s "a\nb" t)
+        (should (equal (reverse calls) '((paste "a\nb") (key "return"))))))))
 
 (ert-deftest claude-code-test-status-display-unknown ()
   "An unrecognised non-nil status is surfaced verbatim; nil stays `alive'."

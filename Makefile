@@ -2,6 +2,10 @@ EMACS ?= emacs
 SRC   := claude-code.el claude-code-mcp.el
 TESTS := test/claude-code-tests.el test/claude-code-mcp-tests.el
 
+## Everything needed to load the package and the suite into a batch Emacs.
+ERT_LOAD := --eval '(package-initialize)' -L . -L test \
+	    -l ert $(foreach t,$(TESTS),-l $(t))
+
 .PHONY: all deps compile test integration lint clean
 
 all: compile test
@@ -21,20 +25,14 @@ compile:
 
 ## Run the ERT suite in batch mode.
 test:
-	$(EMACS) -Q --batch \
-	  --eval '(package-initialize)' \
-	  -L . -L test \
-	  -l ert $(foreach t,$(TESTS),-l $(t)) \
-	  -f ert-run-tests-batch-and-exit
+	$(EMACS) -Q --batch $(ERT_LOAD) -f ert-run-tests-batch-and-exit
 
 ## Run the live integration test: spawns a real `claude' via Ghostel.
 ## Needs the Ghostel native module and a logged-in CLI; not run by `test'/CI.
 ## The test strips Claude's nesting env vars itself, so this works even when
 ## invoked from inside a Claude Code session.
 integration:
-	CLAUDE_CODE_INTEGRATION=1 $(EMACS) --batch \
-	  --eval '(package-initialize)' \
-	  -L . -L test -l ert $(foreach t,$(TESTS),-l $(t)) \
+	CLAUDE_CODE_INTEGRATION=1 $(EMACS) --batch $(ERT_LOAD) \
 	  --eval '(ert-run-tests-batch-and-exit "integration")'
 
 ## Run checkdoc over the sources, failing the build on any diagnostic.
