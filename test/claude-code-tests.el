@@ -633,6 +633,16 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
                   (claude-code-session--create
                    :id "abcdef01-0000-4000-8000-000000000000")))))
 
+(ert-deftest claude-code-test-short-session-id ()
+  "An id shorter than the truncation width degrades to itself.
+Truncating it must not signal: the Id column and the display name are
+computed for every row, so one odd id would abort a whole view refresh."
+  (let ((s (claude-code-session--create :id "new-id")))
+    (should (equal "new-id" (claude-code--session-display-name s)))
+    (should (equal "new-id"
+                   (substring-no-properties
+                    (aref (claude-code--format-session s nil) 2))))))
+
 (ert-deftest claude-code-test-group-key ()
   "Grouping keys depend on the current grouping mode."
   (let ((alive (claude-code-session--create :alive-p t :status "busy"))

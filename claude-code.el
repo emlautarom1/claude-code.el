@@ -665,7 +665,7 @@ that `/rename' writes, else Claude's generated one), the opening prompt, and
 finally the short session id."
   (or (claude-code-session-title session)
       (claude-code-session-last-prompt session)
-      (substring (claude-code-session-id session) 0 8)))
+      (string-limit (claude-code-session-id session) 8)))
 
 (defun claude-code--format-relative-time (time &optional now)
   "Return a compact age string for TIME relative to NOW.
@@ -689,7 +689,7 @@ USAGE is (CPU . RSS) or nil."
             (propertize (claude-code--format-relative-time
                          (claude-code-session-last-active session))
                         'face 'shadow)
-            (propertize (substring (claude-code-session-id session) 0 8)
+            (propertize (string-limit (claude-code-session-id session) 8)
                         'face 'shadow)
             (claude-code--worktree-label session)
             (if usage (format "%.1f" (car usage)) "")
