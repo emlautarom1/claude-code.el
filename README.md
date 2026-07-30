@@ -12,17 +12,19 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a chosen model, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
 - **`transient` menu** (`?`) for spawn options and actions.
+- **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
 ## Requirements
 
 - Emacs 30.1+
-- [Ghostel](https://github.com/dakra/ghostel) (the only third-party dependency)
+- [Ghostel](https://github.com/dakra/ghostel) — hosts each instance's terminal. Loaded lazily, so the package byte-compiles and tests without its native module.
+- [`web-server`](https://github.com/eschulte/emacs-web-server) — HTTP transport for the MCP server.
 - The `claude` CLI on your `PATH`
 
 ## Install
 
-Put `claude-code.el` on your `load-path` and:
+Put `claude-code.el` and `claude-code-mcp.el` on your `load-path` and:
 
 ```elisp
 (require 'claude-code)
@@ -79,6 +81,18 @@ Run `M-x claude-code` in a project. Keys in the sessions view:
 (claude-code-focus session)
 ```
 
+## Emacs as an MCP server
+
+Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.io) server inside Emacs — one per Emacs, shared by every session — so Claude can act on the editor it is running under. The catalog holds a single tool, `eval`: it reads and evaluates the Elisp you pass it in your live Emacs and returns the printed result, with `default-directory` bound to the calling session's working directory.
+
+> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. The `/mcp/<uuid>` path is a multiplexing key, not a security boundary — the full URL sits on `claude`'s command line, readable by any same-user process. What protects you is the loopback bind plus single-user trust; see the [threat model](docs/architecture.md#decisions).
+
+| Variable                       | Default | Effect                                                 |
+| ------------------------------ | ------- | ------------------------------------------------------ |
+| `claude-code-mcp-enabled`      | `t`     | nil spawns instances with no `--mcp-config` at all     |
+| `claude-code-mcp-auto-approve` | `t`     | nil makes Claude prompt before each tool call          |
+| `claude-code-mcp-eval-timeout` | `10`    | seconds before `eval` aborts an evaluation that yields |
+
 ## Documentation
 
 - [`docs/glossary.md`](docs/glossary.md) — terminology.
@@ -89,10 +103,12 @@ Run `M-x claude-code` in a project. Keys in the sessions view:
 ## Development
 
 ```sh
+make deps      # install web-server if missing
 make compile   # byte-compile with warnings as errors
 make test      # run the ERT suite
 make lint      # checkdoc
 ```
 
-`make compile` and `make test` also run automatically via the project's Claude
-`Stop` hook (`scripts/compile-and-test.sh`).
+`make test` never launches `claude` — it runs the logic against fixtures. `make integration` exercises the real spawn/kill lifecycle and needs Ghostel's native module and a logged-in CLI, so it is skipped by `make test` and CI.
+
+`make compile` and `make test` also run automatically via the project's Claude `Stop` hook (`scripts/compile-and-test.sh`).
