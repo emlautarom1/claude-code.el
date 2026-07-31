@@ -351,8 +351,8 @@ snapshot timestamp."
       (should (equal (claude-code--session-cwd
                       "33333333-3333-4333-8333-333333333333")
                      "/home/test/proj/.claude/worktrees/feat"))
-      ;; With no live file, fall back to the managed registry `:cwd'.
-      (puthash "reg-only" (list :cwd "/home/x/proj") claude-code--managed)
+      ;; With no live file, fall back to the registry's launch-time root.
+      (puthash "reg-only" (list :origin "/home/x/proj") claude-code--managed)
       (should (equal (claude-code--session-cwd "reg-only") "/home/x/proj"))
       ;; An unknown id yields nil, so `default-directory' is left unchanged.
       (should (null (claude-code--session-cwd "no-such-id"))))))

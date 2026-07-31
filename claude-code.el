@@ -245,8 +245,8 @@ taken from the newest timestamped transcript line."
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
 Keys: :buffer (the Ghostel buffer), :origin (project root the instance
-was launched from, normalised with `claude-code--normalize-root'), :cwd
-and :worktree.")
+was launched from, normalised with `claude-code--normalize-root') and
+:worktree.")
 
 (defun claude-code--normalize-root (path)
   "Return PATH as an absolute, symlink-resolved directory name.
@@ -316,7 +316,7 @@ is running it and it is dead."
                          (buffer-local-value 'ghostel--pid buf))
                :cwd (or (plist-get info :cwd)
                         (plist-get tr :worktree-path)
-                        (plist-get reg :cwd))
+                        (plist-get reg :origin))
                :status (plist-get info :status)
                :waiting-for (plist-get info :waiting-for)
                :worktree-p (or (plist-get tr :worktree-p)
@@ -387,10 +387,10 @@ RSS is in kibibytes."
 (defun claude-code--session-cwd (id)
   "Return the real working directory of the running instance for session ID.
 Prefers the live `sessions/*.json' cwd (the actual worktree directory for a
-worktree session), falls back to the registry `:cwd' (the project root the
-instance was launched from), and is nil for an unknown id."
+worktree session), falls back to the project root the instance was launched
+from, and is nil for an unknown id."
   (or (plist-get (gethash id (claude-code--live-status-table)) :cwd)
-      (plist-get (gethash id claude-code--managed) :cwd)))
+      (plist-get (gethash id claude-code--managed) :origin)))
 
 
 ;;;; Operations
@@ -487,10 +487,10 @@ Registered on `ghostel-exit-functions', which calls its functions with
   (when (zerop (hash-table-count claude-code--managed))
     (run-hooks 'claude-code-last-instance-exit-hook)))
 
-(defun claude-code--register (id buffer origin cwd worktree)
-  "Record instance ID hosted in BUFFER, launched from ORIGIN with CWD, WORKTREE."
+(defun claude-code--register (id buffer origin worktree)
+  "Record instance ID hosted in BUFFER, launched from ORIGIN, with WORKTREE."
   (add-hook 'ghostel-exit-functions #'claude-code--on-exit)
-  (puthash id (list :buffer buffer :origin origin :cwd cwd :worktree worktree)
+  (puthash id (list :buffer buffer :origin origin :worktree worktree)
            claude-code--managed))
 
 (defun claude-code--buffer (session)
@@ -518,7 +518,7 @@ rather than start it; the `:worktree' request is also recorded in the registry."
                   (funcall claude-code-buffer-name-function root))))
     (ghostel-exec buffer claude-code-cli args)
     (claude-code--install-buffer-name-tracking buffer)
-    (claude-code--register id buffer root root (plist-get opts :worktree))
+    (claude-code--register id buffer root (plist-get opts :worktree))
     buffer))
 
 ;;;###autoload
