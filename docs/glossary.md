@@ -24,7 +24,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **External session** — a session running in a `claude` process **outside** Emacs (for example, one started in a plain terminal). It is neither alive nor dead: a process is handling it, but not one Emacs manages. The view lists it in its own *external* group and flags it so it is never resumed or deleted out from under the other process.
 
-- **Worktree session** — a session spawned with `--worktree`, running in a git worktree under the project's `.claude/worktrees/`. It is listed under its parent project's view, with the worktree directory's name shown in the *Worktree* column.
+- **Worktree session** — a session spawned with `--worktree`, running in a git worktree under the project's `.claude/worktrees/`. It is listed under its parent project's view, with the worktree's encoded directory token shown in the *Worktree* column.
 
 - **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named `*claude-sessions: <project>*`, that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code`.
 

@@ -29,16 +29,15 @@ Liveness is a plain per-PID `process-attributes` existence check; the `procStart
 
 ## Transcripts — `projects/<encoded-cwd>/<sessionId>.jsonl`
 
-Append-only JSONL, one JSON object per line. This package reads **four** fields, all cached by file modification time in `claude-code--transcript-cache`. Each is extracted by scanning **backward** from the end of the file (the values of interest sit near the tail):
+Append-only JSONL, one JSON object per line. This package reads **three** fields, all cached by file modification time in `claude-code--transcript-cache`. Each is extracted by scanning **backward** from the end of the file (the values of interest sit near the tail):
 
 - **Title** — a session's display title, resolved from two possible lines:
   - a user-set `{"type":"custom-title","customTitle":…}` line (this is what the `/rename` command writes), which **takes precedence** when present, otherwise
   - the last `{"type":"ai-title","aiTitle":…}` line — Claude rewrites its generated title as the conversation evolves, so the *last* one wins.
 - **Last prompt** — the `{"type":"last-prompt","lastPrompt":…}` line (a preview of the opening prompt).
-- **Worktree path** — for a worktree session, the lossless `worktreePath` from the `{"type":"worktree-state",…}` line. It is the session's real cwd (and hence the name shown in the *Worktree* column) even when the session is dead and has no live `sessions/*.json` to read a cwd from — see [Worktrees](#worktrees) below. Only a worktree transcript can carry that line, and worktree membership is already known from the directory name, so this is the one scan skipped for an ordinary transcript rather than run as a guaranteed whole-file miss.
 - **Last-active time** — the `timestamp` (ISO-8601 UTC, e.g. `2026-06-10T13:23:27.697Z`, parsed with `date-to-time`) of the **newest line that carries one**. It drives the view's *Active* column and default most-recent-first sort, and is surfaced on every session (alive, external, or dead — a dead session's transcript still exists on disk). The file's mtime is **not** used for this: only genuine conversation lines (`user`, `assistant`, `attachment`, `system`, `queue-operation`, `pr-link`, `file-history-delta`) carry a top-level `timestamp`; the CLI also appends *untimestamped* metadata lines (`last-prompt`, `mode`, `permission-mode`, `agent-name`, `ai-title`, `worktree-state`, …) to dead transcripts long after the conversation ends — via the resume/session picker, mode toggles, and the background-agents daemon — which bumps the mtime by minutes to days without representing real activity. Scanning for the last real `timestamp` ignores those writes. Two traps the backward scan must avoid: `file-history-snapshot` metadata lines have no top-level `timestamp` but *embed* one in a nested value, so the scan validates the parsed top-level key rather than trusting a `"timestamp":` substring; and the rare transcript with **no** timestamped line at all (tiny orphaned agent stubs) falls back to the file mtime.
 
-Worktree *membership* (whether a transcript belongs to a worktree at all) is derived from the encoded **directory name**, not the transcript body; but the worktree's real path is read from the transcript, never by decoding the lossy directory name.
+A worktree session is recognised — and named — entirely from its transcript's **directory name**, never from the transcript body. See [Worktrees](#worktrees).
 
 Reading the whole file in Emacs and scanning backward measured ≈15 ms on the largest real transcript (6 MB); the median (~130 KB) is sub-millisecond. A shell `tac | grep` pipeline was no faster and adds per-file subprocess overhead, so the in-process read + mtime cache is used.
 
@@ -51,13 +50,13 @@ A project's transcript directory name is its absolute working directory with **e
 /home/me/.dotfiles             ->  -home-me--dotfiles      (the "/." becomes "--")
 ```
 
-The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code never decodes a directory name — it reads the real `cwd` from session/transcript data. `claude-code--encode-cwd` and `claude-code--project-dir` implement this.
+The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code never decodes a directory name — a live session's real `cwd` is read from `sessions/*.json`. `claude-code--encode-cwd` and `claude-code--project-dir` implement this.
 
 ## Worktrees
 
-`claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript therefore lands in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, tagging the latter as worktree sessions so they appear under the parent project.
+`claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript therefore lands in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, so worktree sessions appear under the parent project.
 
-The worktree's real directory is **not** reconstructed from that encoded suffix — the encoding is lossy (a worktree named `my.feat` encodes to the suffix `my-feat`). Instead the real cwd is read from the transcript's `worktree-state` line (`worktreePath`), which survives even for a dead worktree that has no live `sessions/*.json`.
+The token after that prefix is what the *Worktree* column shows. It is fixed when Claude creates the directory, rendered as it stands, and never turned back into a path: the encoding is lossy, so a dot or `/` in the worktree name reads as a hyphen (`my.feat` displays as `my-feat`), and two names differing only in flattened characters share one transcript directory and one label. Nothing joins on the label, so the cost is display precision only.
 
 ## MCP configuration
 

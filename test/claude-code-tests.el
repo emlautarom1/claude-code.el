@@ -141,7 +141,7 @@ Every buffer a launch hosted is killed afterwards, however BODY exits."
         ;; With no custom title, the LAST ai-title wins over earlier ones.
         (should (equal (plist-get s1 :title) "Understand the project layout"))
         (should (equal (plist-get s1 :last-prompt) "first prompt"))
-        (should (null (plist-get s1 :worktree-p)))
+        (should (null (plist-get s1 :worktree)))
         ;; Last-active is the newest timestamped (assistant) line, even though an
         ;; untimestamped ai-title line follows it -- not the file mtime.
         (should (time-equal-p (plist-get s1 :last-active)
@@ -151,17 +151,13 @@ Every buffer a launch hosted is killed afterwards, however BODY exits."
         (should (equal (plist-get s2 :title) "My renamed session"))
         (should (equal (plist-get s2 :last-prompt) "another task here")))
       (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
-        (should (plist-get s3 :worktree-p))
-        (should (equal (plist-get s3 :worktree-path)
-                       "/home/test/proj/.claude/worktrees/feat"))
+        (should (equal (plist-get s3 :worktree) "feat"))
         ;; A user custom title takes precedence over Claude's ai-title.
         (should (equal (plist-get s3 :title) "Renamed worktree")))
       (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
-        (should (plist-get s5 :worktree-p))
-        ;; The worktree name has a dot; the encoded suffix would lossily read
-        ;; "my-feat", but the transcript's worktreePath keeps "my.feat".
-        (should (equal (plist-get s5 :worktree-path)
-                       "/home/test/proj/.claude/worktrees/my.feat"))))))
+        ;; A worktree named "my.feat" leaves only the lossy directory token:
+        ;; the dot flattens to a hyphen and is never decoded back.
+        (should (equal (plist-get s5 :worktree) "my-feat"))))))
 
 (defmacro claude-code-tests--with-transcript (var lines mtime &rest body)
   "Bind VAR to a temp .jsonl holding LINES with file mtime MTIME, run BODY.
@@ -238,16 +234,35 @@ cleared first and the temp file deleted afterwards."
           (should (equal (claude-code-session-title s1)
                          "Understand the project layout")))
         ;; The worktree transcript shows up under the parent project.
-        (should (claude-code-session-worktree-p
-                 (claude-code-tests--find-session
-                  ss "33333333-3333-4333-8333-333333333333")))
-        ;; A genuinely dead worktree (no sessions/*.json) labels with its own
-        ;; worktree directory, not the parent project.
+        (should (equal (claude-code-session-worktree
+                        (claude-code-tests--find-session
+                         ss "33333333-3333-4333-8333-333333333333"))
+                       "feat"))
+        ;; A genuinely dead worktree (no sessions/*.json) still labels with its
+        ;; own worktree, not the parent project.
         (let ((solo (claude-code-tests--find-session
                      ss "55555555-5555-4555-8555-555555555555")))
-          (should (equal (claude-code-session-cwd solo)
-                         "/home/test/proj/.claude/worktrees/my.feat"))
-          (should (equal (claude-code--worktree-label solo) "my.feat")))))))
+          (should (equal (claude-code-session-worktree solo) "my-feat")))))))
+
+(ert-deftest claude-code-test-sessions-worktree-before-transcript ()
+  "A named spawn labels its worktree before Claude creates the directory.
+The registry stands in with the token the name will produce; an auto-named
+request carries no name, so it stays blank."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer buf
+      (let ((named "66666666-6666-4666-8666-666666666666")
+            (auto "77777777-7777-4777-8777-777777777777"))
+        (with-current-buffer buf (setq-local ghostel--pid 4242))
+        (claude-code--register named buf "/home/test/proj" "my.feat")
+        (claude-code--register auto buf "/home/test/proj" t)
+        (cl-letf (((symbol-function 'claude-code--live-managed)
+                   (lambda (_r) (list (cons named buf) (cons auto buf)))))
+          (let ((ss (claude-code-sessions "/home/test/proj")))
+            (should (equal (claude-code-session-worktree
+                            (claude-code-tests--find-session ss named))
+                           "my-feat"))
+            (should-not (claude-code-session-worktree
+                         (claude-code-tests--find-session ss auto)))))))))
 
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
@@ -654,7 +669,7 @@ a second process to a session another one is already driving.  Fixture session
 Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
   (let* ((s (claude-code-session--create
              :id "abcdef01-0000-4000-8000-000000000000"
-             :alive-p nil :title "The Title" :cwd "/home/x/proj"))
+             :alive-p nil :title "The Title"))
          (v (claude-code--format-session s nil)))
     (should (equal (substring-no-properties (aref v 0)) "dead"))
     ;; No last-active -> empty Active cell.
@@ -668,7 +683,7 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
   (let* ((s (claude-code-session--create
              :id "11112222-0000-4000-8000-000000000000"
              :alive-p t :status "busy" :title "Worker task"
-             :worktree-p t :cwd "/home/x/proj/.claude/worktrees/feat"))
+             :worktree "feat"))
          (v (claude-code--format-session s '(12.5 . 204800))))
     (should (equal (substring-no-properties (aref v 0)) "busy"))
     (should (eq (get-text-property 0 'face (aref v 0)) 'warning))

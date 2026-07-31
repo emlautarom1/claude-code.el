@@ -83,6 +83,11 @@ session data instead."
   (replace-regexp-in-string
    "[/.]" "-" (directory-file-name (expand-file-name path))))
 
+(defun claude-code--worktree-token (name)
+  "Return the transcript-directory token a worktree named NAME produces.
+The same lossy flattening `claude-code--encode-cwd' applies to paths."
+  (replace-regexp-in-string "[/.]" "-" name))
+
 (defun claude-code--projects-dir ()
   "Return the directory holding every project's transcript directory."
   (expand-file-name "projects" claude-code-config-dir))
@@ -137,15 +142,10 @@ as a top-level key.  Point is moved.  Returns nil when no such line exists."
         (goto-char (line-beginning-position))))
     result))
 
-(defun claude-code--read-transcript-fields (file worktree-p)
-  "Read the title, last-prompt, worktree-path and last-active fields from FILE.
+(defun claude-code--read-transcript-fields (file)
+  "Read the title, last-prompt and last-active fields from FILE.
 A user-set custom title (what `/rename' writes) wins over Claude's generated
 title; only when there is no custom title does the last `ai-title' apply.
-WORKTREE-P asks for the lossless `worktreePath' of the `worktree-state' line --
-the real cwd of a worktree session even when it is dead and has no live sessions
-file to read.  Only a worktree transcript carries that line, so for any other
-transcript the scan is skipped rather than reading the whole file for a
-guaranteed miss.
 LAST-ACTIVE is the time of the newest line carrying a real `timestamp' -- the
 last genuine activity -- or nil when the transcript has no timestamped line."
   (with-temp-buffer
@@ -158,32 +158,24 @@ last genuine activity -- or nil when the transcript has no timestamped line."
           :last-prompt
           (claude-code--json-line-field
            "\"type\"[[:space:]]*:[[:space:]]*\"last-prompt\"" "lastPrompt")
-          :worktree-path
-          (when worktree-p
-            (let ((ws (claude-code--json-line-field
-                       "\"type\"[[:space:]]*:[[:space:]]*\"worktree-state\""
-                       "worktreeSession")))
-              (and (hash-table-p ws) (gethash "worktreePath" ws))))
           :last-active
           (let ((ts (claude-code--json-line-field
                      "\"timestamp\"[[:space:]]*:" "timestamp")))
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
-(defun claude-code--transcript-fields (file &optional worktree-p)
+(defun claude-code--transcript-fields (file)
   "Return a plist of transcript FILE's cached fields.
-The keys are :id (FILE's base name, the session id), :title, :last-prompt,
-:worktree-path (read only when WORKTREE-P is non-nil, since only a worktree
-transcript carries one), and :last-active (the newest genuine activity, from the
-last timestamped line, falling back to FILE's modification time only when the
-transcript has no timestamped line at all).  Cached by FILE's modification
-time."
+The keys are :id (FILE's base name, the session id), :title, :last-prompt and
+:last-active (the newest genuine activity, from the last timestamped line,
+falling back to FILE's modification time only when the transcript has no
+timestamped line at all).  Cached by FILE's modification time."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
         (cdr cached)
       (let ((fields (cons :id (cons (file-name-base file)
                                     (claude-code--read-transcript-fields
-                                     file worktree-p)))))
+                                     file)))))
         (plist-put fields :last-active (or (plist-get fields :last-active) mtime))
         (puthash file (cons mtime fields) claude-code--transcript-cache)
         fields))))
@@ -195,25 +187,26 @@ time."
 
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
-Each descriptor is a plist with keys :id, :title, :last-prompt,
-:worktree-path, :last-active, :transcript (absolute file) and :worktree-p.
-Worktrees are the transcript directories Claude creates under CWD's
-.claude/worktrees; they are matched by their encoded-directory prefix.  A
-worktree's real cwd comes from the lossless :worktree-path in its transcript,
-never by decoding the encoded (lossy) directory name."
+Each descriptor is a plist with keys :id, :title, :last-prompt, :last-active,
+:transcript (absolute file) and :worktree -- the worktree's encoded directory
+token, nil for a main-tree transcript.  Both worktree membership and the token
+come from the \"--claude-worktrees-\" directory prefix; the encoding is lossy,
+so the token is a display label, never decoded back into a name or path (see
+docs/storage-model.md)."
   (let* ((projects (claude-code--projects-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
          (result '()))
     (when (file-directory-p projects)
       (dolist (name (directory-files projects nil nil t))
-        (let ((worktree-p (string-prefix-p wt-prefix name)))
-          (when (or (equal name base) worktree-p)
+        (let ((worktree (and (string-prefix-p wt-prefix name)
+                             (substring name (length wt-prefix)))))
+          (when (or (equal name base) worktree)
             (let ((dir (expand-file-name name projects)))
               (when (file-directory-p dir)
                 (dolist (file (directory-files dir t "\\.jsonl\\'"))
-                  (push (append (claude-code--transcript-fields file worktree-p)
-                                (list :transcript file :worktree-p worktree-p))
+                  (push (append (claude-code--transcript-fields file)
+                                (list :transcript file :worktree worktree))
                         result))))))))
     (nreverse result)))
 
@@ -229,24 +222,25 @@ never by decoding the encoded (lossy) directory name."
 (cl-defstruct (claude-code-session (:constructor claude-code-session--create)
                                    (:copier nil))
   "A Claude Code session, alive or dead.
-ID is the session UUID and CWD its absolute working directory.  ALIVE-P is
-non-nil when Emacs manages a live instance, in which case BUFFER holds the
-Ghostel buffer and PID its child process.  STATUS is Claude's native
-`busy'/`idle'/`waiting' string (alive sessions only), with WAITING-FOR set
-while waiting.  EXTERNAL-P flags a session whose process is running outside
-Emacs, so it must not be resumed or deleted.  TITLE and LAST-PROMPT come from
-the transcript and, via `claude-code--session-display-name', are the session's
-only display-name sources; WORKTREE-P marks worktree sessions; TRANSCRIPT is
-the absolute `.jsonl' path.  LAST-ACTIVE is the session's last genuine activity,
-taken from the newest timestamped transcript line."
-  id cwd status waiting-for alive-p pid buffer worktree-p
+ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live instance,
+in which case BUFFER holds the Ghostel buffer and PID its child process.  STATUS
+is Claude's native `busy'/`idle'/`waiting' string (alive sessions only), with
+WAITING-FOR set while waiting.  EXTERNAL-P flags a session whose process is
+running outside Emacs, so it must not be resumed or deleted.  TITLE and
+LAST-PROMPT come from the transcript and, via
+`claude-code--session-display-name', are the session's only display-name
+sources; WORKTREE is the encoded token of the session's worktree, nil for a
+main-tree one; TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
+session's last genuine activity, taken from the newest timestamped transcript
+line."
+  id status waiting-for alive-p pid buffer worktree
   title last-prompt transcript external-p last-active)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
 Keys: :buffer (the Ghostel buffer), :origin (project root the instance
 was launched from, normalised with `claude-code--normalize-root') and
-:worktree.")
+:worktree (the worktree's transcript-directory token, nil for none).")
 
 (defun claude-code--normalize-root (path)
   "Return PATH as an absolute, symlink-resolved directory name.
@@ -314,13 +308,10 @@ is running it and it is dead."
                :id id :alive-p t :buffer buf
                :pid (and (buffer-live-p buf)
                          (buffer-local-value 'ghostel--pid buf))
-               :cwd (or (plist-get info :cwd)
-                        (plist-get tr :worktree-path)
-                        (plist-get reg :origin))
                :status (plist-get info :status)
                :waiting-for (plist-get info :waiting-for)
-               :worktree-p (or (plist-get tr :worktree-p)
-                               (and (plist-get reg :worktree) t))
+               :worktree (or (plist-get tr :worktree)
+                             (plist-get reg :worktree))
                :title (plist-get tr :title)
                :last-prompt (plist-get tr :last-prompt)
                :transcript (plist-get tr :transcript)
@@ -335,10 +326,7 @@ is running it and it is dead."
                    :external-p (and info
                                     (claude-code--pid-live-p
                                      (plist-get info :pid)))
-                   :cwd (or (plist-get info :cwd)
-                            (plist-get tr :worktree-path)
-                            root)
-                   :worktree-p (plist-get tr :worktree-p)
+                   :worktree (plist-get tr :worktree)
                    :title (plist-get tr :title)
                    :last-prompt (plist-get tr :last-prompt)
                    :transcript (plist-get tr :transcript)
@@ -488,9 +476,13 @@ Registered on `ghostel-exit-functions', which calls its functions with
     (run-hooks 'claude-code-last-instance-exit-hook)))
 
 (defun claude-code--register (id buffer origin worktree)
-  "Record instance ID hosted in BUFFER, launched from ORIGIN, with WORKTREE."
+  "Record instance ID hosted in BUFFER, launched from ORIGIN, with WORKTREE.
+Stored under :worktree is the transcript-directory token of a named worktree
+request, nil otherwise."
   (add-hook 'ghostel-exit-functions #'claude-code--on-exit)
-  (puthash id (list :buffer buffer :origin origin :worktree worktree)
+  (puthash id (list :buffer buffer :origin origin
+                    :worktree (and (stringp worktree)
+                                   (claude-code--worktree-token worktree)))
            claude-code--managed))
 
 (defun claude-code--buffer (session)
@@ -654,13 +646,6 @@ folded.")
     ('external (cons "external" 'font-lock-comment-face))
     ('dead (cons "dead" 'shadow))))
 
-(defun claude-code--worktree-label (session)
-  "Return the worktree label for SESSION, empty for main-tree sessions."
-  (if (claude-code-session-worktree-p session)
-      (let ((cwd (claude-code-session-cwd session)))
-        (if cwd (file-name-nondirectory (directory-file-name cwd)) ""))
-    ""))
-
 (defun claude-code--session-display-name (session)
   "Return SESSION's display name.
 This is the single authority for a session's name, so it cannot drift: the
@@ -696,7 +681,7 @@ USAGE is (CPU . RSS) or nil."
                         'face 'shadow)
             (propertize (string-limit (claude-code-session-id session) 8)
                         'face 'shadow)
-            (claude-code--worktree-label session)
+            (or (claude-code-session-worktree session) "")
             (if usage (format "%.1f" (car usage)) "")
             (if usage (format "%dM" (/ (cdr usage) 1024)) "")
             (claude-code--session-display-name session))))
