@@ -15,6 +15,11 @@
    "fixtures" (file-name-directory (or load-file-name buffer-file-name)))
   "Directory holding real, redacted fixture data.")
 
+(defconst claude-code-tests--uuid-re
+  (concat "\\`[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-4[0-9a-f]\\{3\\}"
+          "-[89ab][0-9a-f]\\{3\\}-[0-9a-f]\\{12\\}\\'")
+  "Regexp matching a version-4 UUID as `claude-code--new-uuid' formats one.")
+
 (defmacro claude-code-tests--with-fixtures (&rest body)
   "Run BODY with `claude-code-config-dir' pointed at the fixtures.
 Clears the transcript cache first so tests do not leak into each other."
@@ -399,10 +404,8 @@ cleared first and the temp file deleted afterwards."
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."
-  (let ((re (concat "\\`[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-4[0-9a-f]\\{3\\}"
-                    "-[89ab][0-9a-f]\\{3\\}-[0-9a-f]\\{12\\}\\'")))
-    (should (string-match-p re (claude-code--new-uuid)))
-    (should-not (equal (claude-code--new-uuid) (claude-code--new-uuid)))))
+  (should (string-match-p claude-code-tests--uuid-re (claude-code--new-uuid)))
+  (should-not (equal (claude-code--new-uuid) (claude-code--new-uuid))))
 
 (ert-deftest claude-code-test-default-buffer-name ()
   "The pre-title seed name is derived from the project directory name."
@@ -455,39 +458,40 @@ cleared first and the temp file deleted afterwards."
   "Spawn and resume host their instance through one launch path.
 Both reach `ghostel-exec' with the MCP arguments threaded in, register the
 instance, and install title tracking; only the CLI argument list differs."
-  (let ((claude-code--managed (make-hash-table :test 'equal))
-        (execs '())
-        (buffers '()))
-    (unwind-protect
-        (claude-code-tests--recording-launch execs
-          (push (claude-code-spawn "/r" :worktree "feat" :model "opus") buffers)
-          (push (claude-code-resume "/r" "given-id") buffers)
-          (let* ((calls (reverse execs))
-                 (spawn-args (nth 1 (nth 0 calls)))
-                 (resume-args (nth 1 (nth 1 calls))))
-            (should (= (length calls) 2))
-            ;; Resume ignores new-session options; spawn keeps them.
-            (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
-            (should (equal spawn-args
-                           (append (list "--session-id"
-                                         (nth 1 (member "--session-id" spawn-args)))
-                                   '("-w" "feat" "--model" "opus"
-                                     "--mcp-config" "{}"))))
-            ;; Both registered; only spawn recorded a worktree.  The spawned id
-            ;; is generated, so it is the entry that is not the resumed one.
-            (should (= (hash-table-count claude-code--managed) 2))
-            (should (null (plist-get (gethash "given-id" claude-code--managed)
-                                     :worktree)))
-            (let ((spawned-id (nth 1 (member "--session-id" spawn-args))))
+  (claude-code-tests--with-fixtures
+    (let ((claude-code--managed (make-hash-table :test 'equal))
+          (execs '())
+          (buffers '()))
+      (unwind-protect
+          (claude-code-tests--recording-launch execs
+            (push (claude-code-spawn "/r" :worktree "feat" :model "opus") buffers)
+            (push (claude-code-resume "/r" "given-id") buffers)
+            (let* ((calls (reverse execs))
+                   (spawn-args (nth 1 (nth 0 calls)))
+                   (resume-args (nth 1 (nth 1 calls)))
+                   (spawned-id (nth 1 spawn-args)))
+              (should (= (length calls) 2))
+              ;; Resume ignores new-session options; spawn keeps them behind the
+              ;; generated session id.
+              (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
+              (should (equal (nth 0 spawn-args) "--session-id"))
+              (should (string-match-p claude-code-tests--uuid-re spawned-id))
+              (should (equal (nthcdr 2 spawn-args)
+                             '("-w" "feat" "--model" "opus"
+                               "--mcp-config" "{}")))
+              ;; Both registered; only spawn recorded a worktree.
+              (should (= (hash-table-count claude-code--managed) 2))
+              (should (null (plist-get (gethash "given-id" claude-code--managed)
+                                       :worktree)))
               (should (equal (plist-get (gethash spawned-id claude-code--managed)
                                         :worktree)
-                             "feat")))
-            ;; Title tracking survives on both buffers.
-            (dolist (call calls)
-              (should (eq (buffer-local-value 'ghostel-buffer-name-function
-                                              (nth 0 call))
-                          #'claude-code--ghostel-buffer-name)))))
-      (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))
+                             "feat"))
+              ;; Title tracking survives on both buffers.
+              (dolist (buffer buffers)
+                (should (eq (buffer-local-value 'ghostel-buffer-name-function
+                                                buffer)
+                            #'claude-code--ghostel-buffer-name)))))
+        (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b)))))))
 
 (ert-deftest claude-code-test-resume-focuses-existing ()
   "Resuming an already-managed live session focuses it and spawns nothing."
