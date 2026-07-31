@@ -229,10 +229,17 @@ cleared first and the temp file deleted afterwards."
         (should-not (seq-some #'claude-code-session-alive-p ss))
         (let ((s1 (claude-code-tests--find-session
                    ss "11111111-1111-4111-8111-111111111111")))
-          ;; Dead sessions carry no live status, but keep their title.
+          ;; Dead sessions carry no live status, but keep every
+          ;; transcript-derived field.
           (should (null (claude-code-session-status s1)))
           (should (equal (claude-code-session-title s1)
-                         "Understand the project layout")))
+                         "Understand the project layout"))
+          (should (equal (claude-code-session-last-prompt s1) "first prompt"))
+          (should (time-equal-p (claude-code-session-last-active s1)
+                                (date-to-time "2026-06-10T13:23:27.697Z")))
+          (should (equal (file-name-base (claude-code-session-transcript s1))
+                         "11111111-1111-4111-8111-111111111111"))
+          (should (file-exists-p (claude-code-session-transcript s1))))
         ;; The worktree transcript shows up under the parent project.
         (should (equal (claude-code-session-worktree
                         (claude-code-tests--find-session

@@ -283,6 +283,17 @@ running it at all.  This is the single classifier the view builds on."
         ((claude-code-session-external-p session) 'external)
         (t 'dead)))
 
+(defun claude-code--transcript-session-args (tr &optional reg)
+  "Return `claude-code-session--create' arguments derived from descriptor TR.
+TR is a `claude-code--project-transcripts' descriptor, nil for an instance with
+no transcript yet.  REG, when given, is the managed-registry plist whose
+:worktree token stands in while TR carries none."
+  (list :worktree (or (plist-get tr :worktree) (plist-get reg :worktree))
+        :title (plist-get tr :title)
+        :last-prompt (plist-get tr :last-prompt)
+        :transcript (plist-get tr :transcript)
+        :last-active (plist-get tr :last-active)))
+
 (defun claude-code-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
 A session is alive when Emacs manages a live instance for it.  Every other
@@ -304,33 +315,24 @@ is running it and it is dead."
             (tr (funcall transcript-of id))
             (reg (gethash id claude-code--managed)))
         (puthash id t seen)
-        (push (claude-code-session--create
-               :id id :alive-p t :buffer buf
-               :pid (and (buffer-live-p buf)
-                         (buffer-local-value 'ghostel--pid buf))
-               :status (plist-get info :status)
-               :waiting-for (plist-get info :waiting-for)
-               :worktree (or (plist-get tr :worktree)
-                             (plist-get reg :worktree))
-               :title (plist-get tr :title)
-               :last-prompt (plist-get tr :last-prompt)
-               :transcript (plist-get tr :transcript)
-               :last-active (plist-get tr :last-active))
+        (push (apply #'claude-code-session--create
+                     :id id :alive-p t :buffer buf
+                     :pid (and (buffer-live-p buf)
+                               (buffer-local-value 'ghostel--pid buf))
+                     :status (plist-get info :status)
+                     :waiting-for (plist-get info :waiting-for)
+                     (claude-code--transcript-session-args tr reg))
               sessions)))
     (dolist (tr transcripts)
       (let ((id (plist-get tr :id)))
         (unless (gethash id seen)
           (let ((info (gethash id live)))
-            (push (claude-code-session--create
-                   :id id :alive-p nil
-                   :external-p (and info
-                                    (claude-code--pid-live-p
-                                     (plist-get info :pid)))
-                   :worktree (plist-get tr :worktree)
-                   :title (plist-get tr :title)
-                   :last-prompt (plist-get tr :last-prompt)
-                   :transcript (plist-get tr :transcript)
-                   :last-active (plist-get tr :last-active))
+            (push (apply #'claude-code-session--create
+                         :id id :alive-p nil
+                         :external-p (and info
+                                          (claude-code--pid-live-p
+                                           (plist-get info :pid)))
+                         (claude-code--transcript-session-args tr))
                   sessions)))))
     (nreverse sessions)))
 
