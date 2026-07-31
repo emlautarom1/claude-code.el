@@ -14,8 +14,9 @@
 (require 'cl-lib)
 (require 'claude-code)
 (require 'claude-code-mcp)
-;; For the integration macros/helpers (`claude-code-tests--with-top-level-env',
-;; `claude-code-tests--await'); a no-op once the sibling suite has loaded.
+;; For the scaffolding the sibling suite owns: `claude-code-tests--with-registry',
+;; which every isolated test here expands into, and the integration helpers
+;; `claude-code-tests--with-top-level-env' and `claude-code-tests--await'.
 (require 'claude-code-tests)
 
 (defmacro claude-code-mcp-tests--isolated (&rest body)
@@ -24,9 +25,8 @@ Points `claude-code-config-dir' at a nonexistent path (so the live status
 table is empty) and rebinds `claude-code--managed' to a fresh table, so
 `claude-code--session-cwd' resolves to nil for any test session id."
   (declare (indent 0))
-  `(let ((claude-code-config-dir "/claude-code-mcp-tests-nonexistent")
-         (claude-code--managed (make-hash-table :test 'equal)))
-     ,@body))
+  `(let ((claude-code-config-dir "/claude-code-mcp-tests-nonexistent"))
+     (claude-code-tests--with-registry ,@body)))
 
 (defmacro claude-code-mcp-tests--with-server (port &rest body)
   "Start an isolated MCP server, bind PORT to its port, and run BODY.
@@ -621,9 +621,7 @@ ignored so a partially-created worktree is still cleaned up."
           (setq buffer (claude-code-spawn
                         root :worktree t
                         :prompt "Respond with the single word: pong"))
-          (maphash (lambda (k v)
-                     (when (eq (plist-get v :buffer) buffer) (setq id k)))
-                   claude-code--managed)
+          (setq id (claude-code-tests--managed-id buffer))
           (should id)
           (setq pid (buffer-local-value 'ghostel--pid buffer))
           ;; The real CLI performs the MCP initialize handshake against us.

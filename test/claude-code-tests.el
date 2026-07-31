@@ -28,14 +28,21 @@ Clears the transcript cache first so tests do not leak into each other."
      (clrhash claude-code--transcript-cache)
      ,@body))
 
+(defmacro claude-code-tests--with-registry (&rest body)
+  "Run BODY with `claude-code--managed' rebound to an empty registry.
+Instances a test registers are therefore invisible to every other test."
+  (declare (indent 0))
+  `(let ((claude-code--managed (make-hash-table :test 'equal)))
+     ,@body))
+
 (defmacro claude-code-tests--with-managed-buffer (var &rest body)
   "Run BODY with VAR bound to a fresh buffer and an empty managed registry.
 The buffer is killed afterwards even when BODY already killed it."
   (declare (indent 1))
-  `(let ((claude-code--managed (make-hash-table :test 'equal))
-         (,var (generate-new-buffer " *cc-test*")))
-     (unwind-protect (progn ,@body)
-       (when (buffer-live-p ,var) (kill-buffer ,var)))))
+  `(claude-code-tests--with-registry
+     (let ((,var (generate-new-buffer " *cc-test*")))
+       (unwind-protect (progn ,@body)
+         (when (buffer-live-p ,var) (kill-buffer ,var))))))
 
 (defmacro claude-code-tests--with-live-pids (pids &rest body)
   "Run BODY with exactly the pids in PIDS reading as live processes.
@@ -50,39 +57,47 @@ so no pid is its own ancestor and a subtree walk always terminates."
                   (lambda (p) (and (memql p ,live) '((ppid . 0))))))
          ,@body))))
 
+(defmacro claude-code-tests--without-requiring (features &rest body)
+  "Run BODY with a `require' of any feature in FEATURES a no-op.
+Every other feature still loads normally.  Shadowing `features' itself would
+not do: it is not a special variable, so under lexical binding the binding is
+invisible to `require'."
+  (declare (indent 1))
+  (let ((orig (gensym "orig")))
+    `(let ((,orig (symbol-function 'require)))
+       (cl-letf (((symbol-function 'require)
+                  (lambda (feat &rest args)
+                    (unless (memq feat ,features) (apply ,orig feat args)))))
+         ,@body))))
+
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
   "Run BODY with Ghostel send/paste/key stubbed to push onto CALLS.
-Each call pushes (paste STR), (send STR) or (key NAME).  A `require' of
-`ghostel' becomes a no-op (the native module is absent under test), while other
-features still load normally."
+Each call pushes (paste STR), (send STR) or (key NAME).  Ghostel's native
+module is absent under test, so requiring it is a no-op."
   (declare (indent 1))
-  `(cl-letf* ((orig (symbol-function 'require))
-              ((symbol-function 'require)
-               (lambda (feat &rest args)
-                 (unless (eq feat 'ghostel) (apply orig feat args))))
-              ((symbol-function 'ghostel-paste-string)
-               (lambda (s) (push (list 'paste s) ,calls)))
-              ((symbol-function 'ghostel-send-string)
-               (lambda (s) (push (list 'send s) ,calls)))
-              ((symbol-function 'ghostel-send-key)
-               (lambda (k &rest _) (push (list 'key k) ,calls))))
-     ,@body))
+  `(claude-code-tests--without-requiring '(ghostel)
+     (cl-letf (((symbol-function 'ghostel-paste-string)
+                (lambda (s) (push (list 'paste s) ,calls)))
+               ((symbol-function 'ghostel-send-string)
+                (lambda (s) (push (list 'send s) ,calls)))
+               ((symbol-function 'ghostel-send-key)
+                (lambda (k &rest _) (push (list 'key k) ,calls))))
+       ,@body)))
 
 (defmacro claude-code-tests--recording-launch (execs &rest body)
   "Run BODY with the launch path stubbed, pushing (BUFFER ARGS) onto EXECS.
-Neither Ghostel's native module nor the MCP server is wanted under test, so a
-`require' of either is a no-op and the MCP CLI arguments are a fixed stand-in."
+Neither Ghostel's native module nor the MCP server is wanted under test, so
+requiring either is a no-op and the MCP CLI arguments are a fixed stand-in.
+Every buffer a launch hosted is killed afterwards, however BODY exits."
   (declare (indent 1))
-  `(cl-letf* ((orig (symbol-function 'require))
-              ((symbol-function 'require)
-               (lambda (feat &rest args)
-                 (unless (memq feat '(ghostel claude-code-mcp))
-                   (apply orig feat args))))
-              ((symbol-function 'claude-code--mcp-cli-args)
-               (lambda (_id) '("--mcp-config" "{}")))
-              ((symbol-function 'ghostel-exec)
-               (lambda (buffer _program args) (push (list buffer args) ,execs))))
-     ,@body))
+  `(claude-code-tests--without-requiring '(ghostel claude-code-mcp)
+     (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
+                (lambda (_id) '("--mcp-config" "{}")))
+               ((symbol-function 'ghostel-exec)
+                (lambda (buffer _program args) (push (list buffer args) ,execs))))
+       (unwind-protect (progn ,@body)
+         (dolist (call ,execs)
+           (when (buffer-live-p (nth 0 call)) (kill-buffer (nth 0 call))))))))
 
 ;;;; Storage adapter
 
@@ -339,7 +354,7 @@ cleared first and the temp file deleted afterwards."
 (ert-deftest claude-code-test-session-cwd ()
   "Session cwd prefers the live file, then the registry, else nil."
   (claude-code-tests--with-fixtures
-    (let ((claude-code--managed (make-hash-table :test 'equal)))
+    (claude-code-tests--with-registry
       ;; The live sessions file wins.  Session 33333333 is a worktree, so its
       ;; live cwd is the worktree directory, not the parent project root.
       (should (equal (claude-code--session-cwd
@@ -459,39 +474,37 @@ cleared first and the temp file deleted afterwards."
 Both reach `ghostel-exec' with the MCP arguments threaded in, register the
 instance, and install title tracking; only the CLI argument list differs."
   (claude-code-tests--with-fixtures
-    (let ((claude-code--managed (make-hash-table :test 'equal))
-          (execs '())
-          (buffers '()))
-      (unwind-protect
-          (claude-code-tests--recording-launch execs
-            (push (claude-code-spawn "/r" :worktree "feat" :model "opus") buffers)
-            (push (claude-code-resume "/r" "given-id") buffers)
-            (let* ((calls (reverse execs))
-                   (spawn-args (nth 1 (nth 0 calls)))
-                   (resume-args (nth 1 (nth 1 calls)))
-                   (spawned-id (nth 1 spawn-args)))
-              (should (= (length calls) 2))
-              ;; Resume ignores new-session options; spawn keeps them behind the
-              ;; generated session id.
-              (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
-              (should (equal (nth 0 spawn-args) "--session-id"))
-              (should (string-match-p claude-code-tests--uuid-re spawned-id))
-              (should (equal (nthcdr 2 spawn-args)
-                             '("-w" "feat" "--model" "opus"
-                               "--mcp-config" "{}")))
-              ;; Both registered; only spawn recorded a worktree.
-              (should (= (hash-table-count claude-code--managed) 2))
-              (should (null (plist-get (gethash "given-id" claude-code--managed)
-                                       :worktree)))
-              (should (equal (plist-get (gethash spawned-id claude-code--managed)
-                                        :worktree)
-                             "feat"))
-              ;; Title tracking survives on both buffers.
-              (dolist (buffer buffers)
-                (should (eq (buffer-local-value 'ghostel-buffer-name-function
-                                                buffer)
-                            #'claude-code--ghostel-buffer-name)))))
-        (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b)))))))
+    (claude-code-tests--with-registry
+      (let ((execs '())
+            (buffers '()))
+        (claude-code-tests--recording-launch execs
+          (push (claude-code-spawn "/r" :worktree "feat" :model "opus") buffers)
+          (push (claude-code-resume "/r" "given-id") buffers)
+          (let* ((calls (reverse execs))
+                 (spawn-args (nth 1 (nth 0 calls)))
+                 (resume-args (nth 1 (nth 1 calls)))
+                 (spawned-id (nth 1 spawn-args)))
+            (should (= (length calls) 2))
+            ;; Resume ignores new-session options; spawn keeps them behind the
+            ;; generated session id.
+            (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
+            (should (equal (nth 0 spawn-args) "--session-id"))
+            (should (string-match-p claude-code-tests--uuid-re spawned-id))
+            (should (equal (nthcdr 2 spawn-args)
+                           '("-w" "feat" "--model" "opus"
+                             "--mcp-config" "{}")))
+            ;; Both registered; only spawn recorded a worktree.
+            (should (= (hash-table-count claude-code--managed) 2))
+            (should (null (plist-get (gethash "given-id" claude-code--managed)
+                                     :worktree)))
+            (should (equal (plist-get (gethash spawned-id claude-code--managed)
+                                      :worktree)
+                           "feat"))
+            ;; Title tracking survives on both buffers.
+            (dolist (buffer buffers)
+              (should (eq (buffer-local-value 'ghostel-buffer-name-function
+                                              buffer)
+                          #'claude-code--ghostel-buffer-name)))))))))
 
 (ert-deftest claude-code-test-resume-focuses-existing ()
   "Resuming an already-managed live session focuses it and spawns nothing."
@@ -516,7 +529,7 @@ The guard is in the model, not in the view, so a headless caller cannot attach
 a second process to a session another one is already driving.  Fixture session
 22222222 has sessions/1002.json, so pinning pid 1002 live makes it external."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-managed-buffer _buf
+    (claude-code-tests--with-registry
       (let ((execs '()))
         (claude-code-tests--recording-launch execs
           (claude-code-tests--with-live-pids '(1002)
@@ -529,9 +542,7 @@ a second process to a session another one is already driving.  Fixture session
           (claude-code-tests--with-live-pids '()
             (claude-code-resume "/home/test/proj"
                                 "22222222-2222-4222-8222-222222222222"))
-          (should (= (length execs) 1))
-          (dolist (call execs)
-            (when (buffer-live-p (nth 0 call)) (kill-buffer (nth 0 call)))))))))
+          (should (= (length execs) 1)))))))
 
 (ert-deftest claude-code-test-kill ()
   "Killing an alive session drops its registry entry and buffer."
@@ -842,6 +853,12 @@ tests themselves run inside a Claude Code session."
            process-environment)))
      ,@body))
 
+(defun claude-code-tests--managed-id (buffer)
+  "Return the id of the managed instance hosted in BUFFER, or nil for none."
+  (cl-loop for id being the hash-keys of claude-code--managed
+           using (hash-values plist)
+           when (eq (plist-get plist :buffer) buffer) return id))
+
 (defun claude-code-tests--await (pred timeout)
   "Pump events until PRED is non-nil or TIMEOUT seconds elapse; return PRED."
   (let ((deadline (+ (float-time) timeout)))
@@ -860,8 +877,7 @@ tests themselves run inside a Claude Code session."
         (claude-code-tests--with-top-level-env
           (setq buffer (claude-code-spawn
                         root :prompt "Respond with the single word: pong"))
-          (maphash (lambda (k v) (when (eq (plist-get v :buffer) buffer) (setq id k)))
-                   claude-code--managed)
+          (setq id (claude-code-tests--managed-id buffer))
           (should id)
           ;; The title tracker survives `ghostel-exec's `ghostel-mode' switch.
           (should (eq (buffer-local-value 'ghostel-buffer-name-function buffer)
