@@ -50,7 +50,7 @@ A project's transcript directory name is its absolute working directory with **e
 /home/me/.dotfiles             ->  -home-me--dotfiles      (the "/." becomes "--")
 ```
 
-The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code never decodes a directory name — a live session's real `cwd` is read from `sessions/*.json`. `claude-code--encode-cwd` and `claude-code--project-dir` implement this.
+The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code never decodes a directory name — a live session's real `cwd` is read from `sessions/*.json`. `claude-code--encode-cwd` implements the encoding, and `claude-code--project-transcripts` consumes it by matching encoded directory names rather than decoding the ones it finds.
 
 ## Worktrees
 

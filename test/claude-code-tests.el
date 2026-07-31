@@ -962,6 +962,10 @@ tests themselves run inside a Claude Code session."
       (sleep-for 0.1))
     (funcall pred)))
 
+(defun claude-code-tests--project-dir (cwd)
+  "Return the transcript directory under `claude-code-config-dir' for CWD."
+  (expand-file-name (claude-code--encode-cwd cwd) (claude-code--projects-dir)))
+
 (ert-deftest claude-code-test-integration-lifecycle ()
   "Spawn a real instance, see it register a session, then kill and delete it."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
@@ -1012,7 +1016,7 @@ tests themselves run inside a Claude Code session."
         (ignore-errors (signal-process pid 'SIGKILL)))
       (when id
         (let ((f (expand-file-name (concat id ".jsonl")
-                                   (claude-code--project-dir default-directory))))
+                                   (claude-code-tests--project-dir default-directory))))
           (when (file-exists-p f) (delete-file f)))))))
 
 (provide 'claude-code-tests)

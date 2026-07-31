@@ -92,10 +92,6 @@ The same lossy flattening `claude-code--encode-cwd' applies to paths."
   "Return the directory holding every project's transcript directory."
   (expand-file-name "projects" claude-code-config-dir))
 
-(defun claude-code--project-dir (cwd)
-  "Return the transcript directory under `claude-code-config-dir' for CWD."
-  (expand-file-name (claude-code--encode-cwd cwd) (claude-code--projects-dir)))
-
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
 The table is keyed by session id; each value is a plist with keys
