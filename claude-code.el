@@ -121,6 +121,12 @@ rather than an error."
                        table))))))
     table))
 
+(defun claude-code--live-info (id &optional table)
+  "Return the live sessions/ entry for session ID, or nil for none.
+TABLE, when given, is a pre-parsed `claude-code--live-status-table', letting
+a caller resolving many ids parse sessions/ once."
+  (gethash id (or table (claude-code--live-status-table))))
+
 (defvar claude-code--transcript-cache (make-hash-table :test 'equal)
   "Cache mapping a transcript file to (MTIME . FIELDS).
 Transcripts are append-only, so an unchanged modification time means
@@ -257,14 +263,19 @@ root a later query normalises the same way."
        (let ((proc (buffer-local-value 'ghostel--process buffer)))
          (and (process-live-p proc) proc))))
 
+(defun claude-code--managed-buffer (id)
+  "Return the live buffer of the Emacs-managed instance for session ID, or nil."
+  (let ((buffer (plist-get (gethash id claude-code--managed) :buffer)))
+    (and (claude-code--session-process buffer) buffer)))
+
 (defun claude-code--live-managed (project-root)
   "Return an alist of (ID . BUFFER) for live managed instances of PROJECT-ROOT."
   (let ((root (claude-code--normalize-root project-root)))
     (cl-loop for id being the hash-keys of claude-code--managed
              using (hash-values plist)
-             for buffer = (plist-get plist :buffer)
-             when (and (equal (plist-get plist :origin) root)
-                       (claude-code--session-process buffer))
+             for buffer = (and (equal (plist-get plist :origin) root)
+                               (claude-code--managed-buffer id))
+             when buffer
              collect (cons id buffer))))
 
 (defun claude-code--pid-live-p (pid)
@@ -273,6 +284,13 @@ This is a bare existence check and does not verify the live process is the same
 `claude' the sessions file recorded -- see docs/storage-model.md for the
 PID-reuse trade-off that buys."
   (and (integerp pid) (process-attributes pid) t))
+
+(defun claude-code--external-p (id &optional live-table)
+  "Return non-nil when a `claude' outside Emacs is running session ID.
+LIVE-TABLE is a pre-parsed `claude-code--live-status-table'."
+  (and (not (claude-code--managed-buffer id))
+       (claude-code--pid-live-p
+        (plist-get (claude-code--live-info id live-table) :pid))))
 
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
@@ -311,7 +329,7 @@ is running it and it is dead."
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (pcase-dolist (`(,id . ,buf) managed)
-      (let ((info (gethash id live))
+      (let ((info (claude-code--live-info id live))
             (tr (funcall transcript-of id))
             (reg (gethash id claude-code--managed)))
         (puthash id t seen)
@@ -326,14 +344,11 @@ is running it and it is dead."
     (dolist (tr transcripts)
       (let ((id (plist-get tr :id)))
         (unless (gethash id seen)
-          (let ((info (gethash id live)))
-            (push (apply #'claude-code-session--create
-                         :id id :alive-p nil
-                         :external-p (and info
-                                          (claude-code--pid-live-p
-                                           (plist-get info :pid)))
-                         (claude-code--transcript-session-args tr))
-                  sessions)))))
+          (push (apply #'claude-code-session--create
+                       :id id :alive-p nil
+                       :external-p (claude-code--external-p id live)
+                       (claude-code--transcript-session-args tr))
+                sessions))))
     (nreverse sessions)))
 
 (defun claude-code--process-snapshot ()
@@ -379,7 +394,7 @@ RSS is in kibibytes."
 Prefers the live `sessions/*.json' cwd (the actual worktree directory for a
 worktree session), falls back to the project root the instance was launched
 from, and is nil for an unknown id."
-  (or (plist-get (gethash id (claude-code--live-status-table)) :cwd)
+  (or (plist-get (claude-code--live-info id) :cwd)
       (plist-get (gethash id claude-code--managed) :origin)))
 
 
@@ -532,14 +547,10 @@ When Emacs already manages a live instance for ID, focus and return that
 instance rather than starting a second `claude' for the same session.  Refuses a
 session a `claude' outside Emacs is running, so this never attaches a second
 process to a session another one is already driving."
-  (let* ((reg (gethash id claude-code--managed))
-         (existing (and reg
-                        (claude-code--session-process (plist-get reg :buffer))
-                        (plist-get reg :buffer))))
+  (let ((existing (claude-code--managed-buffer id)))
     (cond
      (existing (pop-to-buffer existing) existing)
-     ((claude-code--pid-live-p
-       (plist-get (gethash id (claude-code--live-status-table)) :pid))
+     ((claude-code--external-p id)
       (user-error "Session %s is running outside Emacs" id))
      (t (claude-code--launch id project-root :resume id)))))
 
@@ -840,15 +851,17 @@ latter case the row's session determines the enclosing group."
     (claude-code-sessions-refresh)))
 
 (defun claude-code-sessions-visit ()
-  "Focus an alive session, offer to resume a dead one, or toggle a group."
+  "Focus an alive session, offer to resume a dead one, or toggle a group.
+An external session is handed to `claude-code-resume' unprompted; the
+model's guard refuses it."
   (interactive)
-  (let ((session (claude-code--session-at-point)))
+  (let* ((session (claude-code--session-at-point))
+         (liveness (and session (claude-code--session-liveness session))))
     (cond
      ((null session) (claude-code-sessions-toggle-group))
-     ((claude-code-session-alive-p session) (claude-code-focus session))
-     ((claude-code-session-external-p session)
-      (user-error "Session runs outside Emacs; cannot attach"))
-     ((y-or-n-p "Session is dead.  Resume it? ")
+     ((eq liveness 'alive) (claude-code-focus session))
+     ((or (eq liveness 'external)
+          (y-or-n-p "Session is dead.  Resume it? "))
       (claude-code-resume claude-code--project (claude-code-session-id session))
       (claude-code-sessions-refresh)))))
 

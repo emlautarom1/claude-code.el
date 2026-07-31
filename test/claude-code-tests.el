@@ -128,7 +128,16 @@ Every buffer a launch hosted is killed afterwards, however BODY exits."
         (should (equal (plist-get s3 :waiting-for) "permission prompt")))
       ;; A file without a status field yields nil, not an error.
       (let ((s4 (gethash "44444444-4444-4444-8444-444444444444" table)))
-        (should (null (plist-get s4 :status)))))))
+        (should (null (plist-get s4 :status))))
+      ;; `claude-code--live-info' is the per-id lookup over the same data:
+      ;; a fresh parse without TABLE, the given TABLE as-is (no reparse).
+      (let ((id "11111111-1111-4111-8111-111111111111"))
+        (should (equal (claude-code--live-info id) (gethash id table)))
+        (should (null (claude-code--live-info "no-such-id")))
+        (cl-letf (((symbol-function 'claude-code--live-status-table)
+                   (lambda () (error "Reparsed"))))
+          (should (eq (claude-code--live-info id table)
+                      (gethash id table))))))))
 
 (ert-deftest claude-code-test-project-transcripts ()
   "Transcripts of the project and its worktrees are enumerated."
@@ -340,10 +349,28 @@ request carries no name, so it stays blank."
   (should (eq 'dead (claude-code--session-liveness
                      (claude-code-session--create :alive-p nil)))))
 
+(ert-deftest claude-code-test-external-p ()
+  "External means: not Emacs-managed, and the sessions/ PID is live."
+  (claude-code-tests--with-fixtures
+    ;; Session 22222222 has sessions/1002.json (pid 1002).
+    (claude-code-tests--with-live-pids '(1002)
+      (claude-code-tests--with-registry
+        (should (claude-code--external-p "22222222-2222-4222-8222-222222222222"))
+        ;; An id with no sessions/ entry is never external.
+        (should-not (claude-code--external-p "no-such-id")))
+      ;; An Emacs-managed live instance is not external even with a live PID.
+      (claude-code-tests--with-managed-buffer buf
+        (puthash "22222222-2222-4222-8222-222222222222"
+                 (list :buffer buf) claude-code--managed)
+        (cl-letf (((symbol-function 'claude-code--session-process)
+                   (lambda (b) (eq b buf))))
+          (should-not (claude-code--external-p
+                       "22222222-2222-4222-8222-222222222222")))))))
+
 (ert-deftest claude-code-test-external-session ()
   "An unmanaged transcript with a live sessions PID is external, else dead."
   (claude-code-tests--with-fixtures
-    (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
+    (claude-code-tests--with-registry
       ;; Session 22222222 has sessions/1002.json (pid 1002).  When Emacs does
       ;; not manage it but that pid is live, it is external, not dead.
       (claude-code-tests--with-live-pids '(1002)
@@ -791,6 +818,47 @@ delete cannot pick one up and abort partway through `claude-code-delete'."
       (should (equal (funcall ids 'external) '("e")))
       ;; The external row must not be offered up as dead.
       (should (equal (funcall ids 'dead) '("d"))))))
+
+(ert-deftest claude-code-test-sessions-visit-dispatch ()
+  "RET focuses alive rows, resumes via the model otherwise, prompting on dead.
+An external row reaches `claude-code-resume' without a prompt, so the model's
+guard is the only refusal (`claude-code-test-resume-refuses-external')."
+  (let ((claude-code--project "/r")
+        (alive (claude-code-session--create :id "a" :alive-p t))
+        (external (claude-code-session--create :id "e" :external-p t))
+        (dead (claude-code-session--create :id "d"))
+        (at-point nil) (answer nil) (calls '()))
+    (cl-letf (((symbol-function 'claude-code--session-at-point)
+               (lambda () at-point))
+              ((symbol-function 'claude-code-focus)
+               (lambda (s) (push (list 'focus (claude-code-session-id s)) calls)))
+              ((symbol-function 'claude-code-resume)
+               (lambda (root id) (push (list 'resume root id) calls)))
+              ((symbol-function 'claude-code-sessions-refresh)
+               (lambda () (push '(refresh) calls)))
+              ((symbol-function 'claude-code-sessions-toggle-group)
+               (lambda () (push '(toggle) calls)))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_) (push '(ask) calls) answer)))
+      ;; A group header (no session at point) toggles.
+      (claude-code-sessions-visit)
+      (should (equal calls '((toggle))))
+      ;; An alive row focuses, without a prompt.
+      (setq at-point alive calls nil)
+      (claude-code-sessions-visit)
+      (should (equal calls '((focus "a"))))
+      ;; An external row goes to the model unprompted.
+      (setq at-point external calls nil)
+      (claude-code-sessions-visit)
+      (should (equal (reverse calls) '((resume "/r" "e") (refresh))))
+      ;; A dead row asks first: yes resumes and refreshes...
+      (setq at-point dead calls nil answer t)
+      (claude-code-sessions-visit)
+      (should (equal (reverse calls) '((ask) (resume "/r" "d") (refresh))))
+      ;; ...no stops at the prompt.
+      (setq calls nil answer nil)
+      (claude-code-sessions-visit)
+      (should (equal calls '((ask)))))))
 
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."
