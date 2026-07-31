@@ -16,12 +16,14 @@
 ;; The file is organized in the same model/view/adapter spirit as
 ;; `claude-code.el':
 ;;
-;;   * Transport -- quarantined `web-server' glue: it frames HTTP requests,
-;;     parses the JSON-RPC body, and writes the reply.  This is the ONLY layer
-;;     that touches sockets.
-;;   * Protocol -- `claude-code--mcp-handle-request', a pure, socket-free
-;;     dispatcher that maps a parsed request to a response envelope (or nil for
-;;     a notification).  It is directly unit-testable.
+;;   * Transport -- quarantined `web-server' glue: it frames HTTP requests and
+;;     writes replies.  This is the ONLY layer that touches sockets, and it
+;;     builds no envelopes of its own.
+;;   * Protocol -- the pure, socket-free response authority:
+;;     `claude-code--mcp-response-for-body' maps a raw POST body to a response
+;;     envelope (or nil for a notification), guarding body integrity and JSON
+;;     parsing before `claude-code--mcp-handle-request' dispatches the parsed
+;;     request.  Both are directly unit-testable.
 ;;   * Registry/catalog -- the tool table and `claude-code-mcp-make-tool', plain
 ;;     data describing every advertised tool.
 ;;
@@ -300,6 +302,25 @@ error envelope echoing the request `id'."
             id -32603
             (format "Internal error: %s" (error-message-string err)))))))))
 
+(defun claude-code--mcp-response-for-body (session-id body declared-length)
+  "Return the JSON-RPC response alist for BODY, or nil for a notification.
+SESSION-ID is the path token identifying the calling session.  BODY is the
+raw POST body; DECLARED-LENGTH is the request's Content-Length value as a
+string, or nil when the header is absent.  A BODY whose byte count disagrees
+with DECLARED-LENGTH is answered with a -32700 error rather than parsed:
+web-server frames the body by the header blank line, not Content-Length, so a
+body split across packets arrives truncated.  A body that is not valid JSON
+is likewise a -32700.  Dispatch errors never escape
+`claude-code--mcp-handle-request', so the `json-error' handler here fires
+only for the parse."
+  (if (and declared-length
+           (/= (string-bytes body) (string-to-number declared-length)))
+      (claude-code--mcp-error :null -32700 "Truncated request body")
+    (condition-case nil
+        (claude-code--mcp-handle-request
+         session-id (json-parse-string body :object-type 'alist))
+      (json-error (claude-code--mcp-error :null -32700 "Parse error")))))
+
 
 ;;;; Transport (web-server glue)
 
@@ -330,35 +351,20 @@ values round-trip to the shapes the MCP client expects."
 
 (defun claude-code--mcp-handle (request)
   "Handle one MCP HTTP POST REQUEST from the `web-server' transport.
-Parses the JSON-RPC body, dispatches it through
-`claude-code--mcp-handle-request', and writes the reply.  A notification (no
-`id') is acknowledged with an empty 202.  A truncated body or a JSON parse
-error is answered with a -32700 error before any bytes are written."
+Reads the session id, body and declared Content-Length off REQUEST, maps
+them to a response through `claude-code--mcp-response-for-body', and writes
+it back -- an empty 202 when there is none (a notification)."
   (with-slots (process headers body) request
     (let* ((path (cdr (assoc :POST headers)))
            (session-id (and path
                             (string-match "^/mcp/\\([^/]+\\)" path)
                             (match-string 1 path)))
-           (declared (cdr (assoc :CONTENT-LENGTH headers))))
-      ;; Every error branch below ends in `claude-code--mcp-send', which throws
-      ;; `close-connection', so these read as sequential guards.
-      ;;
-      ;; Body-integrity guard: web-server frames the body by the header blank
-      ;; line, not Content-Length, so a body split across packets is delivered
-      ;; truncated.  Reject rather than parse a partial body.
-      (when (and declared (/= (string-bytes body) (string-to-number declared)))
-        (claude-code--mcp-send
-         process (claude-code--mcp-error :null -32700 "Truncated request body")))
-      (let* ((parsed (condition-case nil
-                         (json-parse-string body :object-type 'alist)
-                       (error (claude-code--mcp-send
-                               process
-                               (claude-code--mcp-error
-                                :null -32700 "Parse error")))))
-             (response (claude-code--mcp-handle-request session-id parsed)))
-        (if response
-            (claude-code--mcp-send process response)
-          (claude-code--mcp-send-empty process))))))
+           (response (claude-code--mcp-response-for-body
+                      session-id body
+                      (cdr (assoc :CONTENT-LENGTH headers)))))
+      (if response
+          (claude-code--mcp-send process response)
+        (claude-code--mcp-send-empty process)))))
 
 (defun claude-code--mcp-handle-get (request)
   "Answer a Streamable-HTTP GET REQUEST on the MCP endpoint with HTTP 405.

@@ -1,7 +1,7 @@
 ;;; claude-code-mcp-tests.el --- Tests for claude-code-mcp -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; ERT suite for claude-code-mcp.el: the pure JSON-RPC dispatcher, the tool
+;; ERT suite for claude-code-mcp.el: the pure protocol layer, the tool
 ;; registry and `eval' tool, the config/CLI-arg builder, the server lifecycle,
 ;; and an in-Emacs socket end-to-end test driving the real loopback server.
 ;; A live handshake test is gated behind CLAUDE_CODE_INTEGRATION.  Run with
@@ -148,6 +148,56 @@ The registry is global, so a tool left behind would leak into every later
     (let ((resp (claude-code--mcp-handle-request "sess" bad)))
       (should (eq (alist-get 'id resp) :null))
       (should (= (alist-get 'code (alist-get 'error resp)) -32600)))))
+
+;;;; Pure body handling: integrity guard and JSON parsing
+
+(ert-deftest claude-code-mcp-test-body-dispatch ()
+  "A well-formed body dispatches; a notification body yields nil."
+  ;; A parseable request with a matching declared length reaches dispatch.
+  (let* ((body (claude-code--mcp-serialize
+                (claude-code-mcp-tests--request "tools/list" 1)))
+         (resp (claude-code--mcp-response-for-body
+                "sess" body (number-to-string (string-bytes body)))))
+    (should (equal (alist-get 'id resp) 1))
+    (should (alist-get 'tools (alist-get 'result resp))))
+  ;; With no Content-Length header the integrity guard is skipped.
+  (let ((resp (claude-code--mcp-response-for-body
+               "sess"
+               (claude-code--mcp-serialize
+                (claude-code-mcp-tests--request "tools/list" 2))
+               nil)))
+    (should (equal (alist-get 'id resp) 2)))
+  ;; A notification body maps to nil (the transport then sends the empty 202).
+  (should (null (claude-code--mcp-response-for-body
+                 "sess"
+                 (claude-code--mcp-serialize
+                  (claude-code-mcp-tests--request "notifications/initialized"))
+                 nil))))
+
+(ert-deftest claude-code-mcp-test-parse-error ()
+  "A malformed JSON body is answered with a -32700 error and a null id."
+  (let ((resp (claude-code--mcp-response-for-body "sess" "{not json" nil)))
+    (should (eq (alist-get 'id resp) :null))
+    (should (= (alist-get 'code (alist-get 'error resp)) -32700))))
+
+(ert-deftest claude-code-mcp-test-truncated-body ()
+  "A Content-Length disagreeing with the body's byte count yields -32700."
+  (let* ((body "{\"jsonrpc\":\"2.0\"}")
+         (resp (claude-code--mcp-response-for-body
+                "sess" body (number-to-string (+ (string-bytes body) 10)))))
+    (should (eq (alist-get 'id resp) :null))
+    (should (= (alist-get 'code (alist-get 'error resp)) -32700)))
+  ;; The guard counts bytes, not characters.  This body is multibyte (é is one
+  ;; char, two bytes): its byte count is accepted, its char count is not.
+  (let ((body "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"é\"}"))
+    (should (equal (alist-get 'id (claude-code--mcp-response-for-body
+                                   "sess" body
+                                   (number-to-string (string-bytes body))))
+                   4))
+    (should (eq (alist-get 'id (claude-code--mcp-response-for-body
+                                "sess" body
+                                (number-to-string (length body))))
+                :null))))
 
 ;;;; Pure dispatch: tools/list and the catalog
 
@@ -531,25 +581,14 @@ Returns nil for an empty (notification) reply that carries no body."
            (result (alist-get 'result resp)))
       (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
                      "42"))
-      (should (eq (alist-get 'isError result) :json-false)))))
-
-(ert-deftest claude-code-mcp-test-transport-parse-error ()
-  "A malformed JSON body is answered with a -32700 error and a null id."
-  (claude-code-mcp-tests--with-server port
-    (let ((resp (claude-code-mcp-tests--response-body
-                 (claude-code-mcp-tests--http-post
-                  port "/mcp/sess" "{not json"))))
-      (should (eq (alist-get 'id resp) :null))
-      (should (= (alist-get 'code (alist-get 'error resp)) -32700)))))
-
-(ert-deftest claude-code-mcp-test-transport-truncated-body ()
-  "A `Content-Length' larger than the delivered body yields a -32700 error."
-  (claude-code-mcp-tests--with-server port
+      (should (eq (alist-get 'isError result) :json-false)))
+    ;; A body declared longer than delivered reaches the handler truncated --
+    ;; web-server frames by the blank line, not Content-Length -- and is
+    ;; refused with -32700 on the wire.
     (let* ((body "{\"jsonrpc\":\"2.0\"}")
            (resp (claude-code-mcp-tests--response-body
                   (claude-code-mcp-tests--http-post
                    port "/mcp/sess" body (+ (string-bytes body) 10)))))
-      (should (eq (alist-get 'id resp) :null))
       (should (= (alist-get 'code (alist-get 'error resp)) -32700)))))
 
 ;;;; Live integration (real `claude' + real MCP handshake)
