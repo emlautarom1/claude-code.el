@@ -480,14 +480,18 @@ torn down by the layer that created it, without this one knowing about it.")
 (defun claude-code--on-exit (buffer &optional _event)
   "Unregister the managed session hosted in BUFFER when its process exits.
 Registered on `ghostel-exit-functions', which calls its functions with
-\(BUFFER EVENT); the EVENT is unused here."
-  (dolist (id (cl-loop for id being the hash-keys of claude-code--managed
+\(BUFFER EVENT) for every Ghostel terminal; the EVENT is unused here.
+Exits of terminals this package does not manage are ignored:
+`claude-code-last-instance-exit-hook' runs only when this exit removed
+the registry's last entry."
+  (let ((dead (cl-loop for id being the hash-keys of claude-code--managed
                        using (hash-values plist)
                        when (eq (plist-get plist :buffer) buffer)
-                       collect id))
-    (remhash id claude-code--managed))
-  (when (zerop (hash-table-count claude-code--managed))
-    (run-hooks 'claude-code-last-instance-exit-hook)))
+                       collect id)))
+    (dolist (id dead)
+      (remhash id claude-code--managed))
+    (when (and dead (zerop (hash-table-count claude-code--managed)))
+      (run-hooks 'claude-code-last-instance-exit-hook))))
 
 (defun claude-code--register (id buffer origin worktree)
   "Record instance ID hosted in BUFFER, launched from ORIGIN, with WORKTREE.

@@ -518,6 +518,29 @@ request carries no name, so it stays blank."
     (claude-code--on-exit buf "finished\n")
     (should (zerop (hash-table-count claude-code--managed)))))
 
+(ert-deftest claude-code-test-on-exit-runs-last-instance-hook-on-transition ()
+  "The hook fires exactly when a managed exit empties the registry.
+Unmanaged terminal exits never fire it — not even while the registry is
+empty, the steady state once every instance has exited."
+  (claude-code-tests--with-managed-buffer buf
+    (claude-code-tests--with-managed-buffer stranger
+      (let* ((fired 0)
+             (claude-code-last-instance-exit-hook
+              (list (lambda () (cl-incf fired)))))
+        ;; Empty registry: an unmanaged exit must not fire the hook.
+        (claude-code--on-exit stranger "finished\n")
+        (should (= fired 0))
+        ;; Non-empty registry, unmanaged exit: still nothing.
+        (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
+        (claude-code--on-exit stranger "finished\n")
+        (should (= fired 0))
+        ;; The managed exit that empties the registry fires it once.
+        (claude-code--on-exit buf "finished\n")
+        (should (= fired 1))
+        ;; A repeat exit event for the same buffer does not fire it again.
+        (claude-code--on-exit buf "finished\n")
+        (should (= fired 1))))))
+
 (ert-deftest claude-code-test-launch-shared-by-spawn-and-resume ()
   "Spawn and resume host their instance through one launch path.
 Both reach `ghostel-exec' with the MCP arguments threaded in, register the
