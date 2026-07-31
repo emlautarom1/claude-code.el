@@ -434,6 +434,12 @@ request carries no name, so it stays blank."
   (should (equal (claude-code--build-args
                   :session-id "ID" :model "opus" :prompt "hi")
                  '("--session-id" "ID" "--model" "opus" "--" "hi")))
+  (should (equal (claude-code--build-args :session-id "ID" :effort "xhigh")
+                 '("--session-id" "ID" "--effort" "xhigh")))
+  (should (equal (claude-code--build-args
+                  :session-id "ID" :model "opus" :effort "low" :prompt "hi")
+                 '("--session-id" "ID" "--model" "opus" "--effort" "low"
+                   "--" "hi")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree t)
                  '("--session-id" "ID" "-w")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree "feat")
@@ -449,7 +455,8 @@ request carries no name, so it stays blank."
 (ert-deftest claude-code-test-build-args-resume ()
   "Resume returns only \"-r ID\" and ignores new-session arguments."
   (should (equal (claude-code--build-args :resume "ID") '("-r" "ID")))
-  (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus")
+  (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus"
+                                          :effort "high")
                  '("-r" "ID")))
   (should (equal (claude-code--build-args :resume "ID" :session-id "ID")
                  '("-r" "ID"))))
@@ -1014,15 +1021,17 @@ so its suffixes land on it."
               ((symbol-function 'read-string) (lambda (&rest _) ""))
               ;; Simulate a saved/set prefix value lingering in transient.
               ((symbol-function 'transient-args)
-               (lambda (_) '("--worktree" "--model=opus"))))
+               (lambda (_) '("--worktree" "--model=opus" "--effort=xhigh"))))
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
         (call-interactively #'claude-code-sessions-new)
-        (should (equal spawn-args '("/r" :prompt nil :worktree nil :model nil)))
+        (should (equal spawn-args
+                       '("/r" :prompt nil :worktree nil :model nil :effort nil)))
         (let ((transient-current-command 'claude-code-menu))
           (call-interactively #'claude-code-sessions-new))
         (should (equal spawn-args
-                       '("/r" :prompt nil :worktree t :model "opus")))))))
+                       '("/r" :prompt nil :worktree t :model "opus"
+                         :effort "xhigh")))))))
 
 (ert-deftest claude-code-test-kill-and-delete-keep-unacted-marks ()
   "Kill and delete drop only the marks they consumed."

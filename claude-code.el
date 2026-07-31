@@ -391,7 +391,7 @@ from, and is nil for an unknown id."
 ;;;; Operations
 
 (cl-defun claude-code--build-args
-    (&key session-id resume prompt worktree model mcp-args)
+    (&key session-id resume prompt worktree model effort mcp-args)
   "Build the argument list for the `claude' CLI.
 
 When RESUME is non-nil it is a session id to resume, and it is returned as
@@ -400,9 +400,10 @@ When RESUME is non-nil it is a session id to resume, and it is returned as
 Otherwise a new session is described:
 SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
 its session up front.  WORKTREE, when t, requests a new worktree (\"-w\"); when
-a string, names it (\"-w NAME\").  MODEL sets \"--model\".  PROMPT, when a
-non-empty string, is emitted last as a positional argument behind a \"--\"
-option terminator.
+a string, names it (\"-w NAME\").  MODEL sets \"--model\" and EFFORT sets
+\"--effort\"; both are passed through verbatim -- their validity is the CLI's
+concern.  PROMPT, when a non-empty string, is emitted last as a positional
+argument behind a \"--\" option terminator.
 
 MCP-ARGS is a list of extra CLI arguments (the MCP wiring built by
 `claude-code--mcp-cli-args') placed with the other options, before the
@@ -413,6 +414,7 @@ terminator; this function keeps no MCP knowledge of its own."
             (when worktree
               (if (stringp worktree) (list "-w" worktree) (list "-w")))
             (when model (list "--model" model))
+            (when effort (list "--effort" effort))
             mcp-args
             (unless (or (null prompt) (string-empty-p prompt))
               (list "--" prompt)))))
@@ -504,7 +506,7 @@ request, nil otherwise."
 (defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
-origin.  OPTS are `:prompt', `:worktree' and `:model' as
+origin.  OPTS are `:prompt', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
 rather than start it; the `:worktree' request is also recorded in the registry."
   (require 'ghostel)
@@ -523,14 +525,15 @@ rather than start it; the `:worktree' request is also recorded in the registry."
     buffer))
 
 ;;;###autoload
-(cl-defun claude-code-spawn (project-root &key prompt worktree model)
+(cl-defun claude-code-spawn (project-root &key prompt worktree model effort)
   "Spawn a new Claude Code instance for PROJECT-ROOT; return its buffer.
 PROMPT is an optional initial prompt.
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
-name it.  MODEL sets the model.  The session id is generated internally and is
-not exposed."
+name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
+\"max\").  The session id is generated internally and is not exposed."
   (claude-code--launch (claude-code--new-uuid) project-root
-                       :prompt prompt :worktree worktree :model model))
+                       :prompt prompt :worktree worktree :model model
+                       :effort effort))
 
 ;;;###autoload
 (defun claude-code-resume (project-root id)
@@ -931,7 +934,8 @@ keypress spawns with no options."
      claude-code--project
      :prompt (unless (string-empty-p prompt) prompt)
      :worktree (and (member "--worktree" args) t)
-     :model (transient-arg-value "--model=" args))
+     :model (transient-arg-value "--model=" args)
+     :effort (transient-arg-value "--effort=" args))
     (claude-code-sessions-refresh)))
 
 ;;;;; Mode
@@ -985,7 +989,8 @@ keypress spawns with no options."
   "Dispatch actions for the sessions view, opening it first when needed."
   ["Spawn options"
    ("-w" "Worktree" "--worktree")
-   ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))]
+   ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
+   ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))]
   ["Spawn"
    ("n" "New session" claude-code-sessions-new)]
   [["Session"
