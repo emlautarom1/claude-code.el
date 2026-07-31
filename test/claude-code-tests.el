@@ -599,7 +599,7 @@ instance, and install title tracking; only the CLI argument list differs."
       (puthash "id-x" (list :buffer buf :origin "/r") claude-code--managed)
       (cl-letf (((symbol-function 'claude-code--session-process)
                  (lambda (b) (and (eq b buf) 'proc)))
-                ((symbol-function 'pop-to-buffer)
+                ((symbol-function 'switch-to-buffer)
                  (lambda (b &rest _) (setq focused b)))
                 ((symbol-function 'ghostel-exec)
                  (lambda (&rest _) (setq spawned t))))
@@ -861,9 +861,10 @@ delete cannot pick one up and abort partway through `claude-code-delete'."
       (should (equal (funcall ids 'dead) '("d"))))))
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
-  "RET focuses alive rows, resumes via the model otherwise, prompting on dead.
-An external row reaches `claude-code-resume' without a prompt, so the model's
-guard is the only refusal (`claude-code-test-resume-refuses-external')."
+  "RET focuses alive rows, resumes and displays via the model otherwise.
+A dead row prompts first; an external row reaches `claude-code-resume'
+without a prompt, so the model's guard is the only refusal
+\(`claude-code-test-resume-refuses-external')."
   (let ((alive (claude-code-session--create :id "a" :alive-p t))
         (external (claude-code-session--create :id "e" :external-p t))
         (dead (claude-code-session--create :id "d"))
@@ -873,7 +874,9 @@ guard is the only refusal (`claude-code-test-resume-refuses-external')."
               ((symbol-function 'claude-code-focus)
                (lambda (s) (push (list 'focus (claude-code-session-id s)) calls)))
               ((symbol-function 'claude-code-resume)
-               (lambda (root id) (push (list 'resume root id) calls)))
+               (lambda (root id) (push (list 'resume root id) calls) 'terminal))
+              ((symbol-function 'switch-to-buffer)
+               (lambda (b &rest _) (push (list 'switch b) calls)))
               ((symbol-function 'claude-code-sessions-refresh)
                (lambda () (push '(refresh) calls)))
               ((symbol-function 'claude-code-sessions-toggle-group)
@@ -889,14 +892,17 @@ guard is the only refusal (`claude-code-test-resume-refuses-external')."
         (setq at-point alive calls nil)
         (claude-code-sessions-visit)
         (should (equal calls '((focus "a"))))
-        ;; An external row goes to the model unprompted.
+        ;; An external row goes to the model unprompted, and the returned
+        ;; buffer lands in the selected window after the redraw.
         (setq at-point external calls nil)
         (claude-code-sessions-visit)
-        (should (equal (reverse calls) '((resume "/r" "e") (refresh))))
-        ;; A dead row asks first: yes resumes and refreshes...
+        (should (equal (reverse calls)
+                       '((resume "/r" "e") (refresh) (switch terminal))))
+        ;; A dead row asks first: yes resumes, refreshes and displays...
         (setq at-point dead calls nil answer t)
         (claude-code-sessions-visit)
-        (should (equal (reverse calls) '((ask) (resume "/r" "d") (refresh))))
+        (should (equal (reverse calls)
+                       '((ask) (resume "/r" "d") (refresh) (switch terminal))))
         ;; ...no stops at the prompt.
         (setq calls nil answer nil)
         (claude-code-sessions-visit)

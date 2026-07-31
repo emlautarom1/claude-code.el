@@ -543,7 +543,7 @@ instance rather than starting a second `claude' for the same session.  Refuses
 a session a `claude' outside Emacs is running."
   (let ((existing (claude-code--managed-buffer id)))
     (cond
-     (existing (pop-to-buffer existing) existing)
+     (existing (switch-to-buffer existing) existing)
      ((claude-code--external-p id)
       (user-error "Session %s is running outside Emacs" id))
      (t (claude-code--launch id project-root :resume id)))))
@@ -601,8 +601,8 @@ transcript and the next refresh reads it back through
     (ghostel-send-C-c)))
 
 (defun claude-code-focus (session)
-  "Display and select SESSION's instance buffer."
-  (pop-to-buffer (claude-code--buffer session)))
+  "Display SESSION's instance buffer in the selected window."
+  (switch-to-buffer (claude-code--buffer session)))
 
 
 ;;;; View
@@ -828,9 +828,8 @@ latter case the row's session determines the enclosing group."
     (claude-code-sessions-refresh)))
 
 (defun claude-code-sessions-visit ()
-  "Focus an alive session, offer to resume a dead one, or toggle a group.
-An external session is handed to `claude-code-resume' unprompted; the
-model's guard refuses it."
+  "Visit the session at point in the selected window, or toggle a group.
+A dead session is resumed first, after confirmation."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (let* ((session (claude-code--session-at-point))
@@ -841,10 +840,12 @@ model's guard refuses it."
      ((or (eq liveness 'external)
           (y-or-n-p "Session is dead.  Resume it? "))
       ;; A stale row can resolve to an already-managed instance, and resuming
-      ;; one pops to its terminal — so aim the redraw at the view buffer.
-      (let ((view (current-buffer)))
-        (claude-code-resume claude-code--project (claude-code-session-id session))
-        (with-current-buffer view (claude-code-sessions-refresh)))))))
+      ;; one selects its terminal — so aim the redraw at the view buffer.
+      (let ((view (current-buffer))
+            (buffer (claude-code-resume claude-code--project
+                                        (claude-code-session-id session))))
+        (with-current-buffer view (claude-code-sessions-refresh))
+        (switch-to-buffer buffer))))))
 
 (defun claude-code-sessions-mark ()
   "Mark the session on the current line."
