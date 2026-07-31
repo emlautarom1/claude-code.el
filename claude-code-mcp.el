@@ -201,11 +201,11 @@ Reports `claude-code--mcp-protocol-version'."
 
 (defun claude-code--mcp-tools-list ()
   "Return the `tools/list' result payload built from the tool catalog."
-  (let (descriptors)
-    (maphash (lambda (name tool)
-               (push (claude-code--mcp-tool-descriptor name tool) descriptors))
-             claude-code--mcp-tools)
-    (list (cons 'tools (vconcat (nreverse descriptors))))))
+  (list (cons 'tools
+              (vconcat
+               (cl-loop for name being the hash-keys of claude-code--mcp-tools
+                        using (hash-values tool)
+                        collect (claude-code--mcp-tool-descriptor name tool))))))
 
 (defun claude-code--mcp-validate-args (arg-specs arguments)
   "Return values from ARGUMENTS ordered to match ARG-SPECS.
@@ -390,12 +390,8 @@ live server's port is returned without opening a second listener."
   "Return every registered tool as an `mcp__<server>__<tool>' identifier list.
 These are the identifiers `claude' recognizes on `--allowedTools'; the server
 prefix is `claude-code--mcp-server-name'."
-  (let (names)
-    (maphash (lambda (name _tool)
-               (push (format "mcp__%s__%s" claude-code--mcp-server-name name)
-                     names))
-             claude-code--mcp-tools)
-    (nreverse names)))
+  (cl-loop for name being the hash-keys of claude-code--mcp-tools
+           collect (format "mcp__%s__%s" claude-code--mcp-server-name name)))
 
 (defun claude-code--mcp-cli-args (id)
   "Return CLI arguments connecting session ID to the MCP server, or nil.

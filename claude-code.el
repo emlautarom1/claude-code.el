@@ -265,14 +265,13 @@ root a later query normalises the same way."
 
 (defun claude-code--live-managed (project-root)
   "Return an alist of (ID . BUFFER) for live managed instances of PROJECT-ROOT."
-  (let ((root (claude-code--normalize-root project-root))
-        (out '()))
-    (maphash (lambda (id plist)
-               (when (and (equal (plist-get plist :origin) root)
-                          (claude-code--session-process (plist-get plist :buffer)))
-                 (push (cons id (plist-get plist :buffer)) out)))
-             claude-code--managed)
-    out))
+  (let ((root (claude-code--normalize-root project-root)))
+    (cl-loop for id being the hash-keys of claude-code--managed
+             using (hash-values plist)
+             for buffer = (plist-get plist :buffer)
+             when (and (equal (plist-get plist :origin) root)
+                       (claude-code--session-process buffer))
+             collect (cons id buffer))))
 
 (defun claude-code--pid-live-p (pid)
   "Return non-nil when integer PID is a currently running process.
@@ -480,13 +479,13 @@ torn down by the layer that created it, without this one knowing about it.")
   "Unregister the managed session hosted in BUFFER when its process exits.
 Registered on `ghostel-exit-functions', which calls its functions with
 \(BUFFER EVENT); the EVENT is unused here."
-  (let (dead)
-    (maphash (lambda (id plist)
-               (when (eq (plist-get plist :buffer) buffer) (push id dead)))
-             claude-code--managed)
-    (dolist (id dead) (remhash id claude-code--managed))
-    (when (zerop (hash-table-count claude-code--managed))
-      (run-hooks 'claude-code-last-instance-exit-hook))))
+  (dolist (id (cl-loop for id being the hash-keys of claude-code--managed
+                       using (hash-values plist)
+                       when (eq (plist-get plist :buffer) buffer)
+                       collect id))
+    (remhash id claude-code--managed))
+  (when (zerop (hash-table-count claude-code--managed))
+    (run-hooks 'claude-code-last-instance-exit-hook)))
 
 (defun claude-code--register (id buffer origin cwd worktree)
   "Record instance ID hosted in BUFFER, launched from ORIGIN with CWD, WORKTREE."
