@@ -701,30 +701,34 @@ a second process to a session another one is already driving.  Fixture session
 (ert-deftest claude-code-test-format-session ()
   "Columns fall back sensibly and render usage.
 Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
-  (let* ((s (claude-code-session--create
-             :id "abcdef01-0000-4000-8000-000000000000"
-             :alive-p nil :title "The Title"))
-         (v (claude-code--format-session s nil)))
-    (should (equal (substring-no-properties (aref v 0)) "dead"))
-    ;; No last-active -> empty Active cell.
-    (should (equal (substring-no-properties (aref v 1)) ""))
-    (should (equal (substring-no-properties (aref v 2)) "abcdef01"))
-    (should (equal (aref v 3) ""))
-    (should (equal (aref v 4) ""))
-    (should (equal (aref v 5) ""))
-    ;; The transcript title is shown in the final (Name) column.
-    (should (equal (aref v 6) "The Title")))
-  (let* ((s (claude-code-session--create
-             :id "11112222-0000-4000-8000-000000000000"
-             :alive-p t :status "busy" :title "Worker task"
-             :worktree "feat"))
-         (v (claude-code--format-session s '(12.5 . 204800))))
-    (should (equal (substring-no-properties (aref v 0)) "busy"))
-    (should (eq (get-text-property 0 'face (aref v 0)) 'warning))
-    (should (equal (aref v 3) "feat"))
-    (should (equal (aref v 4) "12.5"))
-    (should (equal (aref v 5) "200M"))
-    (should (equal (aref v 6) "Worker task"))))
+  (let ((now 1800000000))
+    (let* ((s (claude-code-session--create
+               :id "abcdef01-0000-4000-8000-000000000000"
+               :alive-p nil :title "The Title"))
+           (v (claude-code--format-session s nil now)))
+      (should (equal (substring-no-properties (aref v 0)) "dead"))
+      ;; No last-active -> empty Active cell.
+      (should (equal (substring-no-properties (aref v 1)) ""))
+      (should (equal (substring-no-properties (aref v 2)) "abcdef01"))
+      (should (equal (aref v 3) ""))
+      (should (equal (aref v 4) ""))
+      (should (equal (aref v 5) ""))
+      ;; The transcript title is shown in the final (Name) column.
+      (should (equal (aref v 6) "The Title")))
+    (let* ((s (claude-code-session--create
+               :id "11112222-0000-4000-8000-000000000000"
+               :alive-p t :status "busy" :title "Worker task"
+               :worktree "feat" :last-active (- now 90)))
+           (v (claude-code--format-session s '(12.5 . 204800) now)))
+      (should (equal (substring-no-properties (aref v 0)) "busy"))
+      (should (eq (get-text-property 0 'face (aref v 0)) 'warning))
+      ;; The Active cell is last-active rendered against the NOW argument.
+      (should (equal (substring-no-properties (aref v 1))
+                     (claude-code--format-relative-time (- now 90) now)))
+      (should (equal (aref v 3) "feat"))
+      (should (equal (aref v 4) "12.5"))
+      (should (equal (aref v 5) "200M"))
+      (should (equal (aref v 6) "Worker task")))))
 
 (ert-deftest claude-code-test-format-relative-time ()
   "Relative ages render compactly; nil renders empty."
@@ -777,7 +781,8 @@ computed for every row, so one odd id would abort a whole view refresh."
     (should (equal "new-id" (claude-code--session-display-name s)))
     (should (equal "new-id"
                    (substring-no-properties
-                    (aref (claude-code--format-session s nil) 2))))))
+                    (aref (claude-code--format-session s nil (current-time))
+                          2))))))
 
 (ert-deftest claude-code-test-group-key ()
   "Grouping keys depend on the current grouping mode."

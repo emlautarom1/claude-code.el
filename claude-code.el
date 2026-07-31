@@ -195,10 +195,11 @@ timestamped line at all).  Cached by FILE's modification time."
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :title, :last-prompt, :last-active,
 :transcript (absolute file) and :worktree -- the worktree's encoded directory
-token, nil for a main-tree transcript.  Both worktree membership and the token
-come from the \"--claude-worktrees-\" directory prefix; the encoding is lossy,
-so the token is a display label, never decoded back into a name or path (see
-docs/storage-model.md)."
+token, nil for a main-tree transcript.  Ids are unique across the result: a
+session's transcript lives in exactly one encoded directory.  Both worktree
+membership and the token come from the \"--claude-worktrees-\" directory
+prefix; the encoding is lossy, so the token is a display label, never decoded
+back into a name or path (see docs/storage-model.md)."
   (let* ((projects (claude-code--projects-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
@@ -323,14 +324,14 @@ is running it and it is dead."
          (live (claude-code--live-status-table))
          (managed (claude-code--live-managed root))
          (transcripts (claude-code--project-transcripts root))
-         (transcript-of (lambda (id)
-                          (seq-find (lambda (d) (equal (plist-get d :id) id))
-                                    transcripts)))
+         (by-id (make-hash-table :test 'equal))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
+    (dolist (tr transcripts)
+      (puthash (plist-get tr :id) tr by-id))
     (pcase-dolist (`(,id . ,buf) managed)
       (let ((info (claude-code--live-info id live))
-            (tr (funcall transcript-of id))
+            (tr (gethash id by-id))
             (reg (gethash id claude-code--managed)))
         (puthash id t seen)
         (push (apply #'claude-code-session--create
@@ -670,13 +671,12 @@ finally the short session id."
       (claude-code-session-last-prompt session)
       (string-limit (claude-code-session-id session) 8)))
 
-(defun claude-code--format-relative-time (time &optional now)
+(defun claude-code--format-relative-time (time now)
   "Return a compact age string for TIME relative to NOW.
-NOW defaults to the current time.  The empty string is returned when TIME is
-nil."
+The empty string is returned when TIME is nil."
   (if (null time)
       ""
-    (let ((secs (max 0 (floor (- (float-time (or now (current-time)))
+    (let ((secs (max 0 (floor (- (float-time now)
                                  (float-time time))))))
       (cond ((< secs 60) (format "%ds" secs))
             ((< secs 3600) (format "%dm" (/ secs 60)))
@@ -684,13 +684,13 @@ nil."
             ((< secs 604800) (format "%dd" (/ secs 86400)))
             (t (format "%dw" (/ secs 604800)))))))
 
-(defun claude-code--format-session (session usage)
+(defun claude-code--format-session (session usage now)
   "Return the column vector for SESSION.
-USAGE is (CPU . RSS) or nil."
+USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
   (let ((status (claude-code--status-display session)))
     (vector (propertize (car status) 'face (cdr status))
             (propertize (claude-code--format-relative-time
-                         (claude-code-session-last-active session))
+                         (claude-code-session-last-active session) now)
                         'face 'shadow)
             (propertize (string-limit (claude-code-session-id session) 8)
                         'face 'shadow)
@@ -754,6 +754,7 @@ A session without a known time sorts as oldest."
   "Return the grouped rows for the current view, honouring collapse state."
   (let ((sessions (claude-code-sessions claude-code--project))
         (snapshot (claude-code--process-snapshot))
+        (now (current-time))
         (buckets (make-hash-table :test 'equal))
         (order '()))
     (clrhash claude-code--session-table)
@@ -780,7 +781,8 @@ A session without a known time sorts as oldest."
                            (list (claude-code-session-id s)
                                  (claude-code--format-session
                                   s (gethash (claude-code-session-id s)
-                                             claude-code--usage-table))))
+                                             claude-code--usage-table)
+                                  now)))
                          rows)))))
      order)))
 
