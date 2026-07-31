@@ -597,9 +597,8 @@ instance, and install title tracking; only the CLI argument list differs."
 
 (ert-deftest claude-code-test-resume-refuses-external ()
   "Resuming a session a `claude' outside Emacs is running is refused.
-The guard is in the model, not in the view, so a headless caller cannot attach
-a second process to a session another one is already driving.  Fixture session
-22222222 has sessions/1002.json, so pinning pid 1002 live makes it external."
+Fixture session 22222222 has sessions/1002.json, so pinning pid 1002 live
+makes it external."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (let ((execs '()))

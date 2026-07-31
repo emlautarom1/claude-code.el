@@ -417,15 +417,12 @@ execvp-style, so it needs no shell escaping."
 ;;;###autoload
 (defun claude-code-mcp-stop ()
   "Stop the Emacs MCP server if it is running.
-A no-op when no server is live, so it is safe to call unconditionally -- on the
-last session's exit, or interactively before any session has spawned."
+A no-op when no server is live, so it is safe to call unconditionally."
   (interactive)
   (when claude-code--mcp-server
     (ignore-errors (ws-stop claude-code--mcp-server))
     (setq claude-code--mcp-server nil)))
 
-;; The server is shared by every session, so it lives exactly as long as the
-;; last managed instance.  Owning that here keeps all MCP knowledge in this file.
 (add-hook 'claude-code-last-instance-exit-hook #'claude-code-mcp-stop)
 
 (provide 'claude-code-mcp)

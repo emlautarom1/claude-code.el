@@ -45,8 +45,7 @@
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
 ;; the byte-compiler happy without pulling the MCP file (and its `web-server'
-;; dependency) in eagerly, and avoids a load cycle.  Its teardown is its own
-;; concern: it hooks `claude-code-last-instance-exit-hook'.
+;; dependency) in eagerly, and avoids a load cycle.
 (declare-function claude-code--mcp-cli-args "claude-code-mcp" (id))
 
 
@@ -146,10 +145,7 @@ as a top-level key.  Point is moved.  Returns nil when no such line exists."
 
 (defun claude-code--read-transcript-fields (file)
   "Read the title, last-prompt and last-active fields from FILE.
-A user-set custom title (what `/rename' writes) wins over Claude's generated
-title; only when there is no custom title does the last `ai-title' apply.
-LAST-ACTIVE is the time of the newest line carrying a real `timestamp' -- the
-last genuine activity -- or nil when the transcript has no timestamped line."
+:last-active is nil when FILE has no timestamped line."
   (with-temp-buffer
     (insert-file-contents file)
     (list :title
@@ -166,11 +162,8 @@ last genuine activity -- or nil when the transcript has no timestamped line."
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
 (defun claude-code--transcript-fields (file)
-  "Return a plist of transcript FILE's cached fields.
-The keys are :id (FILE's base name, the session id), :title, :last-prompt and
-:last-active (the newest genuine activity, from the last timestamped line,
-falling back to FILE's modification time only when the transcript has no
-timestamped line at all).  Cached by FILE's modification time."
+  "Return FILE's :id, :title, :last-prompt and :last-active, cached by mtime.
+The mtime stands in for :last-active when FILE has no timestamped line."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
@@ -473,9 +466,7 @@ Installs `claude-code--ghostel-buffer-name' as a buffer-local
             (substring s 17 20) (substring s 20 32))))
 
 (defvar claude-code-last-instance-exit-hook nil
-  "Hook run once the last managed instance has exited.
-Lets a resource shared by every instance — the MCP server, say — be owned and
-torn down by the layer that created it, without this one knowing about it.")
+  "Hook run once the last managed instance has exited.")
 
 (defun claude-code--on-exit (buffer &optional _event)
   "Unregister the managed session hosted in BUFFER when its process exits.
@@ -545,9 +536,8 @@ not exposed."
 (defun claude-code-resume (project-root id)
   "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
 When Emacs already manages a live instance for ID, focus and return that
-instance rather than starting a second `claude' for the same session.  Refuses a
-session a `claude' outside Emacs is running, so this never attaches a second
-process to a session another one is already driving."
+instance rather than starting a second `claude' for the same session.  Refuses
+a session a `claude' outside Emacs is running."
   (let ((existing (claude-code--managed-buffer id)))
     (cond
      (existing (pop-to-buffer existing) existing)
@@ -893,9 +883,7 @@ model's guard refuses it."
         (claude-code-sessions-refresh)))))
 
 (defun claude-code-sessions-delete ()
-  "Delete the marked dead sessions, or the one at point.
-An external session is not a deletable target: a `claude' outside Emacs is
-still running it."
+  "Delete the marked dead sessions, or the one at point."
   (interactive)
   (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
