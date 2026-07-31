@@ -132,8 +132,6 @@ Neither Ghostel's native module nor the MCP server is wanted under test, so a
         (should (equal (plist-get s2 :last-prompt) "another task here")))
       (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
         (should (plist-get s3 :worktree-p))
-        ;; The cwd is the lossless worktreePath from the transcript, never
-        ;; the lossy encoded-directory suffix.
         (should (equal (plist-get s3 :worktree-path)
                        "/home/test/proj/.claude/worktrees/feat"))
         ;; A user custom title takes precedence over Claude's ai-title.
@@ -161,9 +159,7 @@ cleared first and the temp file deleted afterwards."
        (delete-file ,var))))
 
 (ert-deftest claude-code-test-transcript-fields-last-active ()
-  "`:last-active' is the newest timestamped line, ignoring mtime and metadata.
-The transcript ends in untimestamped metadata and its file mtime is set far in
-the future, yet last-active is the last real event's timestamp."
+  "`:last-active' is the newest timestamped line, ignoring mtime and metadata."
   (claude-code-tests--with-transcript file
       '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:20:00.000Z\"}"
         "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
@@ -184,9 +180,7 @@ the future, yet last-active is the last real event's timestamp."
              1800000000))))
 
 (ert-deftest claude-code-test-transcript-fields-last-active-embedded-timestamp ()
-  "A nested `timestamp' in a `file-history-snapshot' line is not mistaken for one.
-The snapshot's embedded timestamp is newer than the real last event, but
-last-active must still be the event's top-level timestamp."
+  "A nested `timestamp' in a `file-history-snapshot' line is not mistaken for one."
   (claude-code-tests--with-transcript file
       '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"q\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}"
         "{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
@@ -196,9 +190,7 @@ last-active must still be the event's top-level timestamp."
              (date-to-time "2026-06-10T13:23:27.697Z")))))
 
 (ert-deftest claude-code-test-transcript-fields-last-active-snapshot-only ()
-  "A transcript of only `file-history-snapshot' lines has no real top-level
-timestamp, so last-active falls back to the file mtime -- never the embedded
-snapshot timestamp."
+  "With only `file-history-snapshot' lines, last-active falls back to the mtime."
   (claude-code-tests--with-transcript file
       '("{\"type\":\"file-history-snapshot\",\"messageId\":\"m1\",\"snapshot\":{\"trackedFileBackups\":{},\"timestamp\":\"2026-06-10T13:23:40.000Z\"},\"isSnapshotUpdate\":false}")
       1800000000
@@ -230,9 +222,7 @@ snapshot timestamp."
                  (claude-code-tests--find-session
                   ss "33333333-3333-4333-8333-333333333333")))
         ;; A genuinely dead worktree (no sessions/*.json) labels with its own
-        ;; worktree directory, not the parent project.  Its cwd comes from the
-        ;; lossless worktreePath, so a dotted name survives -- the lossy
-        ;; directory encoding is never inverted.
+        ;; worktree directory, not the parent project.
         (let ((solo (claude-code-tests--find-session
                      ss "55555555-5555-4555-8555-555555555555")))
           (should (equal (claude-code-session-cwd solo)
@@ -346,8 +336,7 @@ snapshot timestamp."
   (claude-code-tests--with-fixtures
     (let ((claude-code--managed (make-hash-table :test 'equal)))
       ;; The live sessions file wins.  Session 33333333 is a worktree, so its
-      ;; live cwd is the worktree directory (not the parent project root) -- the
-      ;; whole point of reading the real cwd for a worktree session.
+      ;; live cwd is the worktree directory, not the parent project root.
       (should (equal (claude-code--session-cwd
                       "33333333-3333-4333-8333-333333333333")
                      "/home/test/proj/.claude/worktrees/feat"))
@@ -801,10 +790,7 @@ delete cannot pick one up and abort partway through `claude-code-delete'."
         (kill-buffer buf)))))
 
 (ert-deftest claude-code-test-view-pins-default-directory ()
-  "Opening the view pins `default-directory' to the project root, and the pin
-survives the refresh.  This is what lets project-aware commands (magit,
-`project.el', ...) resolve the current project from the sessions buffer instead
-of prompting."
+  "Opening the view pins `default-directory' to the project root, and it sticks."
   (claude-code-tests--with-fixtures
     (let ((claude-code-refresh-interval nil)
           (root "/home/test/proj")

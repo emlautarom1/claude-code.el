@@ -166,10 +166,7 @@ The registry is global, so a tool left behind would leak into every later
                    "string"))))
 
 (ert-deftest claude-code-mcp-test-tool-schema-shapes ()
-  "A no-arg tool advertises `properties':{}, and an optional arg is omittable.
-Covers the two registry branches the `eval' tool never exercises: nil `:args'
-serializing to an empty JSON object, and an `:optional' arg staying out of
-`required' and not tripping the missing-argument check."
+  "A no-arg tool advertises `properties':{}, and an optional arg is omittable."
   (claude-code-mcp-tests--with-tools '("cc-mcp-test-noargs" "cc-mcp-test-opt")
     (claude-code-mcp-make-tool
      :name "cc-mcp-test-noargs" :description "No args." :handler #'ignore)
@@ -210,15 +207,17 @@ serializing to an empty JSON object, and an `:optional' arg staying out of
     (should (equal (alist-get 'type (aref content 0)) "text"))
     (should (equal (alist-get 'text (aref content 0)) "42"))
     ;; Success is JSON false, not nil (wire-shape check).
+    (should (eq (alist-get 'isError result) :json-false)))
+  ;; Empty code is nil, not a read error.
+  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval ""))))
+    (should (equal (alist-get 'text (aref (alist-get 'content result) 0)) "nil"))
     (should (eq (alist-get 'isError result) :json-false))))
 
 (defvar claude-code-mcp-tests--x nil
   "Scratch special variable for `claude-code-mcp-test-eval-multi-form'.")
 
 (ert-deftest claude-code-mcp-test-eval-multi-form ()
-  "`eval' runs every top-level form and returns the last value.
-The two forms share state through a special variable, bound dynamically so the
-tool's `setq' does not leak past the test."
+  "`eval' runs every top-level form and returns the last value."
   (let* ((claude-code-mcp-tests--x nil)
          (result (alist-get 'result
                             (claude-code-mcp-tests--call-eval
@@ -241,22 +240,18 @@ tool's `setq' does not leak past the test."
   (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval "(+ 1 2) (+ 3"))))
     (should (eq (alist-get 'isError result) t))))
 
-(ert-deftest claude-code-mcp-test-eval-trailing-comment ()
-  "A comment after the last form is ignored rather than read as an error."
-  (let ((result (alist-get 'result
-                           (claude-code-mcp-tests--call-eval "(+ 40 2) ; the answer"))))
-    (should (equal (alist-get 'text (aref (alist-get 'content result) 0)) "42"))
-    (should (eq (alist-get 'isError result) :json-false))))
-
 (ert-deftest claude-code-mcp-test-eval-semicolons-in-code ()
-  "A `;' inside a character literal or a string is code, not a comment.
-Skipping between forms is the Elisp reader's job, so the cases where scanning
-for a bare `;' would truncate a form are pinned here."
+  "A `;' is code in a character literal or string, and a comment elsewhere."
   (dolist (case '(("?;" . "59")
                   ("(list ?; 5)" . "(59 5)")
                   ("\"a;b\"" . "\"a;b\"")
                   ;; A leading comment, and a comment between two forms.
                   (";; lead\n(+ 1 2) ; mid\n(* 2 3)" . "6")
+                  ;; A comment after the last form, skipped before the loop ends.
+                  ("(+ 40 2) ; the answer" . "42")
+                  ;; A comment holding an unbalanced delimiter is skipped by
+                  ;; syntax, so it never reaches the reader.
+                  ("(+ 1 2) ; )" . "3")
                   ;; Nothing but comments evaluates to nil, not a read error.
                   (";; just a comment" . "nil")))
     (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval (car case)))))
@@ -422,8 +417,7 @@ all non-nil in Lisp, so each must arrive as nil."
 (defun claude-code-mcp-tests--http-send (port request)
   "Send raw REQUEST bytes to loopback PORT and return the raw response string.
 Detects end-of-response by the server closing the connection (it sends no
-Content-Length), via the client process leaving the open/connect/run states --
-never a fixed timeout on the payload."
+Content-Length), via the client process leaving the open/connect/run states."
   (let* ((response "")
          (closed nil)
          (proc (make-network-process
@@ -552,7 +546,6 @@ Returns nil for an empty (notification) reply that carries no body."
   "A `Content-Length' larger than the delivered body yields a -32700 error."
   (claude-code-mcp-tests--with-server port
     (let* ((body "{\"jsonrpc\":\"2.0\"}")
-           ;; Declare ten more bytes than we actually send.
            (resp (claude-code-mcp-tests--response-body
                   (claude-code-mcp-tests--http-post
                    port "/mcp/sess" body (+ (string-bytes body) 10)))))
