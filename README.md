@@ -45,6 +45,7 @@ Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-cod
 | Key       | Action                                                      |
 | --------- | ----------------------------------------------------------- |
 | `RET`     | focus an alive session / resume a dead one / toggle a group |
+| `o`       | like `RET`, but visit the session in another window         |
 | `TAB`     | collapse or expand the group at point                       |
 | `n`       | spawn a new session (see `?` for options)                   |
 | `k`       | kill the marked instances, or the one at point              |

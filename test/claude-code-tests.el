@@ -592,19 +592,16 @@ instance, and install title tracking; only the CLI argument list differs."
                                               buffer)
                           #'claude-code--ghostel-buffer-name)))))))))
 
-(ert-deftest claude-code-test-resume-focuses-existing ()
-  "Resuming an already-managed live session focuses it and spawns nothing."
+(ert-deftest claude-code-test-resume-returns-existing ()
+  "Resuming an already-managed live session returns it and spawns nothing."
   (claude-code-tests--with-managed-buffer buf
-    (let ((focused nil) (spawned nil))
+    (let ((spawned nil))
       (puthash "id-x" (list :buffer buf :origin "/r") claude-code--managed)
       (cl-letf (((symbol-function 'claude-code--session-process)
                  (lambda (b) (and (eq b buf) 'proc)))
-                ((symbol-function 'switch-to-buffer)
-                 (lambda (b &rest _) (setq focused b)))
                 ((symbol-function 'ghostel-exec)
                  (lambda (&rest _) (setq spawned t))))
         (should (eq (claude-code-resume "/r" "id-x") buf))
-        (should (eq focused buf))
         (should-not spawned)
         ;; No second registry entry was created for the same id.
         (should (= (hash-table-count claude-code--managed) 1))))))
@@ -861,7 +858,7 @@ delete cannot pick one up and abort partway through `claude-code-delete'."
       (should (equal (funcall ids 'dead) '("d"))))))
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
-  "RET focuses alive rows, resumes and displays via the model otherwise.
+  "RET displays alive rows in the selected window, resuming otherwise.
 A dead row prompts first; an external row reaches `claude-code-resume'
 without a prompt, so the model's guard is the only refusal
 \(`claude-code-test-resume-refuses-external')."
@@ -871,8 +868,8 @@ without a prompt, so the model's guard is the only refusal
         (at-point nil) (answer nil) (calls '()))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point))
-              ((symbol-function 'claude-code-focus)
-               (lambda (s) (push (list 'focus (claude-code-session-id s)) calls)))
+              ((symbol-function 'claude-code--buffer)
+               (lambda (_s) 'terminal))
               ((symbol-function 'claude-code-resume)
                (lambda (root id) (push (list 'resume root id) calls) 'terminal))
               ((symbol-function 'switch-to-buffer)
@@ -888,10 +885,10 @@ without a prompt, so the model's guard is the only refusal
         ;; A group header (no session at point) toggles.
         (claude-code-sessions-visit)
         (should (equal calls '((toggle))))
-        ;; An alive row focuses, without a prompt.
+        ;; An alive row lands in the selected window, without a prompt.
         (setq at-point alive calls nil)
         (claude-code-sessions-visit)
-        (should (equal calls '((focus "a"))))
+        (should (equal calls '((switch terminal))))
         ;; An external row goes to the model unprompted, and the returned
         ;; buffer lands in the selected window after the redraw.
         (setq at-point external calls nil)
@@ -907,6 +904,25 @@ without a prompt, so the model's guard is the only refusal
         (setq calls nil answer nil)
         (claude-code-sessions-visit)
         (should (equal calls '((ask))))))))
+
+(ert-deftest claude-code-test-sessions-visit-other-window ()
+  "`o' shows the row's buffer in another window; a header line is refused.
+The liveness dispatch is shared with RET
+\(`claude-code-test-sessions-visit-dispatch')."
+  (let ((alive (claude-code-session--create :id "a" :alive-p t))
+        (at-point nil) (shown nil))
+    (cl-letf (((symbol-function 'claude-code--session-at-point)
+               (lambda () at-point))
+              ((symbol-function 'claude-code--buffer)
+               (lambda (_s) 'terminal))
+              ((symbol-function 'switch-to-buffer-other-window)
+               (lambda (b) (setq shown b))))
+      (claude-code-tests--in-view
+        (should-error (claude-code-sessions-visit-other-window)
+                      :type 'user-error)
+        (setq at-point alive)
+        (claude-code-sessions-visit-other-window)
+        (should (eq shown 'terminal))))))
 
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."

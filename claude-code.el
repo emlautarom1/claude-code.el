@@ -538,15 +538,14 @@ name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
 ;;;###autoload
 (defun claude-code-resume (project-root id)
   "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
-When Emacs already manages a live instance for ID, focus and return that
-instance rather than starting a second `claude' for the same session.  Refuses
+When Emacs already manages a live instance for ID, return that instance's
+buffer rather than starting a second `claude' for the same session.  Refuses
 a session a `claude' outside Emacs is running."
-  (let ((existing (claude-code--managed-buffer id)))
-    (cond
-     (existing (switch-to-buffer existing) existing)
-     ((claude-code--external-p id)
-      (user-error "Session %s is running outside Emacs" id))
-     (t (claude-code--launch id project-root :resume id)))))
+  (cond
+   ((claude-code--managed-buffer id))
+   ((claude-code--external-p id)
+    (user-error "Session %s is running outside Emacs" id))
+   (t (claude-code--launch id project-root :resume id))))
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer."
@@ -827,25 +826,36 @@ latter case the row's session determines the enclosing group."
       (push group claude-code--collapsed))
     (claude-code-sessions-refresh)))
 
+(defun claude-code--visit-session (session display)
+  "Show SESSION's instance buffer through DISPLAY, resuming it first when dead.
+A dead session is resumed after confirmation."
+  (let ((liveness (claude-code--session-liveness session)))
+    (cond
+     ((eq liveness 'alive) (funcall display (claude-code--buffer session)))
+     ((or (eq liveness 'external)
+          (y-or-n-p "Session is dead.  Resume it? "))
+      (let ((buffer (claude-code-resume claude-code--project
+                                        (claude-code-session-id session))))
+        (claude-code-sessions-refresh)
+        (funcall display buffer))))))
+
 (defun claude-code-sessions-visit ()
   "Visit the session at point in the selected window, or toggle a group.
 A dead session is resumed first, after confirmation."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (let* ((session (claude-code--session-at-point))
-         (liveness (and session (claude-code--session-liveness session))))
-    (cond
-     ((null session) (claude-code-sessions-toggle-group))
-     ((eq liveness 'alive) (claude-code-focus session))
-     ((or (eq liveness 'external)
-          (y-or-n-p "Session is dead.  Resume it? "))
-      ;; A stale row can resolve to an already-managed instance, and resuming
-      ;; one selects its terminal — so aim the redraw at the view buffer.
-      (let ((view (current-buffer))
-            (buffer (claude-code-resume claude-code--project
-                                        (claude-code-session-id session))))
-        (with-current-buffer view (claude-code-sessions-refresh))
-        (switch-to-buffer buffer))))))
+  (if-let* ((session (claude-code--session-at-point)))
+      (claude-code--visit-session session #'switch-to-buffer)
+    (claude-code-sessions-toggle-group)))
+
+(defun claude-code-sessions-visit-other-window ()
+  "Visit the session at point in another window.
+A dead session is resumed first, after confirmation."
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
+  (claude-code--visit-session (or (claude-code--session-at-point)
+                                  (user-error "No session on this line"))
+                              #'switch-to-buffer-other-window))
 
 (defun claude-code-sessions-mark ()
   "Mark the session on the current line."
@@ -945,6 +955,7 @@ keypress spawns with no options."
   :doc "Keymap for `claude-code-sessions-mode'."
   "g"   #'claude-code-sessions-refresh
   "RET" #'claude-code-sessions-visit
+  "o"   #'claude-code-sessions-visit-other-window
   "TAB" #'claude-code-sessions-toggle-group
   "n"   #'claude-code-sessions-new
   "k"   #'claude-code-sessions-kill
@@ -996,6 +1007,7 @@ keypress spawns with no options."
    ("n" "New session" claude-code-sessions-new)]
   [["Session"
     ("RET" "Focus / resume" claude-code-sessions-visit)
+    ("o" "Focus other window" claude-code-sessions-visit-other-window)
     ("r" "Rename" claude-code-sessions-rename)
     ("i" "Interrupt" claude-code-sessions-interrupt)
     ("s" "Send text" claude-code-sessions-send)]
