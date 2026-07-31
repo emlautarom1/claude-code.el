@@ -28,6 +28,20 @@ table is empty) and rebinds `claude-code--managed' to a fresh table, so
          (claude-code--managed (make-hash-table :test 'equal)))
      ,@body))
 
+(defmacro claude-code-mcp-tests--with-server (port &rest body)
+  "Start an isolated MCP server, bind PORT to its port, and run BODY.
+The server is stopped afterwards, and PORT is asserted to be a real one so
+every caller starts from a listening server."
+  (declare (indent 1))
+  `(claude-code-mcp-tests--isolated
+     (let ((claude-code-mcp-enabled t)
+           (claude-code--mcp-server nil))
+       (unwind-protect
+           (let ((,port (claude-code--mcp-ensure-server)))
+             (should (integerp ,port))
+             ,@body)
+         (claude-code-mcp-stop)))))
+
 (defmacro claude-code-mcp-tests--with-tools (names &rest body)
   "Run BODY, then unregister the tools named in NAMES.
 The registry is global, so a tool left behind would leak into every later
@@ -372,30 +386,20 @@ all non-nil in Lisp, so each must arrive as nil."
     (should (null (claude-code--mcp-port)))))
 
 (ert-deftest claude-code-mcp-test-stops-with-the-last-instance ()
-  "The shared server is torn down by the last instance to exit, not the first.
-Lifetime is this module's own concern: it hooks
-`claude-code-last-instance-exit-hook', which the core runs once its registry
-empties, so the core carries no MCP knowledge."
-  (should (memq #'claude-code-mcp-stop claude-code-last-instance-exit-hook))
+  "The shared server is torn down by the last instance to exit, not the first."
   (claude-code-tests--with-managed-buffer buf
-    (let ((claude-code-mcp-enabled t)
-          (claude-code--mcp-server nil)
-          (other (generate-new-buffer " *cc-other*")))
-      (unwind-protect
-          (progn
-            (should (integerp (claude-code--mcp-ensure-server)))
-            (puthash "a" (list :buffer buf) claude-code--managed)
-            (puthash "b" (list :buffer other) claude-code--managed)
-            ;; One of two exiting leaves the server up for the survivor.
-            (claude-code--on-exit buf)
-            (should (= (hash-table-count claude-code--managed) 1))
-            (should claude-code--mcp-server)
-            ;; The last one takes it down.
-            (claude-code--on-exit other)
-            (should (zerop (hash-table-count claude-code--managed)))
-            (should-not claude-code--mcp-server))
-        (when (buffer-live-p other) (kill-buffer other))
-        (claude-code-mcp-stop)))))
+    (claude-code-tests--with-managed-buffer other
+      (claude-code-mcp-tests--with-server _port
+        (puthash "a" (list :buffer buf) claude-code--managed)
+        (puthash "b" (list :buffer other) claude-code--managed)
+        ;; One of two exiting leaves the server up for the survivor.
+        (claude-code--on-exit buf)
+        (should (= (hash-table-count claude-code--managed) 1))
+        (should claude-code--mcp-server)
+        ;; The last one takes it down.
+        (claude-code--on-exit other)
+        (should (zerop (hash-table-count claude-code--managed)))
+        (should-not claude-code--mcp-server)))))
 
 (ert-deftest claude-code-mcp-test-ensure-server-idempotent ()
   "Ensuring twice yields one listener on the same port; stop tears it down."
@@ -414,20 +418,6 @@ empties, so the core carries no MCP knowledge."
     (should (null (claude-code--mcp-port)))))
 
 ;;;; In-Emacs socket end-to-end (real loopback, no claude/ghostel)
-
-(defmacro claude-code-mcp-tests--with-server (port &rest body)
-  "Start an isolated MCP server, bind PORT to its port, and run BODY.
-The server is stopped afterwards, and PORT is asserted to be a real one so
-every caller starts from a listening server."
-  (declare (indent 1))
-  `(claude-code-mcp-tests--isolated
-     (let ((claude-code-mcp-enabled t)
-           (claude-code--mcp-server nil))
-       (unwind-protect
-           (let ((,port (claude-code--mcp-ensure-server)))
-             (should (integerp ,port))
-             ,@body)
-         (claude-code-mcp-stop)))))
 
 (defun claude-code-mcp-tests--http-send (port request)
   "Send raw REQUEST bytes to loopback PORT and return the raw response string.
