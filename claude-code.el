@@ -822,9 +822,15 @@ its model operation accepts."
 
 ;;;;; Commands
 
+(defun claude-code--ensure-sessions-mode ()
+  "Signal a `user-error' unless the current buffer is a sessions view."
+  (unless (derived-mode-p 'claude-code-sessions-mode)
+    (user-error "Not in a Claude sessions buffer")))
+
 (defun claude-code-sessions-refresh ()
   "Recompute and redraw the sessions view."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (tabulated-list-print t)
   (claude-code--reapply-marks))
 
@@ -832,7 +838,8 @@ its model operation accepts."
   "Collapse or expand the group at point.
 Works whether point is on a group header or on one of the group's rows: in the
 latter case the row's session determines the enclosing group."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (when-let* ((group (or (get-text-property (line-beginning-position)
                                             'claude-code-group)
                          (when-let* ((s (claude-code--session-at-point)))
@@ -846,7 +853,8 @@ latter case the row's session determines the enclosing group."
   "Focus an alive session, offer to resume a dead one, or toggle a group.
 An external session is handed to `claude-code-resume' unprompted; the
 model's guard refuses it."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (let* ((session (claude-code--session-at-point))
          (liveness (and session (claude-code--session-liveness session))))
     (cond
@@ -854,73 +862,95 @@ model's guard refuses it."
      ((eq liveness 'alive) (claude-code-focus session))
      ((or (eq liveness 'external)
           (y-or-n-p "Session is dead.  Resume it? "))
-      (claude-code-resume claude-code--project (claude-code-session-id session))
-      (claude-code-sessions-refresh)))))
+      ;; A stale row can resolve to an already-managed instance, and resuming
+      ;; one pops to its terminal — so aim the redraw at the view buffer.
+      (let ((view (current-buffer)))
+        (claude-code-resume claude-code--project (claude-code-session-id session))
+        (with-current-buffer view (claude-code-sessions-refresh)))))))
 
 (defun claude-code-sessions-mark ()
   "Mark the session on the current line."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
     (cl-pushnew (claude-code-session-id s) claude-code--marks :test #'equal)
     (tabulated-list-put-tag "*" t)))
 
 (defun claude-code-sessions-unmark ()
   "Unmark the session on the current line."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
     (setq claude-code--marks (delete (claude-code-session-id s) claude-code--marks))
     (tabulated-list-put-tag " " t)))
 
 (defun claude-code-sessions-kill ()
   "Kill the marked instances, or the one at point."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (let ((targets (claude-code--target-sessions 'alive)))
     (if (null targets)
         (user-error "No alive session selected")
       (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
         (mapc #'claude-code-kill targets)
-        (setq claude-code--marks nil)
+        (setq claude-code--marks
+              (cl-set-difference claude-code--marks
+                                 (mapcar #'claude-code-session-id targets)
+                                 :test #'equal))
         (claude-code-sessions-refresh)))))
 
 (defun claude-code-sessions-delete ()
   "Delete the marked dead sessions, or the one at point."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
         (user-error "No dead session selected")
       (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))
         (mapc #'claude-code-delete targets)
-        (setq claude-code--marks nil)
+        (setq claude-code--marks
+              (cl-set-difference claude-code--marks
+                                 (mapcar #'claude-code-session-id targets)
+                                 :test #'equal))
         (claude-code-sessions-refresh)))))
 
 (defun claude-code-sessions-rename ()
   "Rename the session at point."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
     (claude-code-rename s (read-string "New name: "))))
 
 (defun claude-code-sessions-interrupt ()
   "Interrupt (SIGINT) the session at point."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
     (claude-code-interrupt s)))
 
 (defun claude-code-sessions-send ()
   "Send a line of text to the session at point."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
     (claude-code-send-text s (read-string "Send: ") t)))
 
 (defun claude-code-sessions-cycle-grouping ()
   "Toggle grouping between status and alive/dead state."
-  (interactive)
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (setq claude-code--group-by
         (if (eq claude-code--group-by 'status) 'state 'status))
   (claude-code-sessions-refresh))
 
 (defun claude-code-sessions-new (&optional args)
-  "Spawn a new session, reading options from the transient ARGS."
-  (interactive (list (transient-args 'claude-code-menu)))
+  "Spawn a new session, reading options from the transient ARGS.
+The menu's saved values apply only when invoked from the menu; a direct
+keypress spawns with no options."
+  (interactive (list (when (eq transient-current-command 'claude-code-menu)
+                       (transient-args 'claude-code-menu)))
+               claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
   (let ((prompt (read-string "Initial prompt (empty for none): ")))
     (claude-code-spawn
      claude-code--project
@@ -987,8 +1017,9 @@ model's guard refuses it."
 
 ;;;;; Transient
 
+;;;###autoload
 (transient-define-prefix claude-code-menu ()
-  "Dispatch actions for the Claude sessions view."
+  "Dispatch actions for the sessions view, opening it first when needed."
   ["Spawn options"
    ("-w" "Worktree" "--worktree")
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))]
@@ -1007,7 +1038,14 @@ model's guard refuses it."
    ["View"
     ("G" "Cycle grouping" claude-code-sessions-cycle-grouping)
     ("TAB" "Toggle group" claude-code-sessions-toggle-group)
-    ("g" "Refresh" claude-code-sessions-refresh)]])
+    ("g" "Refresh" claude-code-sessions-refresh)]]
+  (interactive)
+  (unless (derived-mode-p 'claude-code-sessions-mode)
+    (claude-code)
+    ;; `display-buffer' customizations can leave the view unselected, where
+    ;; every suffix would fail; refuse up front instead.
+    (claude-code--ensure-sessions-mode))
+  (transient-setup 'claude-code-menu))
 
 ;;;###autoload
 (defun claude-code ()

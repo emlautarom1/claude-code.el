@@ -35,12 +35,12 @@ For `use-package` users:
 ```elisp
 (use-package claude-code
   :vc (:url "https://github.com/emlautarom1/claude-code.el" :rev :newest)
-  :commands (claude-code))
+  :commands (claude-code claude-code-menu))
 ```
 
 ## Usage
 
-Run `M-x claude-code` in a project. Keys in the sessions view:
+Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-code-menu` from anywhere to open it together with the action menu; both use the current project, prompting for one when there is none. Keys in the sessions view:
 
 | Key       | Action                                                      |
 | --------- | ----------------------------------------------------------- |

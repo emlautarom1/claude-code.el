@@ -57,6 +57,14 @@ so no pid is its own ancestor and a subtree walk always terminates."
                   (lambda (p) (and (memql p ,live) '((ppid . 0))))))
          ,@body))))
 
+(defmacro claude-code-tests--in-view (&rest body)
+  "Run BODY in a temp buffer with the sessions view enabled and its timer off."
+  (declare (indent 0))
+  `(let ((claude-code-refresh-interval nil))
+     (with-temp-buffer
+       (claude-code-sessions-mode)
+       ,@body)))
+
 (defmacro claude-code-tests--without-requiring (features &rest body)
   "Run BODY with a `require' of any feature in FEATURES a no-op.
 Every other feature still loads normally.  Shadowing `features' itself would
@@ -850,8 +858,7 @@ delete cannot pick one up and abort partway through `claude-code-delete'."
   "RET focuses alive rows, resumes via the model otherwise, prompting on dead.
 An external row reaches `claude-code-resume' without a prompt, so the model's
 guard is the only refusal (`claude-code-test-resume-refuses-external')."
-  (let ((claude-code--project "/r")
-        (alive (claude-code-session--create :id "a" :alive-p t))
+  (let ((alive (claude-code-session--create :id "a" :alive-p t))
         (external (claude-code-session--create :id "e" :external-p t))
         (dead (claude-code-session--create :id "d"))
         (at-point nil) (answer nil) (calls '()))
@@ -867,25 +874,27 @@ guard is the only refusal (`claude-code-test-resume-refuses-external')."
                (lambda () (push '(toggle) calls)))
               ((symbol-function 'y-or-n-p)
                (lambda (_) (push '(ask) calls) answer)))
-      ;; A group header (no session at point) toggles.
-      (claude-code-sessions-visit)
-      (should (equal calls '((toggle))))
-      ;; An alive row focuses, without a prompt.
-      (setq at-point alive calls nil)
-      (claude-code-sessions-visit)
-      (should (equal calls '((focus "a"))))
-      ;; An external row goes to the model unprompted.
-      (setq at-point external calls nil)
-      (claude-code-sessions-visit)
-      (should (equal (reverse calls) '((resume "/r" "e") (refresh))))
-      ;; A dead row asks first: yes resumes and refreshes...
-      (setq at-point dead calls nil answer t)
-      (claude-code-sessions-visit)
-      (should (equal (reverse calls) '((ask) (resume "/r" "d") (refresh))))
-      ;; ...no stops at the prompt.
-      (setq calls nil answer nil)
-      (claude-code-sessions-visit)
-      (should (equal calls '((ask)))))))
+      (claude-code-tests--in-view
+        (setq-local claude-code--project "/r")
+        ;; A group header (no session at point) toggles.
+        (claude-code-sessions-visit)
+        (should (equal calls '((toggle))))
+        ;; An alive row focuses, without a prompt.
+        (setq at-point alive calls nil)
+        (claude-code-sessions-visit)
+        (should (equal calls '((focus "a"))))
+        ;; An external row goes to the model unprompted.
+        (setq at-point external calls nil)
+        (claude-code-sessions-visit)
+        (should (equal (reverse calls) '((resume "/r" "e") (refresh))))
+        ;; A dead row asks first: yes resumes and refreshes...
+        (setq at-point dead calls nil answer t)
+        (claude-code-sessions-visit)
+        (should (equal (reverse calls) '((ask) (resume "/r" "d") (refresh))))
+        ;; ...no stops at the prompt.
+        (setq calls nil answer nil)
+        (claude-code-sessions-visit)
+        (should (equal calls '((ask))))))))
 
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."
@@ -941,6 +950,106 @@ guard is the only refusal (`claude-code-test-resume-refuses-external')."
                              (file-name-as-directory
                               (claude-code--normalize-root root))))))
         (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest claude-code-test-view-commands-are-view-scoped ()
+  "Every view command carries the mode tag and refuses other buffers.
+The commands are found by naming convention, so a new sessions command is
+held to the same contract without touching this test.  Refusing means
+failing before doing anything: no prompt is read and no buffer-local state
+is created in the foreign buffer."
+  (let ((cmds nil)
+        (prompt (lambda (&rest _) (ert-fail "Prompted before the guard"))))
+    (mapatoms (lambda (sym)
+                (when (and (commandp sym)
+                           (string-prefix-p "claude-code-sessions-"
+                                            (symbol-name sym))
+                           ;; The mode function shares the prefix but is not
+                           ;; a view command.
+                           (not (eq sym 'claude-code-sessions-mode)))
+                  (push sym cmds))))
+    (should (<= 12 (length cmds)))
+    (cl-letf (((symbol-function 'read-string) prompt)
+              ((symbol-function 'y-or-n-p) prompt)
+              ((symbol-function 'yes-or-no-p) prompt))
+      (dolist (cmd cmds)
+        (should (equal (command-modes cmd) '(claude-code-sessions-mode)))
+        (with-temp-buffer
+          ;; The guard's own error, not an incidental one from deeper in the
+          ;; command (kill/delete signal a user-error even without the guard).
+          (should (equal (should-error (funcall cmd) :type 'user-error)
+                         '(user-error "Not in a Claude sessions buffer")))
+          (should-not
+           (seq-filter (lambda (local)
+                         (string-prefix-p
+                          "claude-code-"
+                          (symbol-name (if (consp local) (car local) local))))
+                       (buffer-local-variables))))))))
+
+(ert-deftest claude-code-test-menu-opens-view-first ()
+  "The menu works from any buffer, dispatching over the project's view.
+The view must be the current buffer by the time the transient is set up,
+so its suffixes land on it."
+  (let ((claude-code-refresh-interval nil)
+        (calls '()))
+    (cl-letf (((symbol-function 'claude-code)
+               (lambda ()
+                 (push 'open calls)
+                 (claude-code-sessions-mode)))
+              ((symbol-function 'transient-setup)
+               (lambda (&rest _)
+                 (push (list 'menu (derived-mode-p 'claude-code-sessions-mode))
+                       calls))))
+      (with-temp-buffer
+        (claude-code-menu)
+        (should (equal (reverse calls)
+                       '(open (menu claude-code-sessions-mode)))))
+      (setq calls nil)
+      (with-temp-buffer
+        (claude-code-sessions-mode)
+        (claude-code-menu)
+        (should (equal calls '((menu claude-code-sessions-mode))))))))
+
+(ert-deftest claude-code-test-sessions-new-ignores-saved-menu-args ()
+  "A direct `n' spawns with no options; only a live menu's args apply."
+  (let ((spawn-args nil))
+    (cl-letf (((symbol-function 'claude-code-spawn)
+               (lambda (root &rest kw) (setq spawn-args (cons root kw))))
+              ((symbol-function 'claude-code-sessions-refresh) #'ignore)
+              ((symbol-function 'read-string) (lambda (&rest _) ""))
+              ;; Simulate a saved/set prefix value lingering in transient.
+              ((symbol-function 'transient-args)
+               (lambda (_) '("--worktree" "--model=opus"))))
+      (claude-code-tests--in-view
+        (setq-local claude-code--project "/r")
+        (call-interactively #'claude-code-sessions-new)
+        (should (equal spawn-args '("/r" :prompt nil :worktree nil :model nil)))
+        (let ((transient-current-command 'claude-code-menu))
+          (call-interactively #'claude-code-sessions-new))
+        (should (equal spawn-args
+                       '("/r" :prompt nil :worktree t :model "opus")))))))
+
+(ert-deftest claude-code-test-kill-and-delete-keep-unacted-marks ()
+  "Kill and delete drop only the marks they consumed."
+  (let* ((acted '())
+         (record (lambda (s) (push (claude-code-session-id s) acted))))
+    (cl-letf (((symbol-function 'claude-code-kill) record)
+              ((symbol-function 'claude-code-delete) record)
+              ((symbol-function 'yes-or-no-p) (lambda (_) t))
+              ((symbol-function 'claude-code-sessions-refresh) #'ignore))
+      (claude-code-tests--in-view
+        (puthash "a" (claude-code-session--create :id "a" :alive-p t)
+                 claude-code--session-table)
+        (puthash "d" (claude-code-session--create :id "d")
+                 claude-code--session-table)
+        (setq-local claude-code--marks (list "a" "d"))
+        ;; Kill acts on the alive mark only; the dead mark must survive.
+        (claude-code-sessions-kill)
+        (should (equal acted '("a")))
+        (should (equal claude-code--marks '("d")))
+        ;; Delete then consumes the remaining dead mark.
+        (claude-code-sessions-delete)
+        (should (equal acted '("d" "a")))
+        (should-not claude-code--marks)))))
 
 ;;;; Integration (real Ghostel + real `claude')
 ;;
