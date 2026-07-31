@@ -8,7 +8,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 
 - **Per-project sessions view** (`M-x claude-code`) — a `tabulated-list-mode` buffer listing every session of the current `project.el` project, alive and dead.
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
-- **Live status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
+- **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a chosen model, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
 - **`transient` menu** (`?`) for spawn options and actions.

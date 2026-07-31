@@ -58,12 +58,11 @@ so no pid is its own ancestor and a subtree walk always terminates."
          ,@body))))
 
 (defmacro claude-code-tests--in-view (&rest body)
-  "Run BODY in a temp buffer with the sessions view enabled and its timer off."
+  "Run BODY in a temp buffer with the sessions view enabled."
   (declare (indent 0))
-  `(let ((claude-code-refresh-interval nil))
-     (with-temp-buffer
-       (claude-code-sessions-mode)
-       ,@body)))
+  `(with-temp-buffer
+     (claude-code-sessions-mode)
+     ,@body))
 
 (defmacro claude-code-tests--without-requiring (features &rest body)
   "Run BODY with a `require' of any feature in FEATURES a no-op.
@@ -899,8 +898,7 @@ guard is the only refusal (`claude-code-test-resume-refuses-external')."
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."
   (claude-code-tests--with-fixtures
-    (let ((claude-code-refresh-interval nil)
-          (buf (get-buffer-create " *cc-view-test*")))
+    (let ((buf (get-buffer-create " *cc-view-test*")))
       (unwind-protect
           (with-current-buffer buf
             (cl-letf (((symbol-function 'claude-code--live-managed)
@@ -933,8 +931,7 @@ guard is the only refusal (`claude-code-test-resume-refuses-external')."
 (ert-deftest claude-code-test-view-pins-default-directory ()
   "Opening the view pins `default-directory' to the project root, and it sticks."
   (claude-code-tests--with-fixtures
-    (let ((claude-code-refresh-interval nil)
-          (root "/home/test/proj")
+    (let ((root "/home/test/proj")
           (buf nil))
       (unwind-protect
           (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
@@ -989,8 +986,7 @@ is created in the foreign buffer."
   "The menu works from any buffer, dispatching over the project's view.
 The view must be the current buffer by the time the transient is set up,
 so its suffixes land on it."
-  (let ((claude-code-refresh-interval nil)
-        (calls '()))
+  (let ((calls '()))
     (cl-letf (((symbol-function 'claude-code)
                (lambda ()
                  (push 'open calls)

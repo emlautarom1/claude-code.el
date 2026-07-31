@@ -608,17 +608,6 @@ transcript and the next refresh reads it back through
 ;; status or by liveness (Emacs 30 `tabulated-list-groups' prints a header line
 ;; per group); a collapsed group simply contributes no entry rows.
 
-(defcustom claude-code-refresh-interval 2
-  "Seconds between automatic refreshes of a sessions view.
-nil disables automatic refreshing.
-
-Each refresh reparses the sessions files (a few ms even for ~100 instances, so
-it is not cached) and takes one full snapshot of the system process table for
-CPU/memory.  That snapshot dominates the cost — around 40 ms on a busy machine
-with several hundred processes — so on a very busy host raise this interval
-rather than adding caching or throttling machinery."
-  :type '(choice (const :tag "Disabled" nil) number))
-
 (defvar-local claude-code--project nil
   "Project root a sessions view is scoped to.")
 (defvar-local claude-code--group-by 'status
@@ -633,8 +622,6 @@ folded.")
   "Hash of session id -> struct for the rows currently displayed.")
 (defvar-local claude-code--usage-table nil
   "Hash of session id -> (CPU . RSS) for the rows currently displayed.")
-(defvar-local claude-code--refresh-timer nil
-  "Repeating timer refreshing a sessions view, if any.")
 
 ;;;;; Formatting
 
@@ -807,18 +794,6 @@ its model operation accepts."
         (seq-filter (lambda (s) (eq liveness (claude-code--session-liveness s)))
                     targets)
       targets)))
-
-(defun claude-code--maybe-refresh (buffer)
-  "Refresh BUFFER when it is live and visible."
-  (when (and (buffer-live-p buffer) (get-buffer-window buffer 'visible))
-    (with-current-buffer buffer
-      (let ((inhibit-message t))
-        (claude-code-sessions-refresh)))))
-
-(defun claude-code--cancel-refresh ()
-  "Cancel the view's refresh timer."
-  (when (timerp claude-code--refresh-timer)
-    (cancel-timer claude-code--refresh-timer)))
 
 ;;;;; Commands
 
@@ -1001,19 +976,7 @@ keypress spawns with no options."
   (setq-local tabulated-list-sort-key '("Active" . t))
   (setq-local tabulated-list-entries #'ignore)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
-  (tabulated-list-init-header)
-  (when claude-code-refresh-interval
-    (setq-local claude-code--refresh-timer
-                (run-at-time claude-code-refresh-interval
-                             claude-code-refresh-interval
-                             #'claude-code--maybe-refresh (current-buffer))))
-  ;; Cancel the timer when the buffer dies or its major mode is replaced.
-  ;; `change-major-mode-hook' runs before `kill-all-local-variables' wipes the
-  ;; timer reference, so re-running the mode (or switching away) cancels the
-  ;; old timer rather than orphaning it.  Both hooks and the
-  ;; `ghostel-exit-functions' entry go through `add-hook', which de-duplicates.
-  (add-hook 'kill-buffer-hook #'claude-code--cancel-refresh nil t)
-  (add-hook 'change-major-mode-hook #'claude-code--cancel-refresh nil t))
+  (tabulated-list-init-header))
 
 ;;;;; Transient
 
