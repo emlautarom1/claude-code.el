@@ -1189,15 +1189,16 @@ so its spawn suffix lands on it."
                (lambda (root &rest kw) (setq spawn-args (cons root kw))))
               ((symbol-function 'claude-code-sessions-refresh) #'ignore)
               ((symbol-function 'read-string) (lambda (&rest _) ""))
-              ;; Mirror `transient-args': live args for the invoking prefix,
-              ;; nil when no transient is current.
+              ;; Transient signals on a nil prefix, so hold the command to that
+              ;; contract whichever version is installed.
               ((symbol-function 'transient-args)
                (lambda (prefix)
-                 (when prefix
-                   '("--worktree" "--model=opus" "--effort=xhigh")))))
+                 (unless prefix (error "Not a transient prefix: nil"))
+                 '("--worktree" "--model=opus" "--effort=xhigh"))))
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
-        (call-interactively #'claude-code-sessions-new)
+        (let ((transient-current-command nil))
+          (call-interactively #'claude-code-sessions-new))
         (should (equal spawn-args
                        '("/r" :prompt nil :worktree nil :model nil :effort nil)))
         (let ((transient-current-command 'claude-code-spawn-menu))

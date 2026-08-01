@@ -1023,7 +1023,8 @@ A dead session is resumed first, after confirmation."
   "Spawn a new session, reading options from the transient ARGS.
 Invoked outside a transient menu, ARGS is nil and the spawn takes no
 options."
-  (interactive (list (transient-args transient-current-command))
+  (interactive (list (when transient-current-command
+                       (transient-args transient-current-command)))
                claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (let ((prompt (read-string "Initial prompt (empty for none): ")))
