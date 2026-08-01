@@ -772,6 +772,36 @@ A session without a known time sorts as oldest."
   (when-let* ((id (tabulated-list-get-id)))
     (gethash id claude-code--session-table)))
 
+(defun claude-code--group-at-point ()
+  "Return the key of the group the current line belongs to, or nil.
+Point may be on the group header or on one of the group's rows."
+  (or (get-text-property (line-beginning-position) 'claude-code-group)
+      (when-let* ((s (claude-code--session-at-point)))
+        (claude-code--group-key s))))
+
+(defun claude-code--goto-line-where (predicate)
+  "Move point to the first line PREDICATE, called at its start, accepts.
+Return nil and leave point alone when no line matches."
+  (when-let* ((pos (save-excursion
+                     (goto-char (point-min))
+                     (catch 'found
+                       (while (not (eobp))
+                         (when (funcall predicate) (throw 'found (point)))
+                         (forward-line 1))))))
+    (goto-char pos)))
+
+(defun claude-code--goto-group (key)
+  "Move point to the header line of group KEY, when that group is displayed."
+  (and key
+       (claude-code--goto-line-where
+        (lambda () (equal key (get-text-property (point) 'claude-code-group))))))
+
+(defun claude-code--goto-session (id)
+  "Move point to the row of session ID, when it is displayed."
+  (and id
+       (claude-code--goto-line-where
+        (lambda () (equal id (tabulated-list-get-id))))))
+
 (defun claude-code--reapply-marks ()
   "Re-tag rows whose session id is in `claude-code--marks'."
   (save-excursion
@@ -804,27 +834,84 @@ its model operation accepts."
   (unless (derived-mode-p 'claude-code-sessions-mode)
     (user-error "Not in a Claude sessions buffer")))
 
+(defun claude-code--place (&optional pos)
+  "Return where POS, or point, sits as (ID LINE COLUMN).
+ID is the session id of the line, nil on a group header."
+  (save-excursion
+    (when pos (goto-char pos))
+    (list (tabulated-list-get-id) (line-number-at-pos) (current-column))))
+
+(defun claude-code--goto-place (place &optional group)
+  "Move point back to PLACE, a `claude-code--place' taken before a reprint.
+GROUP, when given, is the group the caller acted on and outranks PLACE."
+  (pcase-let ((`(,id ,line ,column) place))
+    (unless (or (claude-code--goto-group group)
+                (claude-code--goto-session id))
+      (goto-char (point-min))
+      (forward-line (1- line))
+      ;; The buffer ends in a newline, so an overshoot lands on an empty line.
+      (when (and (eobp) (not (bobp))) (forward-line -1))
+      (move-to-column column))))
+
+(defun claude-code--redraw (&optional group)
+  "Reprint the view, keeping the cursor where the reader left it.
+Every command that mutates sessions redraws through here, so this is the one
+place responsible for not losing point.  It lands on, in order: GROUP's header
+when given, so a fold stays on the group it acted on; the session id that was
+at point, so a killed session keeps the cursor as it moves to another group;
+failing both, the same line and column, which lands on whatever took a removed
+row's place — a run of deletions therefore walks down the list.
+
+Identity first with a line-number fallback is what `dired-revert' does: a line
+number survives the rows above point changing, a buffer position does not.
+Like `dired-restore-positions' this covers every window showing the view, not
+just the selected one, since the reprint's `erase-buffer' collapses all their
+`window-point's to the top.  Only the acting window gets GROUP; the others had
+no part in the fold.  Their scroll is restored too, so a row keeps its height
+on screen instead of the window jumping to the top."
+  (let ((place (claude-code--place))
+        (windows (mapcar (lambda (window)
+                           (list window
+                                 (claude-code--place (window-point window))
+                                 (- (line-number-at-pos (window-point window))
+                                    (line-number-at-pos (window-start window)))))
+                         (get-buffer-window-list nil 0 t))))
+    (tabulated-list-print t)
+    (claude-code--reapply-marks)
+    (claude-code--goto-place place group)
+    (pcase-dolist (`(,window ,window-place ,window-line) windows)
+      (when (eq (window-buffer window) (current-buffer))
+        (unless (eq window (selected-window))
+          ;; The selected window's point IS buffer point, already restored.
+          (save-excursion
+            (claude-code--goto-place window-place)
+            (set-window-point window (point))))
+        (set-window-start window
+                          (save-excursion
+                            (goto-char (window-point window))
+                            (forward-line (- window-line))
+                            (line-beginning-position))
+                          ;; Ignored if it would push point off screen.
+                          t)))))
+
 (defun claude-code-sessions-refresh ()
-  "Recompute and redraw the sessions view."
+  "Recompute and redraw the sessions view, keeping the cursor where it was."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (tabulated-list-print t)
-  (claude-code--reapply-marks))
+  (claude-code--redraw))
 
 (defun claude-code-sessions-toggle-group ()
   "Collapse or expand the group at point.
 Works whether point is on a group header or on one of the group's rows: in the
-latter case the row's session determines the enclosing group."
+latter case the row's session determines the enclosing group.  Point stays on
+the group's header."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (when-let* ((group (or (get-text-property (line-beginning-position)
-                                            'claude-code-group)
-                         (when-let* ((s (claude-code--session-at-point)))
-                           (claude-code--group-key s)))))
+  (when-let* ((group (claude-code--group-at-point)))
     (if (member group claude-code--collapsed)
         (setq claude-code--collapsed (delete group claude-code--collapsed))
       (push group claude-code--collapsed))
-    (claude-code-sessions-refresh)))
+    (claude-code--redraw group)))
 
 (defun claude-code--visit-session (session display)
   "Show SESSION's instance buffer through DISPLAY, resuming it first when dead.
