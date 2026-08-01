@@ -701,10 +701,13 @@ splits out by status, and only when grouping by status."
   "Return non-nil when group A should sort before group B."
   (< (claude-code--group-rank a) (claude-code--group-rank b)))
 
-(defun claude-code--group-header (key count collapsed)
-  "Return the header line for group KEY with COUNT rows and COLLAPSED state."
-  (propertize (format "%s %s (%d)"
-                      (if collapsed "▸" "▾") (capitalize key) count)
+(defun claude-code--group-header (key count collapsed marked)
+  "Return the header line for group KEY with COUNT rows and COLLAPSED state.
+MARKED is how many of those rows are marked; a collapsed group reports it,
+standing in for the `*' tags it is not showing."
+  (propertize (format "%s %s (%d%s)"
+                      (if collapsed "▸" "▾") (capitalize key) count
+                      (if (> marked 0) (format ", %d marked" marked) ""))
               'claude-code-group key 'face 'bold))
 
 (defun claude-code--num-sorter (get)
@@ -730,7 +733,9 @@ A session without a known time sorts as oldest."
   (< (claude-code--entry-time a) (claude-code--entry-time b)))
 
 (defun claude-code--tabulated-groups ()
-  "Return the grouped rows for the current view, honouring collapse state."
+  "Return the grouped rows for the current view, honouring collapse state.
+Also prunes `claude-code--marks' to the sessions this listing holds, so a mark
+cannot outlive its row and come back armed."
   (let ((sessions (claude-code-sessions claude-code--project))
         (snapshot (claude-code--process-snapshot))
         (now (current-time))
@@ -750,11 +755,22 @@ A session without a known time sorts as oldest."
         (push key order)
         (push session (gethash key buckets))))
     (setq order (sort (delete-dups order) #'claude-code--group-less-p))
+    (setq claude-code--marks
+          (seq-filter (lambda (id) (gethash id claude-code--session-table))
+                      claude-code--marks))
     (mapcar
      (lambda (key)
        (let* ((rows (nreverse (gethash key buckets)))
-              (collapsed (and (member key claude-code--collapsed) t)))
-         (cons (claude-code--group-header key (length rows) collapsed)
+              (collapsed (and (member key claude-code--collapsed) t))
+              ;; Only a collapsed group reports its marks; an expanded one
+              ;; shows the tags themselves.
+              (marked (if collapsed
+                          (seq-count
+                           (lambda (s) (member (claude-code-session-id s)
+                                               claude-code--marks))
+                           rows)
+                        0)))
+         (cons (claude-code--group-header key (length rows) collapsed marked)
                (unless collapsed
                  (mapcar (lambda (s)
                            (list (claude-code-session-id s)
@@ -802,15 +818,15 @@ Return nil and leave point alone when no line matches."
        (claude-code--goto-line-where
         (lambda () (equal id (tabulated-list-get-id))))))
 
-(defun claude-code--reapply-marks ()
-  "Re-tag rows whose session id is in `claude-code--marks'."
-  (save-excursion
-    (goto-char (point-min))
-    (while (not (eobp))
-      (when-let* ((s (claude-code--session-at-point)))
-        (when (member (claude-code-session-id s) claude-code--marks)
-          (tabulated-list-put-tag "*")))
-      (forward-line 1))))
+(defun claude-code--print-entry (id cols)
+  "Print the row for ID with COLS, tagging it when ID is in `claude-code--marks'.
+The view's `tabulated-list-printer': tagging here rather than after the fact
+keeps a mark visible through reprints that bypass `claude-code--redraw'."
+  (tabulated-list-print-entry id cols)
+  (when (member id claude-code--marks)
+    (save-excursion
+      (forward-line -1)
+      (tabulated-list-put-tag "*"))))
 
 (defun claude-code--target-sessions (&optional liveness)
   "Return the marked sessions, or the session at point when none are marked.
@@ -877,7 +893,6 @@ on screen instead of the window jumping to the top."
                                     (line-number-at-pos (window-start window)))))
                          (get-buffer-window-list nil 0 t))))
     (tabulated-list-print t)
-    (claude-code--reapply-marks)
     (claude-code--goto-place place group)
     (pcase-dolist (`(,window ,window-place ,window-line) windows)
       (when (eq (window-buffer window) (current-buffer))
@@ -1064,6 +1079,7 @@ options."
   ;; destructive `delete' from mutating shared state.
   (setq-local claude-code--collapsed (list "dead"))
   (setq-local tabulated-list-padding 2)
+  (setq-local tabulated-list-printer #'claude-code--print-entry)
   (setq-local tabulated-list-format
               (vector '("Status" 9 t)
                       (list "Active" 8 #'claude-code--time-less-p :right-align t)

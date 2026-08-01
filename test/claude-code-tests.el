@@ -1207,6 +1207,94 @@ so its spawn suffix lands on it."
                        '("/r" :prompt nil :worktree t :model "opus"
                          :effort "xhigh")))))))
 
+(defun claude-code-tests--tagged-ids ()
+  "Return, sorted, the ids of the rows currently showing a `*' mark tag."
+  (let (ids)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when (and (tabulated-list-get-id)
+                   (string-prefix-p
+                    "*" (buffer-substring-no-properties
+                         (line-beginning-position)
+                         (+ (line-beginning-position) tabulated-list-padding))))
+          (push (tabulated-list-get-id) ids))
+        (forward-line 1)))
+    (sort ids #'string<)))
+
+(ert-deftest claude-code-test-view-marks-survive-every-reprint ()
+  "Marks stay painted through reprints that never reach `claude-code--redraw'."
+  (claude-code-tests--in-fixture-view '(1002)
+    (setq claude-code--collapsed nil)
+    (claude-code-sessions-refresh)
+    (claude-code--goto-group "dead")
+    (forward-line 1)
+    ;; `m' advances, so this marks two consecutive rows.
+    (claude-code-sessions-mark)
+    (claude-code-sessions-mark)
+    (let ((marked (sort (copy-sequence claude-code--marks) #'string<)))
+      (should (= (length marked) 2))
+      (should (equal marked (claude-code-tests--tagged-ids)))
+      (dolist (reprint (list #'claude-code-sessions-refresh
+                             ;; Column 6 is Name.  This is what `S' runs, and a
+                             ;; header click funnels into the same place.
+                             (lambda () (tabulated-list-sort 6))
+                             #'revert-buffer
+                             (lambda () (tabulated-list-widen-current-column 1))))
+        ;; Park on a marked row: the width commands read the entry at point.
+        (claude-code--goto-session (car marked))
+        (funcall reprint)
+        (should (equal marked (claude-code-tests--tagged-ids)))))))
+
+(ert-deftest claude-code-test-view-collapsed-group-reports-its-marks ()
+  "A folded group reports how many of the rows it hides are marked."
+  (claude-code-tests--in-fixture-view '(1002)
+    (setq claude-code--collapsed nil)
+    (claude-code-sessions-refresh)
+    (claude-code--goto-group "dead")
+    (should (string-match-p "▾ Dead (3)$" (thing-at-point 'line t)))
+    ;; `m' advances, so this marks two of the three dead rows.
+    (forward-line 1)
+    (claude-code-sessions-mark)
+    (claude-code-sessions-mark)
+    (claude-code--goto-group "dead")
+    ;; Their tags are on screen, so the header adds nothing.
+    (should (string-match-p "▾ Dead (3)$" (thing-at-point 'line t)))
+    (claude-code-sessions-toggle-group)
+    (should (member "dead" claude-code--collapsed))
+    (should (equal 2 (length claude-code--marks)))
+    (should (null (claude-code-tests--tagged-ids)))
+    (should (string-match-p "▸ Dead (3, 2 marked)$" (thing-at-point 'line t)))
+    ;; Unfolding hands the rows back their tags.
+    (claude-code-sessions-toggle-group)
+    (should (string-match-p "▾ Dead (3)$" (thing-at-point 'line t)))
+    (should (equal 2 (length (claude-code-tests--tagged-ids))))))
+
+(ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()
+  "A mark whose session leaves the listing is dropped, not left dormant."
+  (let ((gone '()))
+    (cl-letf* ((real (symbol-function 'claude-code-sessions))
+               ((symbol-function 'claude-code-sessions)
+                (lambda (&rest args)
+                  (seq-remove (lambda (s)
+                                (member (claude-code-session-id s) gone))
+                              (apply real args)))))
+      (claude-code-tests--in-fixture-view '(1002)
+        (setq claude-code--collapsed nil)
+        (claude-code-sessions-refresh)
+        (claude-code--goto-group "dead")
+        (forward-line 1)
+        (claude-code-sessions-mark)
+        (setq gone (copy-sequence claude-code--marks))
+        (should gone)
+        (claude-code-sessions-refresh)
+        (should-not claude-code--marks)
+        ;; The session returning does not bring the mark back with it.
+        (setq gone '())
+        (claude-code-sessions-refresh)
+        (should-not claude-code--marks)
+        (should-not (claude-code-tests--tagged-ids))))))
+
 (ert-deftest claude-code-test-kill-and-delete-keep-unacted-marks ()
   "Kill and delete drop only the marks they consumed."
   (let* ((acted '())
