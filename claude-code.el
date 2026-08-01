@@ -1094,7 +1094,8 @@ options."
                       '("Name" 26 t)))
   ;; Reverse (`t') so the most recently active session heads each group.
   (setq-local tabulated-list-sort-key '("Active" . t))
-  (setq-local tabulated-list-entries #'ignore)
+  ;; Not a function: `C-u -1 S' sorts this value directly.
+  (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
   (tabulated-list-init-header))
 

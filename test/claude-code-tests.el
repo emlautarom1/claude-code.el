@@ -1246,6 +1246,16 @@ so its spawn suffix lands on it."
         (funcall reprint)
         (should (equal marked (claude-code-tests--tagged-ids)))))))
 
+(ert-deftest claude-code-test-view-restore-original-order-is-harmless ()
+  "`C-u -1 S' does not signal: it sorts `tabulated-list-entries' directly."
+  (claude-code-tests--in-fixture-view '(1002)
+    (should-not (functionp tabulated-list-entries))
+    ;; The first sort is what arms it: it leaves a `tabulated-list--original-
+    ;; order' behind, which is the only guard on the `-1' branch.
+    (tabulated-list-sort 6)
+    (tabulated-list-sort -1)
+    (should (string-match-p "Dead" (buffer-string)))))
+
 (ert-deftest claude-code-test-view-collapsed-group-reports-its-marks ()
   "A folded group reports how many of the rows it hides are marked."
   (claude-code-tests--in-fixture-view '(1002)
