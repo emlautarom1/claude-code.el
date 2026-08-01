@@ -11,7 +11,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
-- **`transient` menu** (`?`) for spawn options and actions.
+- **`transient` spawn menu** (`n`) for the spawn flags: worktree, model, effort.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -35,19 +35,19 @@ For `use-package` users:
 ```elisp
 (use-package claude-code
   :vc (:url "https://github.com/emlautarom1/claude-code.el" :rev :newest)
-  :commands (claude-code claude-code-menu))
+  :commands (claude-code claude-code-spawn-menu))
 ```
 
 ## Usage
 
-Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-code-menu` from anywhere to open it together with the action menu; both use the current project, prompting for one when there is none. Keys in the sessions view:
+Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-code-spawn-menu` from anywhere to open it together with the spawn menu; both use the current project, prompting for one when there is none. Keys in the sessions view:
 
 | Key       | Action                                                      |
 | --------- | ----------------------------------------------------------- |
 | `RET`     | focus an alive session / resume a dead one / toggle a group |
 | `o`       | like `RET`, but visit the session in another window         |
 | `TAB`     | collapse or expand the group at point                       |
-| `n`       | spawn a new session (see `?` for options)                   |
+| `n`       | open the spawn menu (worktree/model/effort; `n` spawns)     |
 | `k`       | kill the marked instances, or the one at point              |
 | `d`       | delete the marked dead sessions, or the one at point        |
 | `r`       | rename the session at point                                 |
@@ -56,7 +56,7 @@ Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-cod
 | `m` / `u` | mark / unmark the session at point                          |
 | `G`       | cycle grouping (status ↔ liveness)                          |
 | `g`       | refresh                                                     |
-| `?`       | open the transient menu                                     |
+| `?`       | describe the mode, listing every keybinding                 |
 
 ## Programmatic API
 

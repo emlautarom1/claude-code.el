@@ -9,7 +9,7 @@ Model             claude-code-session structs, the sessions query, process usage
         │  structs only
 Operations        spawn / resume / kill / delete / rename / send / interrupt / focus
         │
-View              claude-code-sessions-mode + transient menu + `claude-code'
+View              claude-code-sessions-mode + spawn menu + `claude-code'
 ```
 
 ## Model / view separation
@@ -44,7 +44,7 @@ The struct holds the transcript's raw name sources (the `title` and the last pro
 
 `claude-code-sessions-mode` derives from `tabulated-list-mode`. Columns are *Status · Active · Id · Worktree · CPU% · Mem · Name*, with **Name last** so it is never truncated and fills the remaining window width. The *Active* column shows each session's last activity as a compact relative age (the newest timestamped transcript line — see [storage model](storage-model.md)); it is the **default sort key**, reversed, so the most recently active session heads each group. Grouping uses Emacs 30's `tabulated-list-groups`, which prints a header line per group and sorts entries within each group. Collapsing is therefore trivial: a collapsed group contributes its header but no rows (`claude-code--collapsed`). The *Dead* group starts collapsed and any group can be toggled with `TAB`. Marks use `tabulated-list` tags backed by `claude-code--marks`; column sorting is built in. Colors come from the Emacs palette faces `success` (idle) / `warning` (busy) / `error` (waiting) / `shadow` (dead) / `font-lock-comment-face` (external).
 
-Every `claude-code-sessions-*` command reads the view's buffer-local state, so each one guards with `claude-code--ensure-sessions-mode` (a `user-error` outside the view) and tags its `interactive` form with the mode. The tag scopes `M-x`/`M-S-x` completion, but the guard is the real boundary: when `read-extended-command-predicate` is otherwise unset, transient installs one that ignores mode tags. The two entry points stay global: `claude-code` opens the view for the current project, and `claude-code-menu`, invoked outside a view, opens it first and then dispatches over it.
+Every `claude-code-sessions-*` command reads the view's buffer-local state, so each one guards with `claude-code--ensure-sessions-mode` (a `user-error` outside the view) and tags its `interactive` form with the mode. The tag scopes `M-x`/`M-S-x` completion, but the guard is the real boundary: when `read-extended-command-predicate` is otherwise unset, transient installs one that ignores mode tags. The two entry points stay global: `claude-code` opens the view for the current project, and `claude-code-spawn-menu`, invoked outside a view, opens it first and then spawns over it.
 
 ## MCP server
 

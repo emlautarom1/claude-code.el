@@ -1011,10 +1011,10 @@ is created in the foreign buffer."
                           (symbol-name (if (consp local) (car local) local))))
                        (buffer-local-variables))))))))
 
-(ert-deftest claude-code-test-menu-opens-view-first ()
-  "The menu works from any buffer, dispatching over the project's view.
+(ert-deftest claude-code-test-spawn-menu-opens-view-first ()
+  "The spawn menu works from any buffer, dispatching over the project's view.
 The view must be the current buffer by the time the transient is set up,
-so its suffixes land on it."
+so its spawn suffix lands on it."
   (let ((calls '()))
     (cl-letf (((symbol-function 'claude-code)
                (lambda ()
@@ -1025,31 +1025,34 @@ so its suffixes land on it."
                  (push (list 'menu (derived-mode-p 'claude-code-sessions-mode))
                        calls))))
       (with-temp-buffer
-        (claude-code-menu)
+        (claude-code-spawn-menu)
         (should (equal (reverse calls)
                        '(open (menu claude-code-sessions-mode)))))
       (setq calls nil)
       (with-temp-buffer
         (claude-code-sessions-mode)
-        (claude-code-menu)
+        (claude-code-spawn-menu)
         (should (equal calls '((menu claude-code-sessions-mode))))))))
 
-(ert-deftest claude-code-test-sessions-new-ignores-saved-menu-args ()
-  "A direct `n' spawns with no options; only a live menu's args apply."
+(ert-deftest claude-code-test-sessions-new-args-require-live-menu ()
+  "A direct call spawns with no options; only a live spawn menu's args apply."
   (let ((spawn-args nil))
     (cl-letf (((symbol-function 'claude-code-spawn)
                (lambda (root &rest kw) (setq spawn-args (cons root kw))))
               ((symbol-function 'claude-code-sessions-refresh) #'ignore)
               ((symbol-function 'read-string) (lambda (&rest _) ""))
-              ;; Simulate a saved/set prefix value lingering in transient.
+              ;; Mirror `transient-args': live args for the invoking prefix,
+              ;; nil when no transient is current.
               ((symbol-function 'transient-args)
-               (lambda (_) '("--worktree" "--model=opus" "--effort=xhigh"))))
+               (lambda (prefix)
+                 (when prefix
+                   '("--worktree" "--model=opus" "--effort=xhigh")))))
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
         (call-interactively #'claude-code-sessions-new)
         (should (equal spawn-args
                        '("/r" :prompt nil :worktree nil :model nil :effort nil)))
-        (let ((transient-current-command 'claude-code-menu))
+        (let ((transient-current-command 'claude-code-spawn-menu))
           (call-interactively #'claude-code-sessions-new))
         (should (equal spawn-args
                        '("/r" :prompt nil :worktree t :model "opus"

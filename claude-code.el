@@ -934,10 +934,9 @@ A dead session is resumed first, after confirmation."
 
 (defun claude-code-sessions-new (&optional args)
   "Spawn a new session, reading options from the transient ARGS.
-The menu's saved values apply only when invoked from the menu; a direct
-keypress spawns with no options."
-  (interactive (list (when (eq transient-current-command 'claude-code-menu)
-                       (transient-args 'claude-code-menu)))
+Invoked outside a transient menu, ARGS is nil and the spawn takes no
+options."
+  (interactive (list (transient-args transient-current-command))
                claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (let ((prompt (read-string "Initial prompt (empty for none): ")))
@@ -957,7 +956,7 @@ keypress spawns with no options."
   "RET" #'claude-code-sessions-visit
   "o"   #'claude-code-sessions-visit-other-window
   "TAB" #'claude-code-sessions-toggle-group
-  "n"   #'claude-code-sessions-new
+  "n"   #'claude-code-spawn-menu
   "k"   #'claude-code-sessions-kill
   "d"   #'claude-code-sessions-delete
   "r"   #'claude-code-sessions-rename
@@ -965,11 +964,12 @@ keypress spawns with no options."
   "s"   #'claude-code-sessions-send
   "m"   #'claude-code-sessions-mark
   "u"   #'claude-code-sessions-unmark
-  "G"   #'claude-code-sessions-cycle-grouping
-  "?"   #'claude-code-menu)
+  "G"   #'claude-code-sessions-cycle-grouping)
 
 (define-derived-mode claude-code-sessions-mode tabulated-list-mode "Claude"
-  "Major mode listing the Claude Code sessions of a project."
+  "Major mode listing the Claude Code sessions of a project.
+
+\\{claude-code-sessions-mode-map}"
   (setq-local claude-code--session-table (make-hash-table :test 'equal))
   (setq-local claude-code--usage-table (make-hash-table :test 'equal))
   ;; Dead sessions are folded by default.  A fresh list keeps `toggle-group's
@@ -997,36 +997,21 @@ keypress spawns with no options."
 ;;;;; Transient
 
 ;;;###autoload
-(transient-define-prefix claude-code-menu ()
-  "Dispatch actions for the sessions view, opening it first when needed."
-  ["Spawn options"
+(transient-define-prefix claude-code-spawn-menu ()
+  "Spawn a new session with options, opening the sessions view first when needed."
+  ["Arguments"
    ("-w" "Worktree" "--worktree")
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
    ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))]
   ["Spawn"
    ("n" "New session" claude-code-sessions-new)]
-  [["Session"
-    ("RET" "Focus / resume" claude-code-sessions-visit)
-    ("o" "Focus other window" claude-code-sessions-visit-other-window)
-    ("r" "Rename" claude-code-sessions-rename)
-    ("i" "Interrupt" claude-code-sessions-interrupt)
-    ("s" "Send text" claude-code-sessions-send)]
-   ["Manage"
-    ("k" "Kill" claude-code-sessions-kill)
-    ("d" "Delete dead" claude-code-sessions-delete)
-    ("m" "Mark" claude-code-sessions-mark)
-    ("u" "Unmark" claude-code-sessions-unmark)]
-   ["View"
-    ("G" "Cycle grouping" claude-code-sessions-cycle-grouping)
-    ("TAB" "Toggle group" claude-code-sessions-toggle-group)
-    ("g" "Refresh" claude-code-sessions-refresh)]]
   (interactive)
   (unless (derived-mode-p 'claude-code-sessions-mode)
     (claude-code)
     ;; `display-buffer' customizations can leave the view unselected, where
     ;; every suffix would fail; refuse up front instead.
     (claude-code--ensure-sessions-mode))
-  (transient-setup 'claude-code-menu))
+  (transient-setup 'claude-code-spawn-menu))
 
 ;;;###autoload
 (defun claude-code ()
