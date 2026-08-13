@@ -302,43 +302,47 @@ no transcript yet.  REG, when given, is the managed-registry plist whose
         :transcript (plist-get tr :transcript)
         :last-active (plist-get tr :last-active)))
 
+(defun claude-code--alive-session (id buffer live &optional tr)
+  "Return the alive `claude-code-session' for managed instance ID in BUFFER.
+LIVE is a pre-parsed `claude-code--live-status-table' supplying the instance's
+native status, and TR its `claude-code--project-transcripts' descriptor.  TR's
+worktree token is authoritative when TR exists, including when it is nil; the
+registry stands in only for a session with no transcript yet."
+  (let ((info (claude-code--live-info id live)))
+    (apply #'claude-code-session--create
+           :id id :alive-p t :buffer buffer
+           :pid (and (buffer-live-p buffer)
+                     (buffer-local-value 'ghostel--pid buffer))
+           :status (plist-get info :status)
+           :waiting-for (plist-get info :waiting-for)
+           (claude-code--transcript-session-args
+            tr (unless tr (gethash id claude-code--managed))))))
+
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
-A session is alive when Emacs manages a live instance for it.  Every other
-transcript on disk belongs to a session Emacs does not manage: when a
-`claude' process is still running it outside Emacs the session is flagged
-`claude-code-session-external-p' (an external session); otherwise no process
-is running it and it is dead."
+A transcript's session is alive when Emacs manages a live instance for it,
+external when a `claude' outside Emacs runs it, and dead when no process is.
+Aliveness is keyed by session id, never by PROJECT-ROOT, because one session can
+belong to two roots (see docs/storage-model.md).  The launch root recorded in
+`claude-code--managed' is consulted only to list PROJECT-ROOT's own instances
+that have no transcript yet."
   (let* ((root (claude-code--normalize-root project-root))
          (live (claude-code--live-status-table))
-         (managed (claude-code--live-managed root))
-         (transcripts (claude-code--project-transcripts root))
-         (by-id (make-hash-table :test 'equal))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
-    (dolist (tr transcripts)
-      (puthash (plist-get tr :id) tr by-id))
-    (pcase-dolist (`(,id . ,buf) managed)
-      (let ((info (claude-code--live-info id live))
-            (tr (gethash id by-id))
-            (reg (gethash id claude-code--managed)))
-        (puthash id t seen)
-        (push (apply #'claude-code-session--create
-                     :id id :alive-p t :buffer buf
-                     :pid (and (buffer-live-p buf)
-                               (buffer-local-value 'ghostel--pid buf))
-                     :status (plist-get info :status)
-                     :waiting-for (plist-get info :waiting-for)
-                     (claude-code--transcript-session-args tr reg))
-              sessions)))
-    (dolist (tr transcripts)
+    (dolist (tr (claude-code--project-transcripts root))
       (let ((id (plist-get tr :id)))
-        (unless (gethash id seen)
-          (push (apply #'claude-code-session--create
+        (puthash id t seen)
+        (push (if-let* ((buffer (claude-code--managed-buffer id)))
+                  (claude-code--alive-session id buffer live tr)
+                (apply #'claude-code-session--create
                        :id id :alive-p nil
                        :external-p (claude-code--external-p id live)
-                       (claude-code--transcript-session-args tr))
-                sessions))))
+                       (claude-code--transcript-session-args tr)))
+              sessions)))
+    (pcase-dolist (`(,id . ,buffer) (claude-code--live-managed root))
+      (unless (gethash id seen)
+        (push (claude-code--alive-session id buffer live) sessions)))
     (nreverse sessions)))
 
 (defun claude-code--process-snapshot ()
@@ -548,28 +552,36 @@ a session a `claude' outside Emacs is running."
    (t (claude-code--launch id project-root :resume id))))
 
 (defun claude-code-kill (session)
-  "Kill the running instance of SESSION and its buffer."
+  "Kill the running instance of SESSION and its buffer.
+The registry entry goes only while it still names SESSION's buffer, so a session
+rehosted since the struct was built keeps its registration."
   (unless (claude-code-session-alive-p session)
     (user-error "Session %s is not alive" (claude-code-session-id session)))
-  (let ((buffer (claude-code-session-buffer session)))
-    (remhash (claude-code-session-id session) claude-code--managed)
+  (let* ((id (claude-code-session-id session))
+         (buffer (claude-code-session-buffer session)))
+    (when (eq buffer (plist-get (gethash id claude-code--managed) :buffer))
+      (remhash id claude-code--managed))
     (when (buffer-live-p buffer)
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buffer)))))
 
 (defun claude-code-delete (session)
   "Delete dead SESSION's transcript from disk.
-Refuses alive sessions and sessions running outside Emacs."
-  (when (claude-code-session-alive-p session)
-    (user-error "Refusing to delete an alive session; kill it first"))
-  (when (claude-code-session-external-p session)
-    (user-error "Session %s is running outside Emacs"
-                (claude-code-session-id session)))
-  (let ((file (claude-code-session-transcript session)))
-    (unless (and file (file-exists-p file))
-      (user-error "No transcript on disk for session %s"
-                  (claude-code-session-id session)))
-    (claude-code--delete-transcript file)))
+Refuses an alive session and one running outside Emacs, checked by id against
+the registry and sessions/ as well as by SESSION's own flags: a struct is only
+as fresh as the query that built it, so a session resumed since then still calls
+itself dead."
+  (let ((id (claude-code-session-id session)))
+    (when (or (claude-code-session-alive-p session)
+              (claude-code--managed-buffer id))
+      (user-error "Refusing to delete alive session %s; kill it first" id))
+    (when (or (claude-code-session-external-p session)
+              (claude-code--external-p id))
+      (user-error "Session %s is running outside Emacs" id))
+    (let ((file (claude-code-session-transcript session)))
+      (unless (and file (file-exists-p file))
+        (user-error "No transcript on disk for session %s" id))
+      (claude-code--delete-transcript file))))
 
 (defun claude-code-send-text (session text &optional submit)
   "Send TEXT to SESSION's instance, submitting with RET when SUBMIT is non-nil.
@@ -915,28 +927,29 @@ on screen instead of the window jumping to the top."
   (claude-code--ensure-sessions-mode)
   (claude-code--redraw))
 
-(defun claude-code--views (root)
-  "Return the sessions-view buffers scoped to ROOT, displayed or not.
-A view holds its project normalised, so ROOT is normalised to match and any
-spelling of the same directory finds it."
-  (let ((root (claude-code--normalize-root root)))
-    (seq-filter (lambda (buffer)
-                  (with-current-buffer buffer
-                    (and (derived-mode-p 'claude-code-sessions-mode)
-                         (equal claude-code--project root))))
-                (buffer-list))))
+(defun claude-code--views ()
+  "Return every sessions-view buffer that names a project, displayed or not.
+A buffer left in the mode without one (`claude-code-sessions-mode' run by hand)
+has nothing to list, so it is not a view for these purposes."
+  (seq-filter (lambda (buffer)
+                (with-current-buffer buffer
+                  (and (derived-mode-p 'claude-code-sessions-mode)
+                       claude-code--project)))
+              (buffer-list)))
 
-(defun claude-code--refresh-views (root)
-  "Redraw every sessions view scoped to ROOT."
-  (dolist (buffer (claude-code--views root))
+(defun claude-code--refresh-views ()
+  "Redraw every sessions view.
+Which sessions a view lists is not exclusive to it (see
+`claude-code-project-sessions'), so any view can hold the row a command changed."
+  (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
       (claude-code--redraw))))
 
-(defun claude-code--drop-marks (root ids)
-  "Unmark IDS in every sessions view scoped to ROOT.
+(defun claude-code--drop-marks (ids)
+  "Unmark IDS in every sessions view.
 A killed session stays listed, so the pruning `claude-code--tabulated-groups'
 does on redraw would otherwise keep its mark armed."
-  (dolist (buffer (claude-code--views root))
+  (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
       (setq claude-code--marks
             (cl-set-difference claude-code--marks ids :test #'equal)))))
@@ -964,7 +977,7 @@ A dead session is resumed after confirmation."
           (y-or-n-p "Session is dead.  Resume it? "))
       (let ((buffer (claude-code-resume claude-code--project
                                         (claude-code-session-id session))))
-        (claude-code--refresh-views claude-code--project)
+        (claude-code--refresh-views)
         (funcall display buffer))))))
 
 (defun claude-code-sessions-visit ()
@@ -1010,22 +1023,37 @@ A dead session is resumed first, after confirmation."
         (user-error "No alive session selected")
       (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
         (mapc #'claude-code-kill targets)
-        (claude-code--drop-marks claude-code--project
-                                 (mapcar #'claude-code-session-id targets))
-        (claude-code--refresh-views claude-code--project)))))
+        (claude-code--drop-marks (mapcar #'claude-code-session-id targets))
+        (claude-code--refresh-views)))))
 
 (defun claude-code-sessions-delete ()
-  "Delete the marked dead sessions, or the one at point."
+  "Delete the marked dead sessions, or the one at point.
+A refusal from `claude-code-delete' does not end the batch: the other targets
+are still deleted and the refusals reported.  Only the ids actually deleted lose
+their marks, leaving a refused one armed for a retry, and the redraw happens
+however the batch ends."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
         (user-error "No dead session selected")
       (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))
-        (mapc #'claude-code-delete targets)
-        (claude-code--drop-marks claude-code--project
-                                 (mapcar #'claude-code-session-id targets))
-        (claude-code--refresh-views claude-code--project)))))
+        (let ((deleted '())
+              (refused '()))
+          (unwind-protect
+              (dolist (session targets)
+                (condition-case err
+                    (progn (claude-code-delete session)
+                           (push (claude-code-session-id session) deleted))
+                  ;; A refusal is a `user-error' and belongs in the report; a
+                  ;; real fault must still reach the debugger.
+                  (user-error (push (error-message-string err) refused))))
+            (claude-code--drop-marks deleted)
+            (claude-code--refresh-views))
+          (when refused
+            (message "Deleted %d, refused %d: %s"
+                     (length deleted) (length refused)
+                     (string-join (nreverse refused) "; "))))))))
 
 (defun claude-code-sessions-rename ()
   "Rename the session at point."
@@ -1129,7 +1157,7 @@ ARGS comes from a live `claude-code-spawn-menu'; the
                   :worktree (and (member "--worktree" args) t)
                   :model (transient-arg-value "--model=" args)
                   :effort (transient-arg-value "--effort=" args))))
-    (claude-code--refresh-views root)
+    (claude-code--refresh-views)
     (pop-to-buffer buffer)))
 
 ;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.

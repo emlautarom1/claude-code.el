@@ -56,6 +56,8 @@ The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code
 
 `claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript therefore lands in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, so worktree sessions appear under the parent project.
 
+That prefixed name is also **exactly** what encoding the worktree's own path produces — `-home-me-proj--claude-worktrees-feat` is both the parent's worktree directory and `/home/me/proj/.claude/worktrees/feat`'s base directory. One transcript therefore belongs to two roots, and since a git worktree is its own `project.el` project, either of them can be the root a query or a spawn names. This is why nothing in the model may key a session's liveness on the root it was asked about (see the [session model](architecture.md#the-session-model)).
+
 The token after that prefix is what the *Worktree* column shows. It is fixed when Claude creates the directory, rendered as it stands, and never turned back into a path: the encoding is lossy, so a dot or `/` in the worktree name reads as a hyphen (`my.feat` displays as `my-feat`), and two names differing only in flattened characters share one transcript directory and one label. Nothing joins on the label, so the cost is display precision only.
 
 ## MCP configuration
