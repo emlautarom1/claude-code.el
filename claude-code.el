@@ -1178,11 +1178,21 @@ ARGS comes from a live `claude-code-spawn-menu'; the
 
 ;;;###autoload
 (defun claude-code-sessions ()
-  "Open the Claude sessions view for the current project."
+  "Open the Claude sessions view for the current project.
+The project's existing view is reused when it has one."
   (interactive)
   (let* ((root (claude-code--project-root))
-         (buffer (get-buffer-create
-                  (format "*claude-sessions: %s*" (file-name-nondirectory root)))))
+         ;; A view is identified by the project it names, not by its buffer
+         ;; name: two projects can share a basename, and a name is free to
+         ;; belong to an unrelated buffer.  A clash gets Emacs's `<2>' suffix.
+         (buffer (or (seq-find (lambda (view)
+                                 (equal (buffer-local-value 'claude-code--project
+                                                            view)
+                                        root))
+                               (claude-code--views))
+                     (generate-new-buffer
+                      (format "*claude-sessions: %s*"
+                              (file-name-nondirectory root))))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'claude-code-sessions-mode)
         (claude-code-sessions-mode))

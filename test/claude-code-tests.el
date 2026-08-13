@@ -1324,6 +1324,82 @@ Tests diff this around an act rather than asserting over the whole
                 (string-prefix-p "*claude-sessions: " (buffer-name buffer)))
               (buffer-list)))
 
+(defun claude-code-tests--open-view (root)
+  "Return the buffer `claude-code-sessions' opens for ROOT.
+`project.el' and the window are stubbed: which buffer the entry point picks is
+what is under test, not where it displays it.  Stubbing `pop-to-buffer' also
+keeps the act from reordering `buffer-list', which the pick reads."
+  (let ((shown nil))
+    (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
+              ((symbol-function 'project-root) (lambda (_p) root))
+              ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq shown b))))
+      (claude-code-sessions))
+    shown))
+
+(ert-deftest claude-code-test-view-per-project-not-per-name ()
+  "Two projects sharing a basename get two independent views.
+A view is identified by the project it names, so opening the second must not
+land in the first's buffer and silently re-scope it -- which would leave the
+first project with no view at all."
+  (claude-code-tests--with-fixtures
+    (let ((a nil) (b nil))
+      (unwind-protect
+          (progn
+            (setq a (claude-code-tests--open-view "/home/test/proj"))
+            (setq b (claude-code-tests--open-view "/home/other/proj"))
+            (should-not (eq a b))
+            (with-current-buffer a
+              (should (equal claude-code--project
+                             (claude-code--normalize-root "/home/test/proj")))
+              (should (< 0 (hash-table-count claude-code--session-table))))
+            (with-current-buffer b
+              (should (equal claude-code--project
+                             (claude-code--normalize-root "/home/other/proj")))
+              (should (zerop (hash-table-count claude-code--session-table))))
+            ;; Both are views, so a mutation redrawing every view reaches both.
+            (should (memq a (claude-code--views)))
+            (should (memq b (claude-code--views))))
+        (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer)))
+              (list a b))))))
+
+(ert-deftest claude-code-test-view-reopens-a-renamed-view ()
+  "Reopening a project reuses its view, including one the user renamed.
+Identity is the project, not the buffer name, so the rename is honoured rather
+than answered with a second view.  Reuse also leaves the mode alone: re-running
+it would reset the grouping and collapse state the user set, so the listing is
+compared across the reopen."
+  (claude-code-tests--with-fixtures
+    (let ((view nil))
+      (unwind-protect
+          (progn
+            (setq view (claude-code-tests--open-view "/home/test/proj"))
+            (with-current-buffer view
+              (rename-buffer "*pinned proj sessions*")
+              (claude-code-sessions-cycle-grouping)
+              (goto-char (point-min))
+              (claude-code-sessions-toggle-group))
+            (let ((listing (with-current-buffer view (buffer-string))))
+              (should (eq view (claude-code-tests--open-view "/home/test/proj")))
+              (should (equal (with-current-buffer view (buffer-string)) listing))))
+        (when (buffer-live-p view) (kill-buffer view))))))
+
+(ert-deftest claude-code-test-view-does-not-adopt-a-foreign-buffer ()
+  "A buffer that merely carries the view's name is left alone.
+Adopting one would put the listing where the user's data was."
+  (claude-code-tests--with-fixtures
+    (let ((foreign (generate-new-buffer "*claude-sessions: proj*"))
+          (view nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer foreign (insert "not a sessions view"))
+            (setq view (claude-code-tests--open-view "/home/test/proj"))
+            (should-not (eq view foreign))
+            (with-current-buffer foreign
+              (should (eq major-mode 'fundamental-mode))
+              (should (equal (buffer-string) "not a sessions view"))))
+        (kill-buffer foreign)
+        (when (buffer-live-p view) (kill-buffer view))))))
+
 (ert-deftest claude-code-test-project-root-may-prompt ()
   "Resolving through `project.el' lets it prompt when the buffer has no project."
   (let ((maybe-prompt 'unset))
