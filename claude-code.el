@@ -210,7 +210,7 @@ back into a name or path (see docs/storage-model.md)."
 ;;;; Model
 ;;
 ;; The rest of the package works with `claude-code-session' structs produced by
-;; `claude-code-sessions'.  A session has one of three liveness states
+;; `claude-code-project-sessions'.  A session has one of three liveness states
 ;; (`claude-code--session-liveness'): "alive" when Emacs manages a live Ghostel
 ;; instance for it, "external" when a `claude' process runs it outside Emacs, and
 ;; "dead" when no process is running it at all.
@@ -302,7 +302,7 @@ no transcript yet.  REG, when given, is the managed-registry plist whose
         :transcript (plist-get tr :transcript)
         :last-active (plist-get tr :last-active)))
 
-(defun claude-code-sessions (project-root)
+(defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
 A session is alive when Emacs manages a live instance for it.  Every other
 transcript on disk belongs to a session Emacs does not manage: when a
@@ -736,7 +736,7 @@ A session without a known time sorts as oldest."
   "Return the grouped rows for the current view, honouring collapse state.
 Also prunes `claude-code--marks' to the sessions this listing holds, so a mark
 cannot outlive its row and come back armed."
-  (let ((sessions (claude-code-sessions claude-code--project))
+  (let ((sessions (claude-code-project-sessions claude-code--project))
         (snapshot (claude-code--process-snapshot))
         (now (current-time))
         (buckets (make-hash-table :test 'equal))
@@ -915,6 +915,32 @@ on screen instead of the window jumping to the top."
   (claude-code--ensure-sessions-mode)
   (claude-code--redraw))
 
+(defun claude-code--views (root)
+  "Return the sessions-view buffers scoped to ROOT, displayed or not.
+A view holds its project normalised, so ROOT is normalised to match and any
+spelling of the same directory finds it."
+  (let ((root (claude-code--normalize-root root)))
+    (seq-filter (lambda (buffer)
+                  (with-current-buffer buffer
+                    (and (derived-mode-p 'claude-code-sessions-mode)
+                         (equal claude-code--project root))))
+                (buffer-list))))
+
+(defun claude-code--refresh-views (root)
+  "Redraw every sessions view scoped to ROOT."
+  (dolist (buffer (claude-code--views root))
+    (with-current-buffer buffer
+      (claude-code--redraw))))
+
+(defun claude-code--drop-marks (root ids)
+  "Unmark IDS in every sessions view scoped to ROOT.
+A killed session stays listed, so the pruning `claude-code--tabulated-groups'
+does on redraw would otherwise keep its mark armed."
+  (dolist (buffer (claude-code--views root))
+    (with-current-buffer buffer
+      (setq claude-code--marks
+            (cl-set-difference claude-code--marks ids :test #'equal)))))
+
 (defun claude-code-sessions-toggle-group ()
   "Collapse or expand the group at point.
 Works whether point is on a group header or on one of the group's rows: in the
@@ -938,7 +964,7 @@ A dead session is resumed after confirmation."
           (y-or-n-p "Session is dead.  Resume it? "))
       (let ((buffer (claude-code-resume claude-code--project
                                         (claude-code-session-id session))))
-        (claude-code-sessions-refresh)
+        (claude-code--refresh-views claude-code--project)
         (funcall display buffer))))))
 
 (defun claude-code-sessions-visit ()
@@ -984,11 +1010,9 @@ A dead session is resumed first, after confirmation."
         (user-error "No alive session selected")
       (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
         (mapc #'claude-code-kill targets)
-        (setq claude-code--marks
-              (cl-set-difference claude-code--marks
-                                 (mapcar #'claude-code-session-id targets)
-                                 :test #'equal))
-        (claude-code-sessions-refresh)))))
+        (claude-code--drop-marks claude-code--project
+                                 (mapcar #'claude-code-session-id targets))
+        (claude-code--refresh-views claude-code--project)))))
 
 (defun claude-code-sessions-delete ()
   "Delete the marked dead sessions, or the one at point."
@@ -999,11 +1023,9 @@ A dead session is resumed first, after confirmation."
         (user-error "No dead session selected")
       (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))
         (mapc #'claude-code-delete targets)
-        (setq claude-code--marks
-              (cl-set-difference claude-code--marks
-                                 (mapcar #'claude-code-session-id targets)
-                                 :test #'equal))
-        (claude-code-sessions-refresh)))))
+        (claude-code--drop-marks claude-code--project
+                                 (mapcar #'claude-code-session-id targets))
+        (claude-code--refresh-views claude-code--project)))))
 
 (defun claude-code-sessions-rename ()
   "Rename the session at point."
@@ -1033,23 +1055,6 @@ A dead session is resumed first, after confirmation."
   (setq claude-code--group-by
         (if (eq claude-code--group-by 'status) 'state 'status))
   (claude-code-sessions-refresh))
-
-(defun claude-code-sessions-new (&optional args)
-  "Spawn a new session, reading options from the transient ARGS.
-Invoked outside a transient menu, ARGS is nil and the spawn takes no
-options."
-  (interactive (list (when transient-current-command
-                       (transient-args transient-current-command)))
-               claude-code-sessions-mode)
-  (claude-code--ensure-sessions-mode)
-  (let ((prompt (read-string "Initial prompt (empty for none): ")))
-    (claude-code-spawn
-     claude-code--project
-     :prompt (unless (string-empty-p prompt) prompt)
-     :worktree (and (member "--worktree" args) t)
-     :model (transient-arg-value "--model=" args)
-     :effort (transient-arg-value "--effort=" args))
-    (claude-code-sessions-refresh)))
 
 ;;;;; Mode
 
@@ -1099,30 +1104,55 @@ options."
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
   (tabulated-list-init-header))
 
-;;;;; Transient
+;;;;; Entry points
+
+(defun claude-code--project-root ()
+  "Return the project root the current buffer's commands should act on.
+A sessions view names its own project; every other buffer resolves the one it
+belongs to, prompting for a project when it belongs to none."
+  (or claude-code--project
+      (claude-code--normalize-root (project-root (project-current t)))))
+
+(defun claude-code--spawn-session (root &optional args)
+  "Spawn a session for ROOT with the spawn options in ARGS and display it.
+ARGS comes from a live `claude-code-spawn-menu'; the
+`interactive' form reads ROOT from that menu's scope, falling back to
+`claude-code--project-root'."
+  (interactive (if transient-current-command
+                   (list (or (transient-scope) (claude-code--project-root))
+                         (transient-args transient-current-command))
+                 (list (claude-code--project-root))))
+  (let* ((prompt (read-string "Initial prompt (empty for none): "))
+         (buffer (claude-code-spawn
+                  root
+                  :prompt (unless (string-empty-p prompt) prompt)
+                  :worktree (and (member "--worktree" args) t)
+                  :model (transient-arg-value "--model=" args)
+                  :effort (transient-arg-value "--effort=" args))))
+    (claude-code--refresh-views root)
+    (pop-to-buffer buffer)))
+
+;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.
+(put 'claude-code--spawn-session 'completion-predicate #'transient--suffix-only)
 
 ;;;###autoload
 (transient-define-prefix claude-code-spawn-menu ()
-  "Spawn a new session with options, opening the sessions view first when needed."
+  "Spawn a new session for a project, with options."
   ["Arguments"
    ("-w" "Worktree" "--worktree")
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
    ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))]
   ["Spawn"
-   ("n" "New session" claude-code-sessions-new)]
+   ("n" "New session" claude-code--spawn-session)]
   (interactive)
-  (unless (derived-mode-p 'claude-code-sessions-mode)
-    (claude-code)
-    ;; `display-buffer' customizations can leave the view unselected, where
-    ;; every suffix would fail; refuse up front instead.
-    (claude-code--ensure-sessions-mode))
-  (transient-setup 'claude-code-spawn-menu))
+  (transient-setup 'claude-code-spawn-menu nil nil
+                   :scope (claude-code--project-root)))
 
 ;;;###autoload
-(defun claude-code ()
+(defun claude-code-sessions ()
   "Open the Claude sessions view for the current project."
   (interactive)
-  (let* ((root (claude-code--normalize-root (project-root (project-current t))))
+  (let* ((root (claude-code--project-root))
          (buffer (get-buffer-create
                   (format "*claude-sessions: %s*" (file-name-nondirectory root)))))
     (with-current-buffer buffer

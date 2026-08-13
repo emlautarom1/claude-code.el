@@ -26,7 +26,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Worktree session** — a session spawned with `--worktree`, running in a git worktree under the project's `.claude/worktrees/`. It is listed under its parent project's view, with the worktree's encoded directory token shown in the *Worktree* column.
 
-- **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named `*claude-sessions: <project>*`, that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code`.
+- **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named `*claude-sessions: <project>*`, that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code-sessions`.
 
 - **Project** — the current `project.el` project (usually a git repository). Each project has its own view. Sessions are associated with a project by their working directory. The sessions-view buffer pins its `default-directory` to the project root, so project-aware commands (`magit`, `project.el`, `compile`, …) resolve the current project directly from the view instead of prompting.
 

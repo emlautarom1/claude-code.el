@@ -258,7 +258,7 @@ cleared first and the temp file deleted afterwards."
   "With nothing managed, every transcript is a dead session."
   (claude-code-tests--with-fixtures
     (cl-letf (((symbol-function 'claude-code--live-managed) (lambda (_r) nil)))
-      (let ((ss (claude-code-sessions "/home/test/proj")))
+      (let ((ss (claude-code-project-sessions "/home/test/proj")))
         (should (= (length ss) 4))
         (should-not (seq-some #'claude-code-session-alive-p ss))
         (let ((s1 (claude-code-tests--find-session
@@ -298,7 +298,7 @@ request carries no name, so it stays blank."
         (claude-code--register auto buf "/home/test/proj" t)
         (cl-letf (((symbol-function 'claude-code--live-managed)
                    (lambda (_r) (list (cons named buf) (cons auto buf)))))
-          (let ((ss (claude-code-sessions "/home/test/proj")))
+          (let ((ss (claude-code-project-sessions "/home/test/proj")))
             (should (equal (claude-code-session-worktree
                             (claude-code-tests--find-session ss named))
                            "my-feat"))
@@ -313,7 +313,7 @@ request carries no name, so it stays blank."
         (with-current-buffer buf (setq-local ghostel--pid 4242))
         (cl-letf (((symbol-function 'claude-code--live-managed)
                    (lambda (_r) (list (cons id buf)))))
-          (let* ((ss (claude-code-sessions "/home/test/proj"))
+          (let* ((ss (claude-code-project-sessions "/home/test/proj"))
                  (s1 (claude-code-tests--find-session ss id)))
             (should (= (length ss) 4))
             (should (claude-code-session-alive-p s1))
@@ -400,7 +400,7 @@ request carries no name, so it stays blank."
       ;; not manage it but that pid is live, it is external, not dead.
       (claude-code-tests--with-live-pids '(1002)
         (let ((s (claude-code-tests--find-session
-                  (claude-code-sessions "/home/test/proj")
+                  (claude-code-project-sessions "/home/test/proj")
                   "22222222-2222-4222-8222-222222222222")))
           (should-not (claude-code-session-alive-p s))
           (should (claude-code-session-external-p s))
@@ -411,7 +411,7 @@ request carries no name, so it stays blank."
                          "My renamed session"))))
       (claude-code-tests--with-live-pids '()
         (let ((s (claude-code-tests--find-session
-                  (claude-code-sessions "/home/test/proj")
+                  (claude-code-project-sessions "/home/test/proj")
                   "22222222-2222-4222-8222-222222222222")))
           (should-not (claude-code-session-external-p s))
           (should (eq 'dead (claude-code--session-liveness s)))
@@ -419,7 +419,7 @@ request carries no name, so it stays blank."
                          "My renamed session"))))
       (claude-code-tests--with-live-pids '()
         (let ((s (claude-code-tests--find-session
-                  (claude-code-sessions "/home/test/proj")
+                  (claude-code-project-sessions "/home/test/proj")
                   "55555555-5555-4555-8555-555555555555")))
           (should (eq 'dead (claude-code--session-liveness s)))
           (should (equal (claude-code--session-display-name s)
@@ -892,8 +892,8 @@ without a prompt, so the model's guard is the only refusal
                (lambda (root id) (push (list 'resume root id) calls) 'terminal))
               ((symbol-function 'switch-to-buffer)
                (lambda (b &rest _) (push (list 'switch b) calls)))
-              ((symbol-function 'claude-code-sessions-refresh)
-               (lambda () (push '(refresh) calls)))
+              ((symbol-function 'claude-code--refresh-views)
+               (lambda (root) (push (list 'refresh root) calls)))
               ((symbol-function 'claude-code-sessions-toggle-group)
                (lambda () (push '(toggle) calls)))
               ((symbol-function 'y-or-n-p)
@@ -912,12 +912,12 @@ without a prompt, so the model's guard is the only refusal
         (setq at-point external calls nil)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((resume "/r" "e") (refresh) (switch terminal))))
+                       '((resume "/r" "e") (refresh "/r") (switch terminal))))
         ;; A dead row asks first: yes resumes, refreshes and displays...
         (setq at-point dead calls nil answer t)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((ask) (resume "/r" "d") (refresh) (switch terminal))))
+                       '((ask) (resume "/r" "d") (refresh "/r") (switch terminal))))
         ;; ...no stops at the prompt.
         (setq calls nil answer nil)
         (claude-code-sessions-visit)
@@ -1072,10 +1072,10 @@ second window would otherwise lose its row whenever the first one refreshes."
 (ert-deftest claude-code-test-view-delete-keeps-point ()
   "Deleting a row leaves point on the row that took its place, so `d d' walks down."
   (let ((deleted '()))
-    (cl-letf* ((real (symbol-function 'claude-code-sessions))
+    (cl-letf* ((real (symbol-function 'claude-code-project-sessions))
                ((symbol-function 'claude-code-delete)
                 (lambda (s) (push (claude-code-session-id s) deleted)))
-               ((symbol-function 'claude-code-sessions)
+               ((symbol-function 'claude-code-project-sessions)
                 (lambda (&rest args)
                   (seq-remove (lambda (s)
                                 (member (claude-code-session-id s) deleted))
@@ -1114,9 +1114,9 @@ second window would otherwise lose its row whenever the first one refreshes."
           (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
                     ((symbol-function 'project-root) (lambda (_p) root))
                     ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq buf b))))
-            ;; `claude' runs a real refresh over the fixtures; the pin must
-            ;; outlive it, so the refresh is deliberately not stubbed out.
-            (claude-code)
+            ;; Opening the view runs a real refresh over the fixtures; the pin
+            ;; must outlive it, so the refresh is deliberately not stubbed out.
+            (claude-code-sessions)
             (with-current-buffer buf
               (should (derived-mode-p 'claude-code-sessions-mode))
               (should (equal claude-code--project (claude-code--normalize-root root)))
@@ -1159,36 +1159,63 @@ is created in the foreign buffer."
                           (symbol-name (if (consp local) (car local) local))))
                        (buffer-local-variables))))))))
 
-(ert-deftest claude-code-test-spawn-menu-opens-view-first ()
-  "The spawn menu works from any buffer, dispatching over the project's view.
-The view must be the current buffer by the time the transient is set up,
-so its spawn suffix lands on it."
-  (let ((calls '()))
-    (cl-letf (((symbol-function 'claude-code)
-               (lambda ()
-                 (push 'open calls)
-                 (claude-code-sessions-mode)))
-              ((symbol-function 'transient-setup)
-               (lambda (&rest _)
-                 (push (list 'menu (derived-mode-p 'claude-code-sessions-mode))
-                       calls))))
-      (with-temp-buffer
-        (claude-code-spawn-menu)
-        (should (equal (reverse calls)
-                       '(open (menu claude-code-sessions-mode)))))
-      (setq calls nil)
-      (with-temp-buffer
-        (claude-code-sessions-mode)
-        (claude-code-spawn-menu)
-        (should (equal calls '((menu claude-code-sessions-mode))))))))
+(defun claude-code-tests--view-buffers ()
+  "Return the sessions-view buffers that exist right now.
+Tests diff this around an act rather than asserting over the whole
+`buffer-list', so a real view left open by the Emacs running the suite (as
+`M-x ert' has) cannot fail them."
+  (seq-filter (lambda (buffer)
+                (string-prefix-p "*claude-sessions: " (buffer-name buffer)))
+              (buffer-list)))
 
-(ert-deftest claude-code-test-sessions-new-args-require-live-menu ()
-  "A direct call spawns with no options; only a live spawn menu's args apply."
+(ert-deftest claude-code-test-project-root-may-prompt ()
+  "Resolving through `project.el' lets it prompt when the buffer has no project."
+  (let ((maybe-prompt 'unset))
+    (cl-letf (((symbol-function 'project-current)
+               (lambda (&optional prompt &rest _) (setq maybe-prompt prompt) 'proj))
+              ((symbol-function 'project-root) (lambda (_p) "/home/test/picked")))
+      (with-temp-buffer
+        (should (equal (claude-code--project-root)
+                       (claude-code--normalize-root "/home/test/picked")))
+        (should maybe-prompt)))))
+
+(ert-deftest claude-code-test-spawn-menu-resolves-project-up-front ()
+  "The menu resolves the project into its scope and opens no view to do it.
+A sessions view names its own project without consulting `project.el'; any
+other buffer asks `project.el', which prompts when the buffer has no project."
+  (let ((scopes '())
+        (views-before (claude-code-tests--view-buffers)))
+    (cl-letf (((symbol-function 'transient-setup)
+               (lambda (&rest args) (push (plist-get (nthcdr 3 args) :scope) scopes)))
+              ((symbol-function 'claude-code-sessions)
+               (lambda () (ert-fail "Opened the sessions view"))))
+      (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
+                ((symbol-function 'project-root) (lambda (_p) "/home/test/proj")))
+        (with-temp-buffer (claude-code-spawn-menu)))
+      ;; In a view the buffer-local project wins, so `project.el' is never asked
+      ;; -- which is what makes the menu work in a view for a directory the
+      ;; selected buffer knows nothing about.
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&rest _) (ert-fail "Consulted project.el in a view"))))
+        (claude-code-tests--in-view
+          (setq-local claude-code--project "/home/test/other")
+          (claude-code-spawn-menu)))
+      (should (equal (reverse scopes)
+                     (list (claude-code--normalize-root "/home/test/proj")
+                           "/home/test/other")))
+      (should-not (seq-difference (claude-code-tests--view-buffers) views-before)))))
+
+(ert-deftest claude-code-test-spawn-args-require-live-menu ()
+  "A direct call spawns with no options; only a live menu's scope and args apply."
   (let ((spawn-args nil))
     (cl-letf (((symbol-function 'claude-code-spawn)
                (lambda (root &rest kw) (setq spawn-args (cons root kw))))
-              ((symbol-function 'claude-code-sessions-refresh) #'ignore)
+              ((symbol-function 'claude-code--refresh-views) #'ignore)
+              ((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'read-string) (lambda (&rest _) ""))
+              ;; Stubbed at the real arity, which the transient built into
+              ;; Emacs 30 caps at zero.
+              ((symbol-function 'transient-scope) (lambda () "/scoped"))
               ;; Transient signals on a nil prefix, so hold the command to that
               ;; contract whichever version is installed.
               ((symbol-function 'transient-args)
@@ -1198,14 +1225,155 @@ so its spawn suffix lands on it."
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
         (let ((transient-current-command nil))
-          (call-interactively #'claude-code-sessions-new))
+          (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
                        '("/r" :prompt nil :worktree nil :model nil :effort nil)))
+        ;; With a menu live the root comes from its scope, not from whichever
+        ;; buffer the suffix happens to run in.
         (let ((transient-current-command 'claude-code-spawn-menu))
-          (call-interactively #'claude-code-sessions-new))
+          (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/r" :prompt nil :worktree t :model "opus"
+                       '("/scoped" :prompt nil :worktree t :model "opus"
                          :effort "xhigh")))))))
+
+(ert-deftest claude-code-test-spawn-menu-scope-reaches-the-suffix ()
+  "The real menu carries its project through to the spawn.
+Driven through transient itself, keys and all: handing the project down as the
+prefix's scope is what frees the menu from the view, so nothing about transient
+is stubbed here."
+  (let ((spawn-args nil)
+        (instance (generate-new-buffer " *cc-instance*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code-spawn)
+                   (lambda (root &rest kw)
+                     (setq spawn-args (cons root kw))
+                     instance))
+                  ((symbol-function 'claude-code--refresh-views) #'ignore)
+                  ((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
+                  ((symbol-function 'project-root) (lambda (_p) "/home/test/proj")))
+          (with-temp-buffer
+            (claude-code-spawn-menu)
+            ;; `-w' toggles the worktree switch, `n' spawns, RET answers the
+            ;; initial-prompt read with the empty string.
+            (execute-kbd-macro (kbd "- w n RET")))
+          (should (equal spawn-args
+                         (list (claude-code--normalize-root "/home/test/proj")
+                               :prompt nil :worktree t :model nil :effort nil))))
+      ;; A failure mid-macro would otherwise leave transient's keymap on
+      ;; `overriding-terminal-local-map' and its hooks armed for every later
+      ;; test, hiding the real failure behind unrelated ones.
+      (transient--emergency-exit)
+      (kill-buffer instance))))
+
+(ert-deftest claude-code-test-mutations-refresh-every-matching-view ()
+  "Spawn, resume, kill and delete redraw every view of their project and no other.
+A second view of the same project cannot go stale behind the one being acted on,
+and it is redrawn whether or not it is displayed.  A view of another project is
+left alone."
+  (let* ((root (claude-code--normalize-root "/home/test/proj"))
+         (redrawn '())
+         (acting (generate-new-buffer " *cc-view-acting*"))
+         (sibling (generate-new-buffer " *cc-view-sibling*"))
+         (other (generate-new-buffer " *cc-view-other*"))
+         (instance (generate-new-buffer " *cc-instance*"))
+         (alive (claude-code-session--create :id "a" :alive-p t))
+         (dead (claude-code-session--create :id "d"))
+         (both (sort (list (buffer-name acting) (buffer-name sibling)) #'string<))
+         (redrawn-since (lambda () (prog1 (sort redrawn #'string<)
+                                     (setq redrawn nil)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code--redraw)
+                   (lambda (&rest _) (push (buffer-name) redrawn)))
+                  ((symbol-function 'claude-code-spawn) (lambda (&rest _) instance))
+                  ((symbol-function 'claude-code-resume) (lambda (&rest _) instance))
+                  ((symbol-function 'claude-code-kill) #'ignore)
+                  ((symbol-function 'claude-code-delete) #'ignore)
+                  ;; The spawn displays with `pop-to-buffer', the resume with
+                  ;; the `switch-to-buffer' RET hands down.
+                  ((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'switch-to-buffer) #'ignore)
+                  ((symbol-function 'read-string) (lambda (&rest _) ""))
+                  ((symbol-function 'y-or-n-p) (lambda (_) t))
+                  ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+          (pcase-dolist (`(,buffer . ,project)
+                         (list (cons acting root) (cons sibling root)
+                               (cons other (claude-code--normalize-root
+                                            "/home/test/elsewhere"))))
+            (with-current-buffer buffer
+              (claude-code-sessions-mode)
+              (setq claude-code--project project)))
+          ;; Spawning from outside any view still reaches both of the project's.
+          (with-temp-buffer (claude-code--spawn-session root))
+          (should (equal (funcall redrawn-since) both))
+          (with-current-buffer acting
+            (cl-letf (((symbol-function 'claude-code--session-at-point)
+                       (lambda () dead)))
+              (claude-code-sessions-visit))
+            (should (equal (funcall redrawn-since) both))
+            (puthash "a" alive claude-code--session-table)
+            (setq claude-code--marks (list "a"))
+            (claude-code-sessions-kill)
+            (should (equal (funcall redrawn-since) both))
+            (puthash "d" dead claude-code--session-table)
+            (setq claude-code--marks (list "d"))
+            (claude-code-sessions-delete)
+            (should (equal (funcall redrawn-since) both))))
+      (mapc #'kill-buffer (list acting sibling other instance)))))
+
+(ert-deftest claude-code-test-spawn-displays-the-instance ()
+  "A spawn displays its instance, through `display-buffer' rather than in place.
+The menu runs from any buffer, so the instance must not take over the window
+that spawned it; focusing a row from the view stays same-window."
+  (let ((shown '())
+        (instance (generate-new-buffer " *cc-instance*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code-spawn) (lambda (&rest _) instance))
+                  ((symbol-function 'claude-code--refresh-views) #'ignore)
+                  ((symbol-function 'read-string) (lambda (&rest _) ""))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (b &rest _) (push (list 'pop b) shown)))
+                  ((symbol-function 'switch-to-buffer)
+                   (lambda (b &rest _) (push (list 'switch b) shown))))
+          (with-temp-buffer (claude-code--spawn-session "/r"))
+          (claude-code-tests--with-managed-buffer session-buffer
+            (claude-code-focus (claude-code-session--create
+                                :id "id" :alive-p t :buffer session-buffer))
+            (should (equal (reverse shown)
+                           (list (list 'pop instance)
+                                 (list 'switch session-buffer))))))
+      (kill-buffer instance))))
+
+(ert-deftest claude-code-test-command-surface ()
+  "The spawn menu's suffix is never offered by `M-x'; the entry points always are.
+Under Emacs's own predicate the mode tags scope the view's commands out, leaving
+the entry points alone.  Transient installs a predicate that ignores mode tags,
+so there the view's commands are offered too and each one's guard is the real
+boundary -- but the suffix stays hidden either way, which is what its
+`completion-predicate' buys.  Only commands this package defines are considered,
+so an unrelated `claude-code'-prefixed package cannot fail this."
+  (let ((ours '())
+        (entry-points (seq-filter #'fboundp '(claude-code-sessions
+                                              claude-code-spawn-menu
+                                              claude-code-sessions-mode
+                                              claude-code-mcp-stop))))
+    (mapatoms (lambda (sym)
+                (when (and (commandp sym)
+                           (member (file-name-base (or (symbol-file sym 'defun) ""))
+                                   '("claude-code" "claude-code-mcp")))
+                  (push sym ours))))
+    (should (memq 'claude-code--spawn-session ours))
+    (with-temp-buffer
+      (let ((offered (lambda (predicate)
+                       (sort (seq-filter (lambda (sym)
+                                           (funcall predicate sym (current-buffer)))
+                                         ours)
+                             #'string<))))
+        (should (equal (funcall offered #'command-completion-default-include-p)
+                       (sort entry-points #'string<)))
+        (should-not (memq 'claude-code--spawn-session
+                          (funcall offered
+                                   #'transient-command-completion-not-suffix-only-p)))))))
 
 (defun claude-code-tests--tagged-ids ()
   "Return, sorted, the ids of the rows currently showing a `*' mark tag."
@@ -1283,8 +1451,8 @@ so its spawn suffix lands on it."
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()
   "A mark whose session leaves the listing is dropped, not left dormant."
   (let ((gone '()))
-    (cl-letf* ((real (symbol-function 'claude-code-sessions))
-               ((symbol-function 'claude-code-sessions)
+    (cl-letf* ((real (symbol-function 'claude-code-project-sessions))
+               ((symbol-function 'claude-code-project-sessions)
                 (lambda (&rest args)
                   (seq-remove (lambda (s)
                                 (member (claude-code-session-id s) gone))
@@ -1306,27 +1474,39 @@ so its spawn suffix lands on it."
         (should-not (claude-code-tests--tagged-ids))))))
 
 (ert-deftest claude-code-test-kill-and-delete-keep-unacted-marks ()
-  "Kill and delete drop only the marks they consumed."
+  "Kill and delete drop the marks they consumed, in every view of the root.
+An unacted mark survives."
   (let* ((acted '())
+         (root "/home/test/proj")
+         (sibling (generate-new-buffer " *cc-view-sibling*"))
          (record (lambda (s) (push (claude-code-session-id s) acted))))
-    (cl-letf (((symbol-function 'claude-code-kill) record)
-              ((symbol-function 'claude-code-delete) record)
-              ((symbol-function 'yes-or-no-p) (lambda (_) t))
-              ((symbol-function 'claude-code-sessions-refresh) #'ignore))
-      (claude-code-tests--in-view
-        (puthash "a" (claude-code-session--create :id "a" :alive-p t)
-                 claude-code--session-table)
-        (puthash "d" (claude-code-session--create :id "d")
-                 claude-code--session-table)
-        (setq-local claude-code--marks (list "a" "d"))
-        ;; Kill acts on the alive mark only; the dead mark must survive.
-        (claude-code-sessions-kill)
-        (should (equal acted '("a")))
-        (should (equal claude-code--marks '("d")))
-        ;; Delete then consumes the remaining dead mark.
-        (claude-code-sessions-delete)
-        (should (equal acted '("d" "a")))
-        (should-not claude-code--marks)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code-kill) record)
+                  ((symbol-function 'claude-code-delete) record)
+                  ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                  ((symbol-function 'claude-code--refresh-views) #'ignore))
+          (with-current-buffer sibling
+            (claude-code-sessions-mode)
+            (setq claude-code--project root)
+            (setq claude-code--marks (list "a" "d")))
+          (claude-code-tests--in-view
+            (setq-local claude-code--project root)
+            (puthash "a" (claude-code-session--create :id "a" :alive-p t)
+                     claude-code--session-table)
+            (puthash "d" (claude-code-session--create :id "d")
+                     claude-code--session-table)
+            (setq-local claude-code--marks (list "a" "d"))
+            ;; Kill acts on the alive mark only; the dead mark must survive.
+            (claude-code-sessions-kill)
+            (should (equal acted '("a")))
+            (should (equal claude-code--marks '("d")))
+            (should (equal (buffer-local-value 'claude-code--marks sibling) '("d")))
+            ;; Delete then consumes the remaining dead mark.
+            (claude-code-sessions-delete)
+            (should (equal acted '("d" "a")))
+            (should-not claude-code--marks)
+            (should-not (buffer-local-value 'claude-code--marks sibling))))
+      (kill-buffer sibling))))
 
 ;;;; Integration (real Ghostel + real `claude')
 ;;
@@ -1396,22 +1576,22 @@ tests themselves run inside a Claude Code session."
           (should (member
                    (claude-code-tests--await
                     (lambda () (let ((s (claude-code-tests--find-session
-                                         (claude-code-sessions root) id)))
+                                         (claude-code-project-sessions root) id)))
                                  (and s (claude-code-session-status s))))
                     45)
                    '("busy" "idle" "waiting")))
-          (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+          (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (claude-code-session-alive-p s))
             (claude-code-kill s))
           ;; The model reports it dead immediately (it is no longer managed)...
-          (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+          (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (or (null s) (not (claude-code-session-alive-p s)))))
           ;; ...and the OS process must actually terminate (Ghostel tears the
           ;; child down asynchronously, so give its sentinel time to run).
           (should (claude-code-tests--await
                    (lambda () (not (claude-code--pid-live-p pid))) 15))
           ;; The now-dead transcript can be deleted.
-          (let ((s (claude-code-tests--find-session (claude-code-sessions root) id)))
+          (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (when (and s (claude-code-session-transcript s)
                        (file-exists-p (claude-code-session-transcript s)))
               (claude-code-delete s)

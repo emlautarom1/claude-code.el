@@ -6,12 +6,12 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 
 ## Features
 
-- **Per-project sessions view** (`M-x claude-code`) — a `tabulated-list-mode` buffer listing every session of the current `project.el` project, alive and dead.
+- **Per-project sessions view** (`M-x claude-code-sessions`) — a `tabulated-list-mode` buffer listing every session of the current `project.el` project, alive and dead.
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
-- **`transient` spawn menu** (`n`) for the spawn flags: worktree, model, effort.
+- **`transient` spawn menu** (`M-x claude-code-spawn-menu` from any buffer, `n` in the view) for the spawn flags: worktree, model, effort.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -35,12 +35,12 @@ For `use-package` users:
 ```elisp
 (use-package claude-code
   :vc (:url "https://github.com/emlautarom1/claude-code.el" :rev :newest)
-  :commands (claude-code claude-code-spawn-menu))
+  :commands (claude-code-sessions claude-code-spawn-menu))
 ```
 
 ## Usage
 
-Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-code-spawn-menu` from anywhere to open it together with the spawn menu; both use the current project, prompting for one when there is none. Keys in the sessions view:
+Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to spawn an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. Keys in the sessions view:
 
 | Key       | Action                                                      |
 | --------- | ----------------------------------------------------------- |
@@ -70,7 +70,7 @@ Run `M-x claude-code` in a project to open the sessions view, or `M-x claude-cod
 (claude-code-spawn root :worktree "feature")  ; named
 
 ;; Query the model.
-(claude-code-sessions root)   ; => list of `claude-code-session' structs
+(claude-code-project-sessions root)   ; => list of `claude-code-session' structs
 
 ;; Resume a session by id, then act on sessions.
 (claude-code-resume root "SESSION-UUID")
