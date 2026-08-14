@@ -127,20 +127,23 @@ a caller resolving many ids parse sessions/ once."
 Transcripts are append-only, so an unchanged modification time means
 the extracted fields are still valid.")
 
-(defun claude-code--json-line-field (regexp field)
-  "Return FIELD from the newest line in the current buffer matching REGEXP.
-Scans backward from the end and returns FIELD from the first match whose line
-parses as JSON with a non-nil FIELD, skipping earlier-encountered matches that
-lack it -- e.g. a line where REGEXP hits FIELD inside a nested value rather than
-as a top-level key.  Point is moved.  Returns nil when no such line exists."
+(defun claude-code--json-line-field (literal field)
+  "Return FIELD from the newest line in the current buffer containing LITERAL.
+Scans backward from the end and returns FIELD from the first such line that
+parses as JSON with a non-nil FIELD, skipping the ones that lack it -- a line
+carrying LITERAL inside a message, or as a nested key rather than a top-level
+one.  LITERAL need only be loose enough to catch every line that sets FIELD,
+since the parsed top-level FIELD is what confirms a match.  Point is moved.
+Returns nil when no such line exists."
   (goto-char (point-max))
   (let (result)
-    (while (and (not result) (re-search-backward regexp nil t))
-      (let* ((line (buffer-substring-no-properties
-                    (line-beginning-position) (line-end-position)))
-             (obj (ignore-errors (json-parse-string line))))
-        (when obj (setq result (gethash field obj)))
-        (goto-char (line-beginning-position))))
+    (while (and (not result) (search-backward literal nil t))
+      (goto-char (line-beginning-position))
+      (let ((obj (ignore-errors
+                   (json-parse-string
+                    (buffer-substring-no-properties
+                     (point) (line-end-position))))))
+        (when obj (setq result (gethash field obj)))))
     result))
 
 (defun claude-code--read-transcript-fields (file)
@@ -149,16 +152,12 @@ as a top-level key.  Point is moved.  Returns nil when no such line exists."
   (with-temp-buffer
     (insert-file-contents file)
     (list :title
-          (or (claude-code--json-line-field
-               "\"type\"[[:space:]]*:[[:space:]]*\"custom-title\"" "customTitle")
-              (claude-code--json-line-field
-               "\"type\"[[:space:]]*:[[:space:]]*\"ai-title\"" "aiTitle"))
+          (or (claude-code--json-line-field "\"custom-title\"" "customTitle")
+              (claude-code--json-line-field "\"ai-title\"" "aiTitle"))
           :last-prompt
-          (claude-code--json-line-field
-           "\"type\"[[:space:]]*:[[:space:]]*\"last-prompt\"" "lastPrompt")
+          (claude-code--json-line-field "\"last-prompt\"" "lastPrompt")
           :last-active
-          (let ((ts (claude-code--json-line-field
-                     "\"timestamp\"[[:space:]]*:" "timestamp")))
+          (let ((ts (claude-code--json-line-field "\"timestamp\"" "timestamp")))
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
 (defun claude-code--transcript-fields (file)

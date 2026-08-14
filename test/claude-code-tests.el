@@ -257,6 +257,28 @@ cleared first and the temp file deleted afterwards."
              (plist-get (claude-code--transcript-fields file) :last-active)
              (date-to-time "2026-06-10T13:23:27.697Z")))))
 
+(ert-deftest claude-code-test-transcript-fields-title-quoted-in-a-message ()
+  "A message quoting a field's name is not mistaken for the line that sets it.
+The backward scan picks lines by a literal, so the conversation's own text can
+put that literal in its way; the parsed top-level key is what decides."
+  (claude-code-tests--with-transcript file
+      ;; The message is exactly the literal the title scan searches for, so the
+      ;; scan reaches this line first and has to reject it on the parsed keys.
+      '("{\"type\":\"ai-title\",\"aiTitle\":\"real\"}"
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"custom-title\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}")
+      1800000000
+    (should (equal (plist-get (claude-code--transcript-fields file) :title)
+                   "real"))))
+
+(ert-deftest claude-code-test-transcript-fields-custom-title-wins ()
+  "A `custom-title' outranks an `ai-title', whichever came last."
+  (claude-code-tests--with-transcript file
+      '("{\"type\":\"custom-title\",\"customTitle\":\"renamed\"}"
+        "{\"type\":\"ai-title\",\"aiTitle\":\"generated\"}")
+      1800000000
+    (should (equal (plist-get (claude-code--transcript-fields file) :title)
+                   "renamed"))))
+
 (ert-deftest claude-code-test-transcript-fields-last-active-snapshot-only ()
   "With only `file-history-snapshot' lines, last-active falls back to the mtime."
   (claude-code-tests--with-transcript file
