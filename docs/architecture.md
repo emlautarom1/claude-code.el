@@ -43,7 +43,11 @@ The struct holds the transcript's raw name sources (the `title` and the last pro
 
 ### Resource usage
 
-`claude-code--process-snapshot` builds the process table once per refresh; `claude-code--process-usage` sums `pcpu`/`rss` over a PID's whole subtree (Claude spawns child processes). `pcpu` may be a lifetime average depending on platform. Usage is nil when the snapshot has no entry for the PID — a process that died before it was sampled reads as unknown, not as idle — and the view leaves those cells empty.
+`claude-code--process-usage` sums `pcpu`/`rss` over a PID's whole subtree, because Claude spawns child processes for its tool calls. `pcpu` may be a lifetime average depending on platform. Usage is nil when no process runs under the PID — one that died before it was sampled reads as unknown, not as idle — and the view leaves those cells empty.
+
+A subtree needs to know who parents whom, and the two ways of learning that differ in how much of the machine they read. Where the system names a process's children directly (`claude-code--proc-children-p`, Linux's `/proc/<pid>/task/<pid>/children`), the cost is one read per process in the subtree: 30 two-process subtrees take **5 ms** on a machine running 700. Where it does not, `claude-code--process-snapshot` reads every process to invert their `ppid`s — **33 ms** however little of it is wanted, and the reason a redraw builds that table at most once and shares it across every row. Only a subtree of several hundred processes would make the direct path the slower one.
+
+`claude-code--child-pids` reads the main thread's children, the one every observed `claude` forks its tool subprocesses from; a child forked from another of its threads goes uncounted until that thread exits and the child re-parents. Reading every thread instead costs 14 ms for those same 30 subtrees and, on a `claude`, finds the same processes.
 
 ## The view
 

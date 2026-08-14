@@ -47,12 +47,14 @@ The buffer is killed afterwards even when BODY already killed it."
 (defmacro claude-code-tests--with-live-pids (pids &rest body)
   "Run BODY with exactly the pids in PIDS reading as live processes.
 Pinning the process table keeps a fixture pid that happens to be live on the
-host from classifying its session as external.  Every pinned pid parents to 0,
-so no pid is its own ancestor and a subtree walk always terminates."
+host from classifying its session as external, or from lending it a real
+subtree.  Every pinned pid parents to 0 and has no children, so no pid is its
+own ancestor and a subtree walk always terminates."
   (declare (indent 1))
   (let ((live (gensym "live")))
     `(let ((,live ,pids))
        (cl-letf (((symbol-function 'list-system-processes) (lambda () ,live))
+                 ((symbol-function 'claude-code--child-pids) #'ignore)
                  ((symbol-function 'process-attributes)
                   (lambda (p) (and (memql p ,live) '((ppid . 0))))))
          ,@body))))
@@ -415,24 +417,71 @@ query is rooted at the worktree rather than the parent."
                   "33333333-3333-4333-8333-333333333333")))
           (should (eq 'external (claude-code--session-liveness s))))))))
 
+(defconst claude-code-tests--process-tree
+  '((100 . ((ppid . 1) (pcpu . 1.0) (rss . 1000)))
+    (101 . ((ppid . 100) (pcpu . 2.0) (rss . 2000)))
+    (102 . ((ppid . 100) (pcpu . 3.0) (rss . 3000)))
+    (103 . ((ppid . 102) (pcpu . 4.0) (rss . 4000)))
+    (200 . ((ppid . 1) (pcpu . 9.0) (rss . 9000))))
+  "A process forest for the usage tests.
+100 branches and 102 has a child of its own, so a subtree walk has to cope
+with a node whose children are queued behind a sibling's.")
+
+(defmacro claude-code-tests--with-process-tree (tree &rest body)
+  "Run BODY with the system process table stubbed to TREE.
+TREE is an alist of (PID . ATTRIBUTES); the `ppid' entries make it a forest,
+and both ways of finding a process's children read it."
+  (declare (indent 1))
+  (let ((forest (gensym "forest")))
+    `(let ((,forest ,tree))
+       (cl-letf (((symbol-function 'list-system-processes)
+                  (lambda () (mapcar #'car ,forest)))
+                 ((symbol-function 'process-attributes)
+                  (lambda (p) (alist-get p ,forest)))
+                 ((symbol-function 'claude-code--child-pids)
+                  (lambda (p) (cl-loop for (child . attrs) in ,forest
+                                       when (eql p (alist-get 'ppid attrs))
+                                       collect child))))
+         ,@body))))
+
 (ert-deftest claude-code-test-process-usage ()
-  "Usage sums the pcpu/rss of a PID's whole subtree."
-  (let ((tree '((100 . ((ppid . 1) (pcpu . 1.0) (rss . 1000)))
-                (101 . ((ppid . 100) (pcpu . 2.0) (rss . 2000)))
-                (102 . ((ppid . 101) (pcpu . 3.0) (rss . 3000)))
-                (200 . ((ppid . 1) (pcpu . 9.0) (rss . 9000))))))
-    (cl-letf (((symbol-function 'list-system-processes)
-               (lambda () (mapcar #'car tree)))
-              ((symbol-function 'process-attributes)
-               (lambda (p) (alist-get p tree))))
-      (let ((usage (claude-code--process-usage 100)))
-        (should (equal (car usage) 6.0))
-        (should (= (cdr usage) 6000)))
-      ;; A non-integer pid yields nil.
-      (should (null (claude-code--process-usage nil)))
-      ;; So does a pid the process table does not list: a process that died
-      ;; between the snapshot and the sum must not read as an idle one.
-      (should (null (claude-code--process-usage 999999))))))
+  "Usage sums the pcpu/rss of a PID's whole subtree, however children are found."
+  (claude-code-tests--with-process-tree claude-code-tests--process-tree
+    ;; Both sources of children: named per process, and read off a whole-table
+    ;; snapshot.  Neither may change what a subtree sums to.
+    (dolist (per-process '(t nil))
+      (let ((claude-code--proc-children-p per-process))
+        (should (equal (claude-code--process-usage 100) '(10.0 . 10000)))
+        ;; A leaf sums to itself, not to its parent's subtree.
+        (should (equal (claude-code--process-usage 200) '(9.0 . 9000)))
+        ;; A non-integer pid yields nil.
+        (should (null (claude-code--process-usage nil)))
+        ;; So does a pid no process runs under: one that died before it was
+        ;; sampled must read as unknown, not as an idle 0.
+        (should (null (claude-code--process-usage 999999)))))))
+
+(ert-deftest claude-code-test-process-usage-snapshot-survives-a-walk ()
+  "A shared snapshot sums every subtree, not just the first one walked.
+The view builds one snapshot and hands it to every row, so a walk that spliced
+the snapshot's own child lists would leave later rows reading a tree it had
+rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
+  (claude-code-tests--with-process-tree claude-code-tests--process-tree
+    (let ((claude-code--proc-children-p nil)
+          (snapshot (claude-code--process-snapshot)))
+      (should (equal (claude-code--process-usage 100 snapshot) '(10.0 . 10000)))
+      (should (equal (claude-code--process-usage 102 snapshot) '(7.0 . 7000)))
+      (should (equal (claude-code--process-usage 100 snapshot) '(10.0 . 10000))))))
+
+(ert-deftest claude-code-test-child-pids ()
+  "`claude-code--child-pids' names the children of a live process."
+  (skip-unless claude-code--proc-children-p)
+  (let ((proc (start-process "cc-test-child" nil "sleep" "30")))
+    (unwind-protect
+        (progn
+          (should (memql (process-id proc) (claude-code--child-pids (emacs-pid))))
+          ;; A pid no process runs under has no children, and does not error.
+          (should (null (claude-code--child-pids 999999))))
+      (delete-process proc))))
 
 (ert-deftest claude-code-test-normalize-root ()
   "Root normalisation resolves symlinks so a symlinked root matches Claude's cwd."

@@ -344,11 +344,32 @@ that have no transcript yet."
         (push (claude-code--alive-session id buffer live) sessions)))
     (nreverse sessions)))
 
+(defvar claude-code--proc-children-p
+  (file-readable-p (format "/proc/%d/task/%d/children" (emacs-pid) (emacs-pid)))
+  "Whether the system names a process's children, as Linux does under `/proc'.
+Where it does, a session's subtree is sampled on its own; where it does not,
+the only way to find children is to walk the whole process table.  This probes
+the very file `claude-code--child-pids' reads, because a kernel built without
+`CONFIG_PROC_CHILDREN' offers the enclosing directory but not the file, and a
+subtree that silently sums to its root alone would read as a plausible number.")
+
+(defun claude-code--child-pids (pid)
+  "Return the pids `/proc' names as PID's children.
+`/proc' lists them per thread and this reads PID's main thread, which is the
+one every observed `claude' forks its tool subprocesses from.  A child forked
+from another of PID's threads goes uncounted until that thread exits and the
+child re-parents to PID."
+  (ignore-errors
+    (with-temp-buffer
+      (insert-file-contents (format "/proc/%d/task/%d/children" pid pid))
+      (mapcar #'string-to-number (split-string (buffer-string) nil t)))))
+
 (defun claude-code--process-snapshot ()
   "Return (ATTRS . CHILDREN) hashes of the current process table.
 ATTRS maps a pid to its `process-attributes' alist; CHILDREN maps a
-pid to the list of its child pids.  Building this once lets several
-subtrees be summed without rescanning the system each time."
+pid to the list of its child pids.  This is the fallback source of a
+subtree where `claude-code--proc-children-p' is nil: reading every
+process is the only way left to learn who parents whom."
   (let ((attrs (make-hash-table :test 'eql))
         (children (make-hash-table :test 'eql)))
     (dolist (p (list-system-processes))
@@ -361,26 +382,33 @@ subtrees be summed without rescanning the system each time."
 
 (defun claude-code--process-usage (pid &optional snapshot)
   "Return (CPU . RSS) summed over PID's process subtree, or nil.
-Nil means no usage is available: PID is not an integer, or the process
-table holds no entry for it (a dead process, so a caller can tell it
-apart from a live but idle one).  SNAPSHOT is a table from
-`claude-code--process-snapshot'; one is built when omitted.  CPU is a
-percentage that may be a lifetime average depending on the platform;
+Nil means no usage is available: PID is not an integer, or no process runs
+under it (a dead process, so a caller can tell it apart from a live but idle
+one).  SNAPSHOT is a table from `claude-code--process-snapshot', consulted --
+and built when omitted -- only where `claude-code--proc-children-p' is nil.
+CPU is a percentage that may be a lifetime average depending on the platform;
 RSS is in kibibytes."
   (when (integerp pid)
-    (let* ((snap (or snapshot (claude-code--process-snapshot)))
-           (attrs (car snap))
-           (children (cdr snap)))
-      (when (gethash pid attrs)
-        (let ((cpu 0.0) (rss 0) (stack (list pid)))
-          (while stack
-            (let* ((p (pop stack)) (a (gethash p attrs)))
-              (when a
-                (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
-                (cl-incf rss (or (alist-get 'rss a) 0))
-                (setq stack (nconc (copy-sequence (gethash p children))
-                                   stack)))))
-          (cons cpu rss))))))
+    (let* ((snap (unless claude-code--proc-children-p
+                   (or snapshot (claude-code--process-snapshot))))
+           (attrs (if snap
+                      (lambda (p) (gethash p (car snap)))
+                    #'process-attributes))
+           (children (if snap
+                         ;; The walk splices destructively, and this list is
+                         ;; the snapshot's own -- every later row reads it too.
+                         (lambda (p) (copy-sequence (gethash p (cdr snap))))
+                       #'claude-code--child-pids))
+           (cpu 0.0) (rss 0) (stack (list pid)) (found nil))
+      ;; Only a found process queues children, so FOUND means PID itself ran.
+      (while stack
+        (let* ((p (pop stack)) (a (funcall attrs p)))
+          (when a
+            (setq found t)
+            (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
+            (cl-incf rss (or (alist-get 'rss a) 0))
+            (setq stack (nconc (funcall children p) stack)))))
+      (and found (cons cpu rss)))))
 
 (defun claude-code--session-cwd (id)
   "Return the real working directory of the running instance for session ID.
@@ -748,7 +776,10 @@ A session without a known time sorts as oldest."
 Also prunes `claude-code--marks' to the sessions this listing holds, so a mark
 cannot outlive its row and come back armed."
   (let ((sessions (claude-code-project-sessions claude-code--project))
-        (snapshot (claude-code--process-snapshot))
+        ;; One table shared by every row, and built only where a subtree
+        ;; cannot be sampled on its own.
+        (snapshot (unless claude-code--proc-children-p
+                    (claude-code--process-snapshot)))
         (now (current-time))
         (buckets (make-hash-table :test 'equal))
         (order '()))
