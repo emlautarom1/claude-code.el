@@ -557,14 +557,17 @@ rather than start it; the `:worktree' request is also recorded in the registry."
 
 ;;;###autoload
 (cl-defun claude-code-spawn (project-root &key prompt worktree model effort)
-  "Spawn a new Claude Code instance for PROJECT-ROOT; return its buffer.
-PROMPT is an optional initial prompt.
+  "Spawn a new Claude Code instance for PROJECT-ROOT; return (ID . BUFFER).
+ID is the generated session id -- a session's only durable name, and what a
+caller needs to find the session again once Claude renames BUFFER after its
+terminal title.  PROMPT is an optional initial prompt.
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
 name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
-\"max\").  The session id is generated internally and is not exposed."
-  (claude-code--launch (claude-code--new-uuid) project-root
-                       :prompt prompt :worktree worktree :model model
-                       :effort effort))
+\"max\")."
+  (let ((id (claude-code--new-uuid)))
+    (cons id (claude-code--launch id project-root
+                                  :prompt prompt :worktree worktree
+                                  :model model :effort effort))))
 
 ;;;###autoload
 (defun claude-code-resume (project-root id)
@@ -1181,14 +1184,14 @@ ARGS comes from a live `claude-code-spawn-menu'; the
                          (transient-args transient-current-command))
                  (list (claude-code--project-root))))
   (let* ((prompt (read-string "Initial prompt (empty for none): "))
-         (buffer (claude-code-spawn
-                  root
-                  :prompt (unless (string-empty-p prompt) prompt)
-                  :worktree (and (member "--worktree" args) t)
-                  :model (transient-arg-value "--model=" args)
-                  :effort (transient-arg-value "--effort=" args))))
+         (instance (claude-code-spawn
+                    root
+                    :prompt (unless (string-empty-p prompt) prompt)
+                    :worktree (and (member "--worktree" args) t)
+                    :model (transient-arg-value "--model=" args)
+                    :effort (transient-arg-value "--effort=" args))))
     (claude-code--refresh-views)
-    (pop-to-buffer buffer)))
+    (pop-to-buffer (cdr instance))))
 
 ;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.
 (put 'claude-code--spawn-session 'completion-predicate #'transient--suffix-only)

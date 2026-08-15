@@ -657,11 +657,11 @@ ignored so a partially-created worktree is still cleaned up."
     (advice-add 'claude-code--mcp-handle-request :before probe)
     (unwind-protect
         (claude-code-tests--with-top-level-env
-          (setq buffer (claude-code-spawn
-                        root :worktree t
-                        :prompt "Respond with the single word: pong"))
-          (setq id (claude-code-tests--managed-id buffer))
-          (should id)
+          (let ((instance (claude-code-spawn
+                           root :worktree t
+                           :prompt "Respond with the single word: pong")))
+            (setq id (car instance))
+            (setq buffer (cdr instance)))
           (setq pid (buffer-local-value 'ghostel--pid buffer))
           ;; The real CLI performs the MCP initialize handshake against us.
           (should (claude-code-tests--await (lambda () initialized) 45))

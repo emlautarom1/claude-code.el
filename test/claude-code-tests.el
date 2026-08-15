@@ -717,9 +717,11 @@ instance, and install title tracking; only the CLI argument list differs."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (let ((execs '())
-            (buffers '()))
+            (buffers '())
+            (spawned nil))
         (claude-code-tests--recording-launch execs
-          (push (claude-code-spawn "/r" :worktree "feat" :model "opus") buffers)
+          (setq spawned (claude-code-spawn "/r" :worktree "feat" :model "opus"))
+          (push (cdr spawned) buffers)
           (push (claude-code-resume "/r" "given-id") buffers)
           (let* ((calls (reverse execs))
                  (spawn-args (nth 1 (nth 0 calls)))
@@ -731,6 +733,9 @@ instance, and install title tracking; only the CLI argument list differs."
             (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
             (should (equal (nth 0 spawn-args) "--session-id"))
             (should (string-match-p claude-code-tests--uuid-re spawned-id))
+            ;; Spawn hands back that id with the buffer hosting it.
+            (should (equal (car spawned) spawned-id))
+            (should (eq (cdr spawned) (nth 0 (nth 0 calls))))
             (should (equal (nthcdr 2 spawn-args)
                            '("-w" "feat" "--model" "opus"
                              "--mcp-config" "{}")))
@@ -1550,7 +1555,7 @@ is stubbed here."
         (cl-letf (((symbol-function 'claude-code-spawn)
                    (lambda (root &rest kw)
                      (setq spawn-args (cons root kw))
-                     instance))
+                     (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code--refresh-views) #'ignore)
                   ((symbol-function 'pop-to-buffer) #'ignore)
                   ((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
@@ -1596,7 +1601,8 @@ the acting view's root would leave a view of the same session stale."
                    (lambda (&rest _)
                      (push (buffer-name) redrawn)
                      (push (buffer-name) ever-redrawn)))
-                  ((symbol-function 'claude-code-spawn) (lambda (&rest _) instance))
+                  ((symbol-function 'claude-code-spawn)
+                   (lambda (&rest _) (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code-resume) (lambda (&rest _) instance))
                   ((symbol-function 'claude-code-kill) #'ignore)
                   ((symbol-function 'claude-code-delete) #'ignore)
@@ -1647,7 +1653,8 @@ that spawned it; focusing a row from the view stays same-window."
   (let ((shown '())
         (instance (generate-new-buffer " *cc-instance*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'claude-code-spawn) (lambda (&rest _) instance))
+        (cl-letf (((symbol-function 'claude-code-spawn)
+                   (lambda (&rest _) (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code--refresh-views) #'ignore)
                   ((symbol-function 'read-string) (lambda (&rest _) ""))
                   ((symbol-function 'pop-to-buffer)
@@ -1918,12 +1925,6 @@ tests themselves run inside a Claude Code session."
            process-environment)))
      ,@body))
 
-(defun claude-code-tests--managed-id (buffer)
-  "Return the id of the managed instance hosted in BUFFER, or nil for none."
-  (cl-loop for id being the hash-keys of claude-code--managed
-           using (hash-values plist)
-           when (eq (plist-get plist :buffer) buffer) return id))
-
 (defun claude-code-tests--await (pred timeout)
   "Pump events until PRED is non-nil or TIMEOUT seconds elapse; return PRED."
   (let ((deadline (+ (float-time) timeout)))
@@ -1944,10 +1945,11 @@ tests themselves run inside a Claude Code session."
          buffer id pid)
     (unwind-protect
         (claude-code-tests--with-top-level-env
-          (setq buffer (claude-code-spawn
-                        root :prompt "Respond with the single word: pong"))
-          (setq id (claude-code-tests--managed-id buffer))
-          (should id)
+          (let ((instance (claude-code-spawn
+                           root :prompt "Respond with the single word: pong")))
+            (setq id (car instance))
+            (setq buffer (cdr instance)))
+          (should (string-match-p claude-code-tests--uuid-re id))
           ;; The title tracker survives `ghostel-exec's `ghostel-mode' switch.
           (should (eq (buffer-local-value 'ghostel-buffer-name-function buffer)
                       #'claude-code--ghostel-buffer-name))

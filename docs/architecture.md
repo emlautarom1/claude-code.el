@@ -39,7 +39,7 @@ The struct holds the transcript's raw name sources (the `title` and the last pro
 
 ### Registry lifecycle
 
-`claude-code-spawn` / `claude-code-resume` create a Ghostel buffer, record it in `claude-code--managed`, and register `claude-code--on-exit` on `ghostel-exit-functions`. When the process dies the entry is removed and the session naturally becomes dead on the next query.
+`claude-code-spawn` / `claude-code-resume` create a Ghostel buffer, record it in `claude-code--managed`, and register `claude-code--on-exit` on `ghostel-exit-functions`. A spawn generates the session id, so it hands back `(ID . BUFFER)`: the buffer is renamed after Claude's terminal title, leaving the id as the caller's only stable handle on what it just started. When the process dies the entry is removed and the session naturally becomes dead on the next query.
 
 ### Resource usage
 

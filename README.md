@@ -64,6 +64,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 ;; Spawn a new instance in the current project with an initial prompt.
 (claude-code-spawn (project-root (project-current t))
                    :prompt "Explain this repository" :model "opus")
+;; => (SESSION-ID . BUFFER)
 
 ;; Spawn in a git worktree.
 (claude-code-spawn root :worktree t)          ; auto-named
