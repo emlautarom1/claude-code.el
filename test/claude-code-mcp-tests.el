@@ -226,18 +226,15 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
                    "string"))))
 
 (ert-deftest claude-code-mcp-test-spawn-schema ()
-  "`spawn' advertises every option as optional, with the effort levels enumerated."
+  "`spawn' advertises every option as optional and holds none to a set of values."
   (let* ((schema (claude-code-mcp-tests--tool-schema "spawn"))
          (properties (alist-get 'properties schema)))
     (should (equal (alist-get 'required schema) []))
     (should (equal (alist-get 'type (alist-get 'worktree properties)) "boolean"))
     (should (equal (alist-get 'type (alist-get 'worktree_name properties))
                    "string"))
-    (should (string-match-p
-             "\"enum\":\\[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"\\]"
-             (claude-code--mcp-serialize (alist-get 'effort properties))))
-    ;; The model is free-form: the CLI takes aliases and full names alike.
-    (should-not (assq 'enum (alist-get 'model properties)))))
+    (should-not (assq 'enum (alist-get 'model properties)))
+    (should-not (assq 'enum (alist-get 'effort properties)))))
 
 (ert-deftest claude-code-mcp-test-tool-schema-shapes ()
   "A no-arg tool advertises `properties':{}, and an optional arg is omittable."
@@ -537,14 +534,11 @@ and the id is what the caller has to find the session by afterwards."
        '(worktree . t) '(worktree_name . ""))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "-w" "--mcp-config" "{}")))
-      ;; An option off the advertised schema is refused before anything runs.
-      (let ((launched (length execs)))
-        (should (= (alist-get 'code
-                              (alist-get 'error
-                                         (claude-code-mcp-tests--call-tool
-                                          "sess" "spawn" '(effort . "turbo"))))
-                   -32602))
-        (should (= (length execs) launched))))))
+      ;; Neither the model nor the effort is held to a set of values: an unknown
+      ;; one reaches the CLI, whose error it is to report.
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(effort . "turbo"))
+      (should (equal (nthcdr 2 (nth 1 (car execs)))
+                     (list "--effort" "turbo" "--mcp-config" "{}"))))))
 
 (ert-deftest claude-code-mcp-test-spawn-refuses-an-unknown-caller ()
   "A call from a session with no known directory launches nothing.

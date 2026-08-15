@@ -227,8 +227,8 @@ that it survived startup."
                    :description
                    "Model alias (opus, sonnet, haiku, fable) or full name.")
              (list :name "effort" :type 'string :optional t
-                   :enum '("low" "medium" "high" "xhigh" "max")
-                   :description "Reasoning effort level.")
+                   :description
+                   "Reasoning effort level: low, medium, high, xhigh or max.")
              (list :name "worktree" :type 'boolean :optional t
                    :description "Run the instance in a new git worktree.")
              (list :name "worktree_name" :type 'string :optional t
