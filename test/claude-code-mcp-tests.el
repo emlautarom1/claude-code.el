@@ -74,6 +74,16 @@ The registry is global, so a tool left behind would leak into every later
   "Return the `inputSchema' advertised for the tool called NAME."
   (alist-get 'inputSchema (claude-code-mcp-tests--tool name)))
 
+(defun claude-code-mcp-tests--call-tool (session-id name &rest arguments)
+  "Dispatch a `tools/call' of the tool NAME for SESSION-ID; return the response.
+ARGUMENTS are the (NAME . VALUE) pairs of the call's `arguments' object.  The
+caller owns the session state the call runs against, so a test that needs one
+isolated wraps this in `claude-code-mcp-tests--isolated' itself."
+  (claude-code--mcp-handle-request
+   session-id
+   (claude-code-mcp-tests--request
+    "tools/call" 7 (list (cons 'name name) (cons 'arguments arguments)))))
+
 (defun claude-code-mcp-tests--call-eval (code)
   "Dispatch a `tools/call' of the `eval' tool for CODE and return the response."
   (claude-code-mcp-tests--isolated
@@ -245,6 +255,51 @@ The registry is global, so a tool left behind would leak into every later
                                  (list (cons 'name "cc-mcp-test-opt")
                                        (cons 'arguments nil))))))))
       (should (eq (alist-get 'isError result) :json-false)))))
+
+(ert-deftest claude-code-mcp-test-args-hold-to-the-schema ()
+  "A value contradicting the advertised schema is a -32602; the handler is not run.
+The schema is what a caller builds its call from, so a wrong type or a value
+outside an `:enum' is a protocol error rather than something to pass on.  An
+empty string is a value for a required argument and an omission for an optional
+one -- a handler forwarding it to a process would otherwise emit an option with
+nothing after it."
+  (let ((seen 'unset))
+    (claude-code-mcp-tests--isolated
+      (claude-code-mcp-tests--with-tools '("cc-mcp-test-schema")
+        (claude-code-mcp-make-tool
+         :name "cc-mcp-test-schema" :description "Typed arguments."
+         :args (list (list :name "text" :type 'string :description "Required.")
+                     (list :name "level" :type 'string :optional t
+                           :enum '("low" "high") :description "From a set.")
+                     (list :name "flag" :type 'boolean :optional t
+                           :description "A flag."))
+         :handler (lambda (text &optional level flag)
+                    (setq seen (list text level flag))
+                    "ok"))
+        ;; The advertised schema carries the enum as a JSON array of its values.
+        (should (string-match-p
+                 "\"enum\":\\[\"low\",\"high\"\\]"
+                 (claude-code--mcp-serialize
+                  (alist-get 'level
+                             (alist-get 'properties
+                                        (claude-code-mcp-tests--tool-schema
+                                         "cc-mcp-test-schema"))))))
+        (pcase-dolist (`(,arguments . ,message)
+                       '((((text . 42)) . "type")
+                         (((text . "t") (flag . "yes")) . "type")
+                         (((text . "t") (level . "turbo")) . "one of")
+                         (nil . "Missing required")))
+          (setq seen 'unset)
+          (let ((error-object
+                 (alist-get 'error (apply #'claude-code-mcp-tests--call-tool
+                                          "sess" "cc-mcp-test-schema" arguments))))
+            (should (equal (alist-get 'code error-object) -32602))
+            (should (string-match-p message (alist-get 'message error-object)))
+            (should (eq seen 'unset))))
+        ;; Both empty strings reach the handler as what they mean there.
+        (claude-code-mcp-tests--call-tool "sess" "cc-mcp-test-schema"
+                                          '(text . "") '(level . ""))
+        (should (equal seen '("" nil nil)))))))
 
 ;;;; Pure dispatch: tools/call eval happy and error paths
 

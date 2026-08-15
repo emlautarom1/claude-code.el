@@ -101,7 +101,8 @@ SLOTS is a property list with these keys:
   :name         the tool name (string) Claude calls it by;
   :description  a human-readable description of the tool (string);
   :args         a list of argument specs, each a plist with :name (string),
-                :type (a symbol such as `string'), :description (string) and an
+                :type (a symbol such as `string'), :description (string), an
+                optional :enum listing the values the argument accepts and an
                 optional :optional flag; nil for a tool taking no arguments;
   :handler      the function invoked with the validated argument values in
                 :args order.
@@ -168,10 +169,12 @@ Pass `:null' as ID for a request that could not be parsed."
   (mapcar (lambda (arg)
             (let ((name (plist-get arg :name))
                   (type (plist-get arg :type))
-                  (desc (plist-get arg :description)))
+                  (desc (plist-get arg :description))
+                  (enum (plist-get arg :enum)))
               (cons (intern name)
                     (append (list (cons 'type (symbol-name type)))
-                            (when desc (list (cons 'description desc)))))))
+                            (when desc (list (cons 'description desc)))
+                            (when enum (list (cons 'enum (vconcat enum))))))))
           args))
 
 (defun claude-code--mcp-required-args (args)
@@ -215,19 +218,42 @@ Reports `claude-code--mcp-protocol-version'."
 ARGUMENTS is the parsed `arguments' object (an alist).  JSON false and null
 arrive from the parser as `:json-false'/`:false' and `:null', all of which are
 non-nil in Lisp, so they are normalized to nil before a handler sees them --
-a boolean argument therefore reads as a plain Lisp truth value.  Signals a
-`claude-code--mcp-rpc-error' with code -32602 when a required argument is
-missing."
+a boolean argument therefore reads as a plain Lisp truth value.  An omitted
+optional argument reads as nil too, and so does an empty string given for one:
+a handler passing values on to a process would otherwise emit an option with an
+empty value.
+
+Every value a handler receives holds to the schema its tool advertises: it
+matches the spec's :type and, where the spec names an :enum, is one of those
+values.  Anything else -- including a missing required argument -- signals a
+`claude-code--mcp-rpc-error' with code -32602 naming the argument, so a caller
+that ignored the schema is told what its call got wrong instead of the handler
+acting on it."
   (mapcar (lambda (spec)
             (let* ((name (plist-get spec :name))
+                   (type (plist-get spec :type))
+                   (enum (plist-get spec :enum))
                    (optional (plist-get spec :optional))
-                   (value (alist-get (intern name) arguments)))
+                   (value (alist-get (intern name) arguments))
+                   (reject (lambda (fmt &rest args)
+                             (signal 'claude-code--mcp-rpc-error
+                                     (list -32602 (apply #'format fmt args))))))
               (when (memq value '(:json-false :false :null))
                 (setq value nil))
-              (when (and (not optional) (null value))
-                (signal 'claude-code--mcp-rpc-error
-                        (list -32602 (format "Missing required argument: %s"
-                                             name))))
+              (when (and optional (equal value ""))
+                (setq value nil))
+              (cond
+               ((null value)
+                (unless optional
+                  (funcall reject "Missing required argument: %s" name)))
+               ((not (pcase type
+                       ('string (stringp value))
+                       ('boolean (eq value t))
+                       (_ t)))
+                (funcall reject "Argument %s must be of type %s" name type))
+               ((and enum (not (member value enum)))
+                (funcall reject "Argument %s must be one of: %s"
+                         name (string-join enum ", "))))
               value))
           arg-specs))
 
