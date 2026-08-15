@@ -31,6 +31,12 @@ model: `docs/glossary.md`, `docs/storage-model.md`, `docs/architecture.md`.
   internals and version-volatile — keep them quarantined and documented in
   `docs/storage-model.md`. The rest of the code speaks only
   `claude-code-session` structs.
+- **MCP tool documentation.** What one tool does — its arguments, what it
+  returns, what it deliberately does not do — belongs in `docs/mcp-tools.md`
+  and nowhere else. `docs/architecture.md` covers the server's design and the
+  threat model over the whole catalog, and names no tool it does not have to;
+  the glossary defines terms, not tools. Adding a tool is a section there and
+  a line in the catalog list in `claude-code-mcp.el`.
 
 ## Workflow
 

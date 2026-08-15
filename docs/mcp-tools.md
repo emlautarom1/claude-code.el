@@ -4,7 +4,7 @@ The reference for every tool the [MCP server](architecture.md#mcp-server) advert
 
 ## What every tool has in common
 
-A tool is registered with `claude-code-mcp-make-tool`, which takes its name, a description, an argument spec and the handler run with the validated argument values. That registration is the single source of the `tools/list` schema and of the `--allowedTools` identifier `mcp__emacs__<tool>`, so adding a tool is one call and nothing else.
+A tool is registered with `claude-code-mcp-make-tool`, which takes its name, a description, an argument spec and the handler run with the validated argument values. That registration is the single source of the `tools/list` schema and of the `--allowedTools` identifier `mcp__emacs__<tool>`, so neither can drift from the tool it describes. A new tool is that call, a section in this file, and its line in the catalog list in `claude-code-mcp.el`.
 
 Each call runs with `default-directory` bound to the calling session's real working directory — the worktree directory for a [worktree session](glossary.md), not the parent project root it was launched from. A handler that needs that directory as a *value* rather than as ambient context reads `claude-code--mcp-session-cwd`, bound alongside it for the duration of the call and nil when the calling id names no session it can find.
 
@@ -25,3 +25,23 @@ Reads and evaluates Emacs Lisp in the user's live Emacs and returns the printed 
 `code` may hold several top-level forms; each is read and evaluated in order with lexical binding, and `prin1-to-string` of the **last** form's value is returned. Reading happens under the Elisp syntax table, so whitespace and comments between and after forms are skipped — code that is nothing but comments evaluates to nil rather than failing. A malformed form, including an incomplete final one, surfaces its read error as a tool error instead of silently evaluating the valid prefix.
 
 Evaluation is aborted after `claude-code-mcp-eval-timeout` seconds. The timeout only interrupts code that yields (I/O, `sit-for`, process waits); a CPU-bound infinite loop runs on.
+
+## `spawn`
+
+Starts another Claude Code instance in Emacs and returns its session id.
+
+| Argument        | Type      | Required | Meaning                                                |
+|-----------------|-----------|----------|--------------------------------------------------------|
+| `prompt`        | `string`  | no       | Initial prompt; without one the instance starts idle   |
+| `model`         | `string`  | no       | Model alias (`opus`, `sonnet`, …) or a full model name |
+| `effort`        | `string`  | no       | `low` \| `medium` \| `high` \| `xhigh` \| `max`        |
+| `worktree`      | `boolean` | no       | Run the instance in a new git worktree                 |
+| `worktree_name` | `string`  | no       | Name for that worktree; asks for one on its own        |
+
+The prompt, model, effort and worktree the [spawn menu](../README.md#usage) offers a user, plus a name for the worktree, which the menu has no field for. What the tool does *not* take is a directory: the root is the **caller's own** `claude-code--mcp-session-cwd`, so an instance always lands in the tree its parent is working in, and a call whose session id names no known session is refused rather than started somewhere arbitrary. Asking for a worktree of course moves the instance out of that tree and into a fresh checkout, which carries none of the caller's uncommitted work. Naming one asks for it: a `worktree_name` is honoured whether or not `worktree` came with it, false included, since a JSON false reaches the handler as the same nil an omitted argument does.
+
+The tool returns the id `claude-code-spawn` generates, which is the only durable handle on the new session: Claude renames its buffer after the terminal title within seconds of starting. An id means the instance was **launched**, not that it survived startup — an invalid model is the CLI's error to report, inside a terminal the caller is not reading.
+
+The instance takes no window of its own. Displaying one is the view's business — `claude-code-spawn` shows nothing by itself, and the `pop-to-buffer` a user sees comes from the spawn menu — so a tool-driven spawn leaves the window layout alone. The sessions views are deliberately not refreshed either: a spawn the user did not ask for should not reprint a view they may be working in, so new rows appear on their next refresh (`g`). Nothing after the launch can fail, so an error the caller sees never leaves a live instance behind it.
+
+The instance it starts is pre-authorized for the catalog like any other, this tool included — what that costs is the [threat model](architecture.md#decisions)'s subject.

@@ -225,6 +225,20 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
                                                (alist-get 'properties schema)))
                    "string"))))
 
+(ert-deftest claude-code-mcp-test-spawn-schema ()
+  "`spawn' advertises every option as optional, with the effort levels enumerated."
+  (let* ((schema (claude-code-mcp-tests--tool-schema "spawn"))
+         (properties (alist-get 'properties schema)))
+    (should (equal (alist-get 'required schema) []))
+    (should (equal (alist-get 'type (alist-get 'worktree properties)) "boolean"))
+    (should (equal (alist-get 'type (alist-get 'worktree_name properties))
+                   "string"))
+    (should (string-match-p
+             "\"enum\":\\[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"\\]"
+             (claude-code--mcp-serialize (alist-get 'effort properties))))
+    ;; The model is free-form: the CLI takes aliases and full names alike.
+    (should-not (assq 'enum (alist-get 'model properties)))))
+
 (ert-deftest claude-code-mcp-test-tool-schema-shapes ()
   "A no-arg tool advertises `properties':{}, and an optional arg is omittable."
   (claude-code-mcp-tests--with-tools '("cc-mcp-test-noargs" "cc-mcp-test-opt")
@@ -382,6 +396,100 @@ must not outlive the call: the next one may come from another session."
       (should (eq (alist-get 'isError result) :json-false))
       (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
                      (cdr case))))))
+
+;;;; Pure dispatch: tools/call spawn
+
+(defmacro claude-code-mcp-tests--with-caller (cwd execs &rest body)
+  "Run BODY with session \"sess\" managed from CWD and the launch path stubbed.
+EXECS collects the (BUFFER ARGS) of every launch, so a test asserts what
+reached the CLI without a `claude' ever running."
+  (declare (indent 2))
+  `(claude-code-mcp-tests--isolated
+     (puthash "sess" (list :buffer nil :origin ,cwd) claude-code--managed)
+     (claude-code-tests--recording-launch ,execs ,@body)))
+
+(defun claude-code-mcp-tests--result-text (response)
+  "Return the text payload of RESPONSE's tool result."
+  (alist-get 'text (aref (alist-get 'content (alist-get 'result response)) 0)))
+
+(ert-deftest claude-code-mcp-test-spawn-in-the-callers-directory ()
+  "`spawn' launches in the calling session's own directory and returns the id.
+The directory is the server's to resolve -- the tool takes no path argument --
+and the id is what the caller has to find the session by afterwards."
+  (let ((execs '()))
+    (claude-code-mcp-tests--with-caller "/home/test/proj" execs
+      (let* ((response (claude-code-mcp-tests--call-tool "sess" "spawn"))
+             (id (claude-code-mcp-tests--result-text response)))
+        (should (eq (alist-get 'isError (alist-get 'result response))
+                    :json-false))
+        (should (string-match-p claude-code-tests--uuid-re id))
+        (should (= (length execs) 1))
+        ;; The instance was registered under that id, launched from the
+        ;; caller's root, and carries the session id on its command line.
+        (should (equal (plist-get (gethash id claude-code--managed) :origin)
+                       (claude-code--normalize-root "/home/test/proj")))
+        (should (equal (nth 1 (car execs))
+                       (list "--session-id" id "--mcp-config" "{}")))))))
+
+(ert-deftest claude-code-mcp-test-spawn-options ()
+  "Every option reaches the CLI; a worktree name stands in for the flag."
+  (let ((execs '()))
+    (claude-code-mcp-tests--with-caller "/home/test/proj" execs
+      (let ((id (claude-code-mcp-tests--result-text
+                 (claude-code-mcp-tests--call-tool
+                  "sess" "spawn" '(prompt . "do the thing") '(model . "opus")
+                  '(effort . "xhigh") '(worktree . t)
+                  '(worktree_name . "feat")))))
+        (should (equal (nth 1 (car execs))
+                       (list "--session-id" id "-w" "feat"
+                             "--model" "opus" "--effort" "xhigh"
+                             "--mcp-config" "{}" "--" "do the thing"))))
+      ;; The flag alone asks for an auto-named worktree.
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . t))
+      (should (member "-w" (nth 1 (car execs))))
+      (should-not (member "feat" (nth 1 (car execs))))
+      ;; A name alone asks for that worktree, as its description promises.
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree_name . "solo"))
+      (should (equal (nthcdr 2 (nth 1 (car execs)))
+                     (list "-w" "solo" "--mcp-config" "{}")))
+      ;; JSON false is normalized to nil, so no worktree is requested.
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :json-false))
+      (should-not (member "-w" (nth 1 (car execs))))
+      ;; A name given alongside a false flag still asks for the worktree: a
+      ;; name is a request for one, and the flag carries nothing to weigh it
+      ;; against -- false and omitted reach the handler alike.
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :json-false)
+                                        '(worktree_name . "named"))
+      (should (equal (nthcdr 2 (nth 1 (car execs)))
+                     (list "-w" "named" "--mcp-config" "{}")))
+      ;; An empty string is an omitted option, not an empty value: `--model ""'
+      ;; would reach the CLI and kill the instance at startup.
+      (claude-code-mcp-tests--call-tool
+       "sess" "spawn" '(prompt . "") '(model . "") '(effort . "")
+       '(worktree . t) '(worktree_name . ""))
+      (should (equal (nthcdr 2 (nth 1 (car execs)))
+                     (list "-w" "--mcp-config" "{}")))
+      ;; An option off the advertised schema is refused before anything runs.
+      (let ((launched (length execs)))
+        (should (= (alist-get 'code
+                              (alist-get 'error
+                                         (claude-code-mcp-tests--call-tool
+                                          "sess" "spawn" '(effort . "turbo"))))
+                   -32602))
+        (should (= (length execs) launched))))))
+
+(ert-deftest claude-code-mcp-test-spawn-refuses-an-unknown-caller ()
+  "A call from a session with no known directory launches nothing.
+Falling back to whatever `default-directory' the server happens to hold would
+start an instance in an unrelated project."
+  (let ((execs '()))
+    (claude-code-mcp-tests--with-caller "/home/test/proj" execs
+      (let ((response (claude-code-mcp-tests--call-tool "no-such-session"
+                                                        "spawn")))
+        (should (eq (alist-get 'isError (alist-get 'result response)) t))
+        (should (string-match-p "No working directory"
+                                (claude-code-mcp-tests--result-text response)))
+        (should (null execs))))))
 
 ;;;; Wire serialization (arrays are vectors, false is JSON false)
 

@@ -13,6 +13,7 @@
 ;; tools, documented one by one in docs/mcp-tools.md:
 ;;
 ;;   * `eval' -- read and evaluate Elisp, return the printed result.
+;;   * `spawn' -- start another instance in the calling session's directory.
 ;;
 ;; The file is organized in the same model/view/adapter spirit as
 ;; `claude-code.el':
@@ -31,7 +32,8 @@
 ;;     `claude-code--mcp-with-session' binds its real working directory.
 ;;
 ;; Session state is reached ONLY through the `claude-code.el' model
-;; (`claude-code--session-cwd'); this file never re-parses `~/.claude'.
+;; (`claude-code--session-cwd'); this file never re-parses `~/.claude'.  A tool
+;; that acts on sessions does so through the public operations API.
 ;;
 ;; SECURITY.  This server executes arbitrary Elisp on behalf of a local process
 ;; and its only real boundary is the loopback bind.  Read the threat model in
@@ -175,6 +177,41 @@ CODE may hold several top-level forms; the value of the last form is returned."
  :args (list (list :name "code" :type 'string
                    :description "Emacs Lisp source to read and evaluate."))
  :handler #'claude-code--mcp-tool-eval)
+
+(defun claude-code--mcp-tool-spawn (prompt model effort worktree worktree-name)
+  "Handle the `spawn' tool; return the new session's id.
+PROMPT, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
+WORKTREE-NAME standing in for WORKTREE.  The root is not among them: an
+instance runs where the session that asked for it runs."
+  (unless claude-code--mcp-session-cwd
+    (error "No working directory known for the calling session"))
+  (car (claude-code-spawn claude-code--mcp-session-cwd
+                          :prompt prompt :model model :effort effort
+                          :worktree (or worktree-name worktree))))
+
+(claude-code-mcp-make-tool
+ :name "spawn"
+ :description
+ "Spawn another Claude Code instance in the user's Emacs and return its session
+id.  It runs in the calling session's own directory -- or, when asked for a
+worktree, in a fresh worktree of it, which carries none of the caller's
+uncommitted work.  The instance takes no window of its own: the user reaches it
+through the Emacs sessions view.  An id means the instance was launched, not
+that it survived startup."
+ :args (list (list :name "prompt" :type 'string :optional t
+                   :description
+                   "Initial prompt; without one the instance starts idle.")
+             (list :name "model" :type 'string :optional t
+                   :description
+                   "Model alias (opus, sonnet, haiku, fable) or full name.")
+             (list :name "effort" :type 'string :optional t
+                   :enum '("low" "medium" "high" "xhigh" "max")
+                   :description "Reasoning effort level.")
+             (list :name "worktree" :type 'boolean :optional t
+                   :description "Run the instance in a new git worktree.")
+             (list :name "worktree_name" :type 'string :optional t
+                   :description "Name for that worktree; implies worktree."))
+ :handler #'claude-code--mcp-tool-spawn)
 
 
 ;;;; Protocol layer (pure, socket-free)
