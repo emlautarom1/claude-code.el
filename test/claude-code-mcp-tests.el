@@ -339,14 +339,49 @@ able to hear no."
                                     (cons 'confirm false)))))
             (should (eq (alist-get 'isError result) :json-false))
             (should (null seen))))
-        ;; Omitted, it is missing; the handler never runs.
-        (setq seen 'unset)
-        (should (string-match-p
-                 "Missing required"
-                 (alist-get 'message
-                            (alist-get 'error (claude-code-mcp-tests--call-tool
-                                               "sess" "cc-mcp-test-confirm")))))
-        (should (eq seen 'unset))))))
+        ;; Omitted it is missing, and so is null: only false is an answer, so
+        ;; a caller that sent nothing in particular is not read as a no.
+        (dolist (arguments '(nil ((confirm . :null))))
+          (setq seen 'unset)
+          (should (string-match-p
+                   "Missing required"
+                   (alist-get 'message
+                              (alist-get 'error
+                                         (apply #'claude-code-mcp-tests--call-tool
+                                                "sess" "cc-mcp-test-confirm"
+                                                arguments)))))
+          (should (eq seen 'unset)))))))
+
+(ert-deftest claude-code-mcp-test-arguments-must-be-an-object ()
+  "A call whose `arguments' is not an object is the caller's error, not ours.
+JSON null stands for the object it did not send, since `arguments' is optional;
+anything else is a -32602 rather than a Lisp type error dressed up as -32603."
+  (claude-code-mcp-tests--with-tools '("cc-mcp-test-noargs")
+    (claude-code-mcp-make-tool
+     :name "cc-mcp-test-noargs" :description "No args."
+     :handler (lambda () "ok"))
+    (claude-code-mcp-tests--isolated
+      ;; Null is the absent object: a tool needing nothing still runs.
+      (let ((response (claude-code--mcp-handle-request
+                       "sess"
+                       (claude-code-mcp-tests--request
+                        "tools/call" 1
+                        (list (cons 'name "cc-mcp-test-noargs")
+                              (cons 'arguments :null))))))
+        (should (eq (alist-get 'isError (alist-get 'result response))
+                    :json-false)))
+      ;; A scalar or an array is not an arguments object.
+      (dolist (arguments (list "code" 42 (vector 1 2)))
+        (let ((error-object
+               (alist-get 'error (claude-code--mcp-handle-request
+                                  "sess"
+                                  (claude-code-mcp-tests--request
+                                   "tools/call" 2
+                                   (list (cons 'name "cc-mcp-test-noargs")
+                                         (cons 'arguments arguments)))))))
+          (should (equal (alist-get 'code error-object) -32602))
+          (should (string-match-p "must be an object"
+                                  (alist-get 'message error-object))))))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
   "A tool sees its caller's cwd for the call, and nil for an id naming nothing.
@@ -555,7 +590,17 @@ start an instance in an unrelated project."
       (should (claude-code-mcp-tests--tool "cc-mcp-test-echo"))))
   ;; A missing :handler is an error.
   (should-error (claude-code-mcp-make-tool
-                 :name "bad" :description "No handler.")))
+                 :name "bad" :description "No handler."))
+  ;; So is any arg spec the schema cannot carry: a type no predicate enforces,
+  ;; a nameless argument, an enum of anything but strings.  Each would break
+  ;; `tools/list' for the whole catalog, so none of them registers.
+  (dolist (arg '((:name "count" :type integer :description "How many.")
+                 (:type string :description "Nameless.")
+                 (:name "level" :type string :enum (low high))))
+    (should-error (claude-code-mcp-make-tool
+                   :name "cc-mcp-test-bad-arg" :description "Malformed arg."
+                   :args (list arg) :handler #'identity))
+    (should-not (gethash "cc-mcp-test-bad-arg" claude-code--mcp-tools))))
 
 (ert-deftest claude-code-mcp-test-boolean-args ()
   "A `boolean' argument reaches its handler as a Lisp truth value.

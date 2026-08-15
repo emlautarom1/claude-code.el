@@ -119,6 +119,14 @@ operations, not code using absolute paths."
 ;;
 ;; The registry maps a tool name to a plist describing it.
 
+(defconst claude-code--mcp-arg-types
+  (list (cons 'string #'stringp)
+        (cons 'boolean (lambda (value) (eq value t))))
+  "Argument types a tool may advertise, each with the predicate enforcing it.
+A key is the JSON-Schema type name the wire carries, and it belongs here
+exactly when `claude-code--mcp-validate-args' can hold a value to it, so the
+schema never advertises a type nothing checks.")
+
 (defvar claude-code--mcp-tools (make-hash-table :test 'equal)
   "Hash of MCP tool name (string) to its plist.
 Each value is a plist with keys `:description' (string), `:args' (a list of
@@ -131,9 +139,10 @@ SLOTS is a property list with these keys:
   :name         the tool name (string) Claude calls it by;
   :description  a human-readable description of the tool (string);
   :args         a list of argument specs, each a plist with :name (string),
-                :type (a symbol such as `string'), :description (string), an
-                optional :enum listing the values the argument accepts and an
-                optional :optional flag; nil for a tool taking no arguments;
+                :type (a symbol from `claude-code--mcp-arg-types'),
+                :description (string), an optional :enum listing the values the
+                argument accepts and an optional :optional flag; nil for a tool
+                taking no arguments;
   :handler      the function invoked with the validated argument values in
                 :args order.
 
@@ -145,6 +154,19 @@ The tool is stored in `claude-code--mcp-tools' under :name and also returned."
     (unless name (error "Tool :name is required"))
     (unless description (error "Tool :description is required"))
     (unless handler (error "Tool :handler is required"))
+    ;; An arg spec reaches the wire as JSON Schema and comes back as the
+    ;; contract a call is held to, so a malformed one breaks `tools/list' for
+    ;; the whole catalog rather than its own tool.  Refuse it here instead.
+    (dolist (arg args)
+      (let ((arg-name (plist-get arg :name))
+            (arg-type (plist-get arg :type))
+            (enum (plist-get arg :enum)))
+        (unless (and (stringp arg-name) (not (string-empty-p arg-name)))
+          (error "Tool %s: every argument needs a :name" name))
+        (unless (assq arg-type claude-code--mcp-arg-types)
+          (error "Argument %s: no such :type %s" arg-name arg-type))
+        (unless (seq-every-p #'stringp enum)
+          (error "Argument %s: every :enum value must be a string" arg-name))))
     (let ((tool (list :description description :args args :handler handler)))
       (puthash name tool claude-code--mcp-tools)
       tool)))
@@ -278,12 +300,19 @@ Reports `claude-code--mcp-protocol-version'."
                         using (hash-values tool)
                         collect (claude-code--mcp-tool-descriptor name tool))))))
 
+(defun claude-code--mcp-reject (format-string &rest args)
+  "Signal a -32602 `claude-code--mcp-rpc-error' reading FORMAT-STRING and ARGS.
+This is the answer to a call that does not hold to the schema its tool
+advertises, which is the caller's to fix."
+  (signal 'claude-code--mcp-rpc-error
+          (list -32602 (apply #'format format-string args))))
+
 (defun claude-code--mcp-validate-args (arg-specs arguments)
   "Return values from ARGUMENTS ordered to match ARG-SPECS.
-ARGUMENTS is the parsed `arguments' object (an alist).  JSON false and null
-arrive from the parser as `:json-false'/`:false' and `:null', all of which are
-non-nil in Lisp, so they are normalized to nil before a handler sees them --
-a boolean argument therefore reads as a plain Lisp truth value.  An omitted
+ARGUMENTS is the parsed `arguments' object (an alist), or nil when the call
+carried none.  The parser renders JSON false as `:false' and null as `:null',
+both non-nil in Lisp, so they are normalized to nil before a handler sees them
+-- a boolean argument therefore reads as a plain Lisp truth value.  An omitted
 optional argument reads as nil too, and so does an empty string given for one:
 a handler passing values on to a process would otherwise emit an option with an
 empty value.
@@ -294,45 +323,43 @@ values.  Anything else -- including a required argument the call left out --
 signals a `claude-code--mcp-rpc-error' with code -32602 naming the argument, so
 a caller that ignored the schema is told what its call got wrong instead of the
 handler acting on it.  A required boolean is the one argument nil does not
-condemn: sent as false it is an answer, and the call is what says so."
+condemn: sent as false it is an answer, and only the call says so."
+  (when (eq arguments :null)
+    (setq arguments nil))
+  (unless (listp arguments)
+    (claude-code--mcp-reject "Arguments must be an object"))
   (mapcar (lambda (spec)
             (let* ((name (plist-get spec :name))
                    (type (plist-get spec :type))
                    (enum (plist-get spec :enum))
                    (optional (plist-get spec :optional))
-                   (given (assq (intern name) arguments))
-                   (value (cdr given))
-                   (reject (lambda (fmt &rest args)
-                             (signal 'claude-code--mcp-rpc-error
-                                     (list -32602 (apply #'format fmt args))))))
-              (when (memq value '(:json-false :false :null))
+                   (value (cdr (assq (intern name) arguments)))
+                   (false (memq value '(:json-false :false))))
+              (when (or false (eq value :null))
                 (setq value nil))
               (when (and optional (equal value ""))
                 (setq value nil))
               (cond
                ((null value)
-                ;; A boolean the caller sent as false is an answer, not an
-                ;; omission -- it reaches the handler as the nil an absent
-                ;; argument does, so only the call itself tells them apart.
-                (unless (or optional (and given (eq type 'boolean)))
-                  (funcall reject "Missing required argument: %s" name)))
-               ((not (pcase type
-                       ('string (stringp value))
-                       ('boolean (eq value t))
-                       (_ t)))
-                (funcall reject "Argument %s must be of type %s" name type))
+                (unless (or optional (and false (eq type 'boolean)))
+                  (claude-code--mcp-reject "Missing required argument: %s" name)))
+               ((not (funcall (alist-get type claude-code--mcp-arg-types
+                                         #'ignore)
+                              value))
+                (claude-code--mcp-reject "Argument %s must be of type %s"
+                                         name type))
                ((and enum (not (member value enum)))
-                (funcall reject "Argument %s must be one of: %s"
-                         name (string-join enum ", "))))
+                (claude-code--mcp-reject "Argument %s must be one of: %s"
+                                         name (string-join enum ", "))))
               value))
           arg-specs))
 
 (defun claude-code--mcp-tools-call (session-id params)
   "Run the tool named in PARAMS for SESSION-ID and return its result payload.
 PARAMS is the `tools/call' params alist carrying `name' and `arguments'.
-Signals a `claude-code--mcp-rpc-error' for an unknown tool or a missing
-required argument; a tool that itself errors yields an `isError' result rather
-than crashing the server."
+Signals a `claude-code--mcp-rpc-error' for an unknown tool, and for arguments
+that do not hold to the tool's schema; a tool that itself errors yields an
+`isError' result rather than crashing the server."
   (let* ((name (alist-get 'name params))
          (tool (and (stringp name) (gethash name claude-code--mcp-tools))))
     (unless tool
