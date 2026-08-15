@@ -85,7 +85,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 
 ## Emacs as an MCP server
 
-Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.io) server inside Emacs — one per Emacs, shared by every session — so Claude can act on the editor it is running under. The catalog holds a single tool, `eval`: it reads and evaluates the Elisp you pass it in your live Emacs and returns the printed result, with `default-directory` bound to the calling session's working directory.
+Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.io) server inside Emacs — one per Emacs, shared by every session — so Claude can act on the editor it is running under. Every tool runs with `default-directory` bound to the calling session's working directory, and the catalog is documented tool by tool in [`docs/mcp-tools.md`](docs/mcp-tools.md).
 
 > ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. What protects you is the loopback bind plus single-user trust — read the [threat model](docs/architecture.md#decisions) before relying on it.
 
@@ -100,6 +100,7 @@ Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.
 - [`docs/glossary.md`](docs/glossary.md) — terminology.
 - [`docs/storage-model.md`](docs/storage-model.md) — the `~/.claude` layout this package reads (Claude internals; version-volatile).
 - [`docs/architecture.md`](docs/architecture.md) — layers and design decisions.
+- [`docs/mcp-tools.md`](docs/mcp-tools.md) — the tools the MCP server advertises to spawned sessions.
 - [`docs/claude-code-internals.md`](docs/claude-code-internals.md) — Claude's background-agent/FleetView subsystem (reference; not managed by this package).
 
 ## Development

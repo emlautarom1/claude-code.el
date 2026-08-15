@@ -10,8 +10,9 @@
 ;; this package spawns act on the user's live Emacs.  One HTTP server runs per
 ;; Emacs, shared by every session; each session is keyed by its spawn UUID in
 ;; the request path `/mcp/<uuid>'.  The server advertises a growing catalog of
-;; tools; the catalog currently holds a single tool, `eval', which reads and
-;; evaluates Elisp and returns the printed result.
+;; tools, documented one by one in docs/mcp-tools.md:
+;;
+;;   * `eval' -- read and evaluate Elisp, return the printed result.
 ;;
 ;; The file is organized in the same model/view/adapter spirit as
 ;; `claude-code.el':
