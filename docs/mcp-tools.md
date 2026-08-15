@@ -6,7 +6,7 @@ The reference for every tool the [MCP server](architecture.md#mcp-server) advert
 
 A tool is registered with `claude-code-mcp-make-tool`, which takes its name, a description, an argument spec and the handler run with the validated argument values. That registration is the single source of the `tools/list` schema and of the `--allowedTools` identifier `mcp__emacs__<tool>`, so adding a tool is one call and nothing else.
 
-Each call runs with `default-directory` bound to the calling session's real working directory — the worktree directory for a [worktree session](glossary.md), not the parent project root it was launched from.
+Each call runs with `default-directory` bound to the calling session's real working directory — the worktree directory for a [worktree session](glossary.md), not the parent project root it was launched from. A handler that needs that directory as a *value* rather than as ambient context reads `claude-code--mcp-session-cwd`, bound alongside it for the duration of the call and nil when the calling id names no session it can find.
 
 Arguments arrive as JSON: an omitted optional argument, JSON `null` and JSON `false` all reach the handler as nil, so a boolean argument reads as a plain Lisp truth value. An empty string given for an *optional* argument counts as omitted too, so a handler forwarding values to a process never emits an option with nothing after it; for a required argument it stays the value it is.
 

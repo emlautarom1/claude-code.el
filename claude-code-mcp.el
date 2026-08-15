@@ -27,6 +27,8 @@
 ;;     request.  Both are directly unit-testable.
 ;;   * Registry/catalog -- the tool table and `claude-code-mcp-make-tool', plain
 ;;     data describing every advertised tool.
+;;   * Session context -- what a tool call knows about the session that made it:
+;;     `claude-code--mcp-with-session' binds its real working directory.
 ;;
 ;; Session state is reached ONLY through the `claude-code.el' model
 ;; (`claude-code--session-cwd'); this file never re-parses `~/.claude'.
@@ -83,6 +85,32 @@ Used as the `mcpServers' key in the `--mcp-config' blob and as the
 
 (define-error 'claude-code--mcp-rpc-error
               "MCP JSON-RPC error carrying (CODE MESSAGE)")
+
+
+;;;; Session context
+
+(defvar claude-code--mcp-session-cwd nil
+  "Real working directory of the session whose tool call is running.
+Bound by `claude-code--mcp-with-session' for the duration of the call, and nil
+when the id that call arrived under names no known session.  A handler is
+passed its validated arguments and nothing else, so this is how one that has to
+act on the caller's own project reaches it -- and the nil case is a question
+`default-directory' cannot answer, being bound either way.")
+
+(defmacro claude-code--mcp-with-session (session-id &rest body)
+  "Evaluate BODY in the context of the session SESSION-ID names.
+Its real cwd comes from `claude-code--session-cwd', resolved once and bound to
+both `claude-code--mcp-session-cwd' and `default-directory'; an unknown id
+leaves `default-directory' unchanged.  That directory is best-effort context
+for a tool, not a sandbox: it only affects `default-directory'-relative
+operations, not code using absolute paths."
+  (declare (indent 1))
+  `(let* ((claude-code--mcp-session-cwd (claude-code--session-cwd ,session-id))
+          (default-directory (if claude-code--mcp-session-cwd
+                                 (file-name-as-directory
+                                  claude-code--mcp-session-cwd)
+                               default-directory)))
+     ,@body))
 
 
 ;;;; Tool registry and catalog
@@ -256,18 +284,6 @@ acting on it."
                          name (string-join enum ", "))))
               value))
           arg-specs))
-
-(defmacro claude-code--mcp-with-session (session-id &rest body)
-  "Evaluate BODY with `default-directory' bound to SESSION-ID's real cwd.
-The directory comes from `claude-code--session-cwd'; when it is nil (an
-unknown id) `default-directory' is left unchanged.  This is best-effort
-context for a tool, not a sandbox: it only affects `default-directory'-relative
-operations, not code using absolute paths."
-  (declare (indent 1))
-  `(let ((default-directory
-          (let ((cwd (claude-code--session-cwd ,session-id)))
-            (if cwd (file-name-as-directory cwd) default-directory))))
-     ,@body))
 
 (defun claude-code--mcp-tools-call (session-id params)
   "Run the tool named in PARAMS for SESSION-ID and return its result payload.

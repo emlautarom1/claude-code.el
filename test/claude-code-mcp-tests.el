@@ -301,6 +301,25 @@ nothing after it."
                                           '(text . "") '(level . ""))
         (should (equal seen '("" nil nil)))))))
 
+(ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
+  "A tool sees its caller's cwd for the call, and nil for an id naming nothing.
+The nil is what a tool acting on the caller's project has to check, and it
+must not outlive the call: the next one may come from another session."
+  (let ((seen 'unset))
+    (claude-code-mcp-tests--with-tools '("cc-mcp-test-cwd")
+      (claude-code-mcp-make-tool
+       :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
+       :handler (lambda () (setq seen claude-code--mcp-session-cwd) "ok"))
+      (claude-code-mcp-tests--isolated
+        (puthash "sess" (list :buffer nil :origin "/home/test/proj")
+                 claude-code--managed)
+        (pcase-dolist (`(,session-id . ,cwd) '(("sess" . "/home/test/proj")
+                                               ("no-such-session" . nil)))
+          (setq seen 'unset)
+          (claude-code-mcp-tests--call-tool session-id "cc-mcp-test-cwd")
+          (should (equal seen cwd)))))
+    (should (null claude-code--mcp-session-cwd))))
+
 ;;;; Pure dispatch: tools/call eval happy and error paths
 
 (ert-deftest claude-code-mcp-test-eval-happy ()
