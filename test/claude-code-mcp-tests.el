@@ -506,34 +506,40 @@ and the id is what the caller has to find the session by afterwards."
                   '(effort . "xhigh") '(worktree . t)
                   '(worktree_name . "feat")))))
         (should (equal (nth 1 (car execs))
-                       (list "--session-id" id "-w" "feat"
+                       (list "--session-id" id "--worktree=feat"
                              "--model" "opus" "--effort" "xhigh"
                              "--mcp-config" "{}" "--" "do the thing"))))
       ;; The flag alone asks for an auto-named worktree.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . t))
-      (should (member "-w" (nth 1 (car execs))))
-      (should-not (member "feat" (nth 1 (car execs))))
+      (should (equal (nthcdr 2 (nth 1 (car execs)))
+                     (list "--worktree" "--mcp-config" "{}")))
       ;; A name alone asks for that worktree, as its description promises.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree_name . "solo"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "-w" "solo" "--mcp-config" "{}")))
+                     (list "--worktree=solo" "--mcp-config" "{}")))
+      ;; The name joins the flag in one argument, so a caller-chosen name the
+      ;; CLI would otherwise take for a flag of its own cannot become one.
+      (claude-code-mcp-tests--call-tool "sess" "spawn"
+                                        '(worktree_name . "--ax-screen-reader"))
+      (should (equal (nthcdr 2 (nth 1 (car execs)))
+                     (list "--worktree=--ax-screen-reader" "--mcp-config" "{}")))
       ;; JSON false is normalized to nil, so no worktree is requested.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :json-false))
-      (should-not (member "-w" (nth 1 (car execs))))
+      (should-not (member "--worktree" (nth 1 (car execs))))
       ;; A name given alongside a false flag still asks for the worktree: a
       ;; name is a request for one, and the flag carries nothing to weigh it
       ;; against -- false and omitted reach the handler alike.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :json-false)
                                         '(worktree_name . "named"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "-w" "named" "--mcp-config" "{}")))
+                     (list "--worktree=named" "--mcp-config" "{}")))
       ;; An empty string is an omitted option, not an empty value: `--model ""'
       ;; would reach the CLI and kill the instance at startup.
       (claude-code-mcp-tests--call-tool
        "sess" "spawn" '(prompt . "") '(model . "") '(effort . "")
        '(worktree . t) '(worktree_name . ""))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "-w" "--mcp-config" "{}")))
+                     (list "--worktree" "--mcp-config" "{}")))
       ;; Neither the model nor the effort is held to a set of values: an unknown
       ;; one reaches the CLI, whose error it is to report.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(effort . "turbo"))

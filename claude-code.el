@@ -426,24 +426,26 @@ from, and is nil for an unknown id."
   "Build the argument list for the `claude' CLI.
 
 When RESUME is non-nil it is a session id to resume, and it is returned as
-\"-r ID\" ignoring all new-session arguments.
+\"--resume=ID\" ignoring all new-session arguments.
 
 Otherwise a new session is described:
 SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
-its session up front.  WORKTREE, when t, requests a new worktree (\"-w\"); when
-a string, names it (\"-w NAME\").  MODEL sets \"--model\" and EFFORT sets
-\"--effort\"; both are passed through verbatim -- their validity is the CLI's
-concern.  PROMPT, when a non-empty string, is emitted last as a positional
-argument behind a \"--\" option terminator.
+its session up front.  WORKTREE, when t, requests a new worktree
+\(\"--worktree\"); when a string, names it (\"--worktree=NAME\").  MODEL sets
+\"--model\" and EFFORT sets \"--effort\"; both are passed through verbatim --
+their validity is the CLI's concern.  PROMPT, when a non-empty string, is
+emitted last as a positional argument behind a \"--\" option terminator.
 
 MCP-ARGS is a list of extra CLI arguments (the MCP wiring built by
 `claude-code--mcp-cli-args') placed with the other options, before the
 terminator; this function keeps no MCP knowledge of its own."
   (if resume
-      (append (list "-r" resume) mcp-args)
+      (cons (concat "--resume=" resume) mcp-args)
     (append (when session-id (list "--session-id" session-id))
             (when worktree
-              (if (stringp worktree) (list "-w" worktree) (list "-w")))
+              (list (if (stringp worktree)
+                        (concat "--worktree=" worktree)
+                      "--worktree")))
             (when model (list "--model" model))
             (when effort (list "--effort" effort))
             mcp-args

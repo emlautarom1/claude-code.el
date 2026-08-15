@@ -596,25 +596,31 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
                  '("--session-id" "ID" "--model" "opus" "--effort" "low"
                    "--" "hi")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree t)
-                 '("--session-id" "ID" "-w")))
+                 '("--session-id" "ID" "--worktree")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree "feat")
-                 '("--session-id" "ID" "-w" "feat")))
-  ;; A worktree prompt is kept off `-w' (which takes an optional name) by "--".
+                 '("--session-id" "ID" "--worktree=feat")))
+  ;; The name rides in the same argument as the flag, so one the CLI would
+  ;; otherwise read as a flag of its own still names the worktree.
+  (should (equal (claude-code--build-args :session-id "ID"
+                                          :worktree "--ax-screen-reader")
+                 '("--session-id" "ID" "--worktree=--ax-screen-reader")))
+  ;; A worktree prompt is kept off `--worktree' (which takes an optional name)
+  ;; by "--".
   (should (equal (claude-code--build-args :session-id "ID" :worktree t
                                           :prompt "hi")
-                 '("--session-id" "ID" "-w" "--" "hi")))
+                 '("--session-id" "ID" "--worktree" "--" "hi")))
   ;; Empty prompt is dropped (and so is the terminator).
   (should (equal (claude-code--build-args :session-id "ID" :prompt "")
                  '("--session-id" "ID"))))
 
 (ert-deftest claude-code-test-build-args-resume ()
-  "Resume returns only \"-r ID\" and ignores new-session arguments."
-  (should (equal (claude-code--build-args :resume "ID") '("-r" "ID")))
+  "Resume returns only \"--resume=ID\" and ignores new-session arguments."
+  (should (equal (claude-code--build-args :resume "ID") '("--resume=ID")))
   (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus"
                                           :effort "high")
-                 '("-r" "ID")))
+                 '("--resume=ID")))
   (should (equal (claude-code--build-args :resume "ID" :session-id "ID")
-                 '("-r" "ID"))))
+                 '("--resume=ID"))))
 
 (ert-deftest claude-code-test-build-args-mcp ()
   "MCP args append verbatim; a nil `:mcp-args' leaves the base list unchanged."
@@ -622,7 +628,7 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
   (should (equal (claude-code--build-args :session-id "ID" :mcp-args nil)
                  '("--session-id" "ID")))
   (should (equal (claude-code--build-args :resume "ID" :mcp-args nil)
-                 '("-r" "ID")))
+                 '("--resume=ID")))
   ;; Non-nil MCP args sit with the options, before the "--" terminator and the
   ;; prompt, so the variadic MCP flags cannot swallow the positional prompt.
   (should (equal (claude-code--build-args
@@ -633,7 +639,7 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
   ;; ...and to the resume list too.
   (should (equal (claude-code--build-args
                   :resume "ID" :mcp-args '("--mcp-config" "{}"))
-                 '("-r" "ID" "--mcp-config" "{}"))))
+                 '("--resume=ID" "--mcp-config" "{}"))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."
@@ -730,14 +736,15 @@ instance, and install title tracking; only the CLI argument list differs."
             (should (= (length calls) 2))
             ;; Resume ignores new-session options; spawn keeps them behind the
             ;; generated session id.
-            (should (equal resume-args '("-r" "given-id" "--mcp-config" "{}")))
+            (should (equal resume-args
+                           '("--resume=given-id" "--mcp-config" "{}")))
             (should (equal (nth 0 spawn-args) "--session-id"))
             (should (string-match-p claude-code-tests--uuid-re spawned-id))
             ;; Spawn hands back that id with the buffer hosting it.
             (should (equal (car spawned) spawned-id))
             (should (eq (cdr spawned) (nth 0 (nth 0 calls))))
             (should (equal (nthcdr 2 spawn-args)
-                           '("-w" "feat" "--model" "opus"
+                           '("--worktree=feat" "--model" "opus"
                              "--mcp-config" "{}")))
             ;; Both registered; only spawn recorded a worktree.
             (should (= (hash-table-count claude-code--managed) 2))
