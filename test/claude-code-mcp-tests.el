@@ -302,6 +302,9 @@ nothing after it."
                        '((((text . 42)) . "type")
                          (((text . "t") (flag . "yes")) . "type")
                          (((text . "t") (level . "turbo")) . "one of")
+                         ;; A required argument sent as JSON null is as absent
+                         ;; as one never sent: null is not a string.
+                         (((text . :null)) . "Missing required")
                          (nil . "Missing required")))
           (setq seen 'unset)
           (let ((error-object
@@ -314,6 +317,36 @@ nothing after it."
         (claude-code-mcp-tests--call-tool "sess" "cc-mcp-test-schema"
                                           '(text . "") '(level . ""))
         (should (equal seen '("" nil nil)))))))
+
+(ert-deftest claude-code-mcp-test-a-required-boolean-can-be-false ()
+  "`false' answers a required boolean; leaving it out is what is missing.
+A boolean reaches its handler as nil either way, so the call is the only thing
+that says which happened -- and a tool asking to be told before it acts must be
+able to hear no."
+  (let ((seen 'unset))
+    (claude-code-mcp-tests--isolated
+      (claude-code-mcp-tests--with-tools '("cc-mcp-test-confirm")
+        (claude-code-mcp-make-tool
+         :name "cc-mcp-test-confirm" :description "One required boolean."
+         :args (list (list :name "confirm" :type 'boolean
+                           :description "Required."))
+         :handler (lambda (confirm) (setq seen confirm) "ok"))
+        (dolist (false '(:json-false :false))
+          (setq seen 'unset)
+          (let ((result (alist-get 'result
+                                   (claude-code-mcp-tests--call-tool
+                                    "sess" "cc-mcp-test-confirm"
+                                    (cons 'confirm false)))))
+            (should (eq (alist-get 'isError result) :json-false))
+            (should (null seen))))
+        ;; Omitted, it is missing; the handler never runs.
+        (setq seen 'unset)
+        (should (string-match-p
+                 "Missing required"
+                 (alist-get 'message
+                            (alist-get 'error (claude-code-mcp-tests--call-tool
+                                               "sess" "cc-mcp-test-confirm")))))
+        (should (eq seen 'unset))))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
   "A tool sees its caller's cwd for the call, and nil for an id naming nothing.

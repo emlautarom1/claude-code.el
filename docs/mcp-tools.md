@@ -10,7 +10,7 @@ Each call runs with `default-directory` bound to the calling session's real work
 
 Arguments arrive as JSON: an omitted optional argument, JSON `null` and JSON `false` all reach the handler as nil, so a boolean argument reads as a plain Lisp truth value. An empty string given for an *optional* argument counts as omitted too, so a handler forwarding values to a process never emits an option with nothing after it; for a required argument it stays the value it is.
 
-An argument spec can also name the `enum` of values it accepts, which the schema advertises and `claude-code--mcp-validate-args` holds the call to: a missing required argument, a value of the wrong `type` and a value outside an `enum` are each a JSON-RPC `-32602` naming the argument, and the handler does not run. An error the handler itself signals is a different thing — it becomes an `isError` result carrying the message, which Claude sees and can act on.
+An argument spec can also name the `enum` of values it accepts, which the schema advertises and `claude-code--mcp-validate-args` holds the call to: a required argument the call left out, a value of the wrong `type` and a value outside an `enum` are each a JSON-RPC `-32602` naming the argument, and the handler does not run. A required boolean is the one argument nil does not condemn — sent as `false` it is an answer, and only the call itself distinguishes that from silence. An error the handler itself signals is a different thing — it becomes an `isError` result carrying the message, which Claude sees and can act on.
 
 With `claude-code-mcp-auto-approve` (the default) **every** tool below is pre-authorized for spawned instances, so Claude calls them without prompting.
 

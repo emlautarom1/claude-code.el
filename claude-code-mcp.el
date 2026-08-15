@@ -290,16 +290,18 @@ empty value.
 
 Every value a handler receives holds to the schema its tool advertises: it
 matches the spec's :type and, where the spec names an :enum, is one of those
-values.  Anything else -- including a missing required argument -- signals a
-`claude-code--mcp-rpc-error' with code -32602 naming the argument, so a caller
-that ignored the schema is told what its call got wrong instead of the handler
-acting on it."
+values.  Anything else -- including a required argument the call left out --
+signals a `claude-code--mcp-rpc-error' with code -32602 naming the argument, so
+a caller that ignored the schema is told what its call got wrong instead of the
+handler acting on it.  A required boolean is the one argument nil does not
+condemn: sent as false it is an answer, and the call is what says so."
   (mapcar (lambda (spec)
             (let* ((name (plist-get spec :name))
                    (type (plist-get spec :type))
                    (enum (plist-get spec :enum))
                    (optional (plist-get spec :optional))
-                   (value (alist-get (intern name) arguments))
+                   (given (assq (intern name) arguments))
+                   (value (cdr given))
                    (reject (lambda (fmt &rest args)
                              (signal 'claude-code--mcp-rpc-error
                                      (list -32602 (apply #'format fmt args))))))
@@ -309,7 +311,10 @@ acting on it."
                 (setq value nil))
               (cond
                ((null value)
-                (unless optional
+                ;; A boolean the caller sent as false is an answer, not an
+                ;; omission -- it reaches the handler as the nil an absent
+                ;; argument does, so only the call itself tells them apart.
+                (unless (or optional (and given (eq type 'boolean)))
                   (funcall reject "Missing required argument: %s" name)))
                ((not (pcase type
                        ('string (stringp value))
