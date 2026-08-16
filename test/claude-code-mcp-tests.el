@@ -94,6 +94,18 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
       (list (cons 'name "eval")
             (cons 'arguments (list (cons 'code code))))))))
 
+(defun claude-code-mcp-tests--eval-answer (code)
+  "Return `eval' of CODE as a cons of its `isError' flag and result text."
+  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval code))))
+    (cons (alist-get 'isError result)
+          (alist-get 'text (aref (alist-get 'content result) 0)))))
+
+(defun claude-code-mcp-tests--eval-buffers ()
+  "Return the buffers the `eval' tool evaluates in that are still alive."
+  (seq-filter (lambda (buffer)
+                (string-prefix-p " *claude-code-eval*" (buffer-name buffer)))
+              (buffer-list)))
+
 ;;;; Pure dispatch: initialize / notifications / errors
 
 (ert-deftest claude-code-mcp-test-initialize ()
@@ -402,7 +414,9 @@ must not outlive the call: the next one may come from another session."
 ;;;; Pure dispatch: tools/call eval happy and error paths
 
 (ert-deftest claude-code-mcp-test-eval-happy ()
-  "`eval' returns the last value's printed form and `isError' JSON false."
+  "`eval' returns the form's printed value and `isError' JSON false.
+This one spells the extraction out: it is the wire-shape check the rest of
+the `eval' tests reach through `claude-code-mcp-tests--eval-answer'."
   (let* ((resp (claude-code-mcp-tests--call-eval "(+ 40 2)"))
          (result (alist-get 'result resp))
          (content (alist-get 'content result)))
@@ -417,50 +431,127 @@ must not outlive the call: the next one may come from another session."
     (should (eq (alist-get 'isError result) :json-false))))
 
 (defvar claude-code-mcp-tests--x nil
-  "Scratch special variable for `claude-code-mcp-test-eval-multi-form'.")
+  "Scratch special variable for the `eval' tool tests.")
 
-(ert-deftest claude-code-mcp-test-eval-multi-form ()
-  "`eval' runs every top-level form and returns the last value."
+(ert-deftest claude-code-mcp-test-eval-progn ()
+  "A `progn' sequences several forms and answers with the last value."
   (let* ((claude-code-mcp-tests--x nil)
-         (result (alist-get 'result
-                            (claude-code-mcp-tests--call-eval
-                             "(setq claude-code-mcp-tests--x 5)
-                              (* claude-code-mcp-tests--x claude-code-mcp-tests--x)"))))
-    (should (equal (alist-get 'text (aref (alist-get 'content result) 0)) "25"))
-    (should (eq (alist-get 'isError result) :json-false))))
+         (answer (claude-code-mcp-tests--eval-answer
+                  "(progn (setq claude-code-mcp-tests--x 5)
+                          (* claude-code-mcp-tests--x
+                             claude-code-mcp-tests--x))")))
+    (should (eq (car answer) :json-false))
+    (should (equal (cdr answer) "25"))))
+
+(ert-deftest claude-code-mcp-test-eval-refuses-several-forms ()
+  "Several top-level forms are refused, with advice to wrap them in `progn'."
+  (let ((answer (claude-code-mcp-tests--eval-answer "(+ 1 2) (* 3 4)")))
+    (should (eq (car answer) t))
+    (should (string-match-p "progn" (cdr answer))))
+  ;; The refusal precedes evaluation: no part of the submission runs.
+  (let ((claude-code-mcp-tests--x nil))
+    (claude-code-mcp-tests--call-eval "(setq claude-code-mcp-tests--x 'ran) 42")
+    (should (null claude-code-mcp-tests--x))))
+
+(ert-deftest claude-code-mcp-test-eval-trailing-text-is-not-a-form ()
+  "Trailing text that reads as nothing surfaces the reader's own complaint.
+Advising `progn' there would be a trap: wrapping an unbalanced form leaves it
+unbalanced, so the caller needs the syntax error instead."
+  (let ((answer (claude-code-mcp-tests--eval-answer "(+ 1 2))")))
+    (should (eq (car answer) t))
+    (should (string-match-p "Invalid read syntax" (cdr answer)))
+    (should-not (string-match-p "progn" (cdr answer))))
+  (let ((answer (claude-code-mcp-tests--eval-answer "(+ 1 2) (+ 3")))
+    (should (eq (car answer) t))
+    (should (string-match-p "End of file" (cdr answer)))
+    (should-not (string-match-p "progn" (cdr answer)))))
 
 (ert-deftest claude-code-mcp-test-eval-errors ()
   "Evaluation and read errors become an `isError' result, never a crash."
   ;; A runtime error (division by zero) is caught and reported.
-  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval "(/ 1 0)"))))
-    (should (eq (alist-get 'isError result) t))
-    (should (string-match-p "Error:"
-                            (alist-get 'text (aref (alist-get 'content result) 0)))))
+  (let ((answer (claude-code-mcp-tests--eval-answer "(/ 1 0)")))
+    (should (eq (car answer) t))
+    (should (string-match-p "Error:" (cdr answer))))
   ;; A malformed form (unbalanced paren) is caught and reported.
-  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval "(+ 1"))))
-    (should (eq (alist-get 'isError result) t)))
-  ;; An incomplete form after a valid one errors, not a silent partial success.
-  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval "(+ 1 2) (+ 3"))))
-    (should (eq (alist-get 'isError result) t))))
+  (should (eq (car (claude-code-mcp-tests--eval-answer "(+ 1")) t)))
 
 (ert-deftest claude-code-mcp-test-eval-semicolons-in-code ()
   "A `;' is code in a character literal or string, and a comment elsewhere."
   (dolist (case '(("?;" . "59")
                   ("(list ?; 5)" . "(59 5)")
                   ("\"a;b\"" . "\"a;b\"")
-                  ;; A leading comment, and a comment between two forms.
-                  (";; lead\n(+ 1 2) ; mid\n(* 2 3)" . "6")
-                  ;; A comment after the last form, skipped before the loop ends.
+                  ;; A leading comment, and a comment inside the form.
+                  (";; lead\n(progn (+ 1 2) ; mid\n (* 2 3))" . "6")
+                  ;; A comment after the form, skipped before the trailing check.
                   ("(+ 40 2) ; the answer" . "42")
                   ;; A comment holding an unbalanced delimiter is skipped by
                   ;; syntax, so it never reaches the reader.
                   ("(+ 1 2) ; )" . "3")
                   ;; Nothing but comments evaluates to nil, not a read error.
                   (";; just a comment" . "nil")))
-    (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval (car case)))))
+    (let ((answer (claude-code-mcp-tests--eval-answer (car case))))
+      (should (eq (car answer) :json-false))
+      (should (equal (cdr answer) (cdr case))))))
+
+(ert-deftest claude-code-mcp-test-eval-survives-a-buffer-switch ()
+  "A form leaving another buffer current still answers with its own value.
+Nothing of that buffer may be read as source, and its point must not move."
+  (let ((buffer (generate-new-buffer "*claude-code-mcp-test-source*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "(setq claude-code-mcp-tests--x 'read-from-the-wrong-buffer)")
+            (goto-char (point-min)))
+          (let* ((claude-code-mcp-tests--x nil)
+                 (answer (claude-code-mcp-tests--eval-answer
+                          (format "(progn (set-buffer %S) :submitted)"
+                                  (buffer-name buffer)))))
+            (should (eq (car answer) :json-false))
+            (should (equal (cdr answer) ":submitted"))
+            (should (null claude-code-mcp-tests--x))
+            (should (= (with-current-buffer buffer (point)) 1))))
+      (kill-buffer buffer))))
+
+(ert-deftest claude-code-mcp-test-eval-runs-in-a-buffer-of-its-own ()
+  "Evaluation runs in an empty buffer, never one the caller did not name."
+  (should (equal (cdr (claude-code-mcp-tests--eval-answer "(buffer-string)")) "\"\""))
+  (let ((buffer (generate-new-buffer "*claude-code-mcp-test-bystander*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (claude-code-mcp-tests--call-eval "(insert \"x\")")
+          (should (equal (buffer-string) "")))
+      (kill-buffer buffer))))
+
+(ert-deftest claude-code-mcp-test-eval-buffer-does-not-survive ()
+  "The buffer evaluation ran in is gone afterwards, however the call ended."
+  (dolist (code '("(buffer-name)" "(kill-buffer)" "(error \"boom\")" "(+ 1"))
+    (claude-code-mcp-tests--call-eval code)
+    (should-not (claude-code-mcp-tests--eval-buffers)))
+  ;; The timeout leaves by a throw from a timer, not by returning or signalling.
+  (let ((claude-code-mcp-eval-timeout 0.1))
+    (should (eq (car (claude-code-mcp-tests--eval-answer "(sit-for 5)")) t))
+    (should-not (claude-code-mcp-tests--eval-buffers))))
+
+(ert-deftest claude-code-mcp-test-eval-answers-in-full ()
+  "A caller's own print limits never truncate what the tool answers with."
+  (let ((print-length 2)
+        (print-level 1))
+    (should (equal (cdr (claude-code-mcp-tests--eval-answer "(list 1 2 3 4)"))
+                   "(1 2 3 4)"))
+    (should (equal (cdr (claude-code-mcp-tests--eval-answer "'(1 (2 (3 (4))))"))
+                   "(1 (2 (3 (4))))"))))
+
+(ert-deftest claude-code-mcp-test-eval-sees-the-session-directory ()
+  "The evaluated form runs in the calling session's own working directory."
+  (claude-code-mcp-tests--isolated
+    (puthash "sess" (list :buffer nil :origin "/home/test/proj")
+             claude-code--managed)
+    (let ((result (alist-get 'result
+                             (claude-code-mcp-tests--call-tool
+                              "sess" "eval" (cons 'code "default-directory")))))
       (should (eq (alist-get 'isError result) :json-false))
       (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
-                     (cdr case))))))
+                     "\"/home/test/proj/\"")))))
 
 ;;;; Pure dispatch: tools/call spawn
 

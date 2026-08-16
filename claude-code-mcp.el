@@ -171,33 +171,60 @@ The tool is stored in `claude-code--mcp-tools' under :name and also returned."
       (puthash name tool claude-code--mcp-tools)
       tool)))
 
+(defun claude-code--mcp-read-form (code)
+  "Return the single top-level form in the string CODE, or nil for none.
+Whitespace and comments around the form are skipped.  Signal if anything else
+follows it: text that reads as a second form asks the caller to wrap both in
+`progn', and text that reads as no form signals the read error instead."
+  (with-temp-buffer
+    (insert code)
+    (goto-char (point-min))
+    (with-syntax-table emacs-lisp-mode-syntax-table
+      (forward-comment (point-max))
+      (unless (eobp)
+        (let ((form (read (current-buffer))))
+          (forward-comment (point-max))
+          (unless (eobp)
+            (read (current-buffer))
+            (error
+             "`code' takes one top-level form; wrap several in (progn ...)"))
+          form)))))
+
 (defun claude-code--mcp-tool-eval (code)
-  "Evaluate CODE, a string of Elisp, and return the last value as a string.
-Reads and evaluates every top-level form in CODE with lexical binding, under a
-`claude-code-mcp-eval-timeout'-second timeout, and returns `prin1-to-string'
-of the final form's value.  Reading happens in a buffer under the Elisp syntax
-table, so `forward-comment' skips whitespace and comments between and after
-forms; a malformed form -- including an incomplete final form -- surfaces its
-read error to the caller, which reports it as an MCP tool error."
+  "Evaluate the single Elisp form in the string CODE; return its printed value.
+Evaluation uses lexical binding, is bounded by `claude-code-mcp-eval-timeout'
+seconds, and runs in a temporary buffer killed when the call ends, so a form
+that names no buffer touches none.  The value prints in full, whatever
+`print-length' and `print-level' the user runs with."
   (with-timeout (claude-code-mcp-eval-timeout
                  (error "Evaluation timed out after %s seconds"
                         claude-code-mcp-eval-timeout))
-    (with-temp-buffer
-      (insert code)
-      (goto-char (point-min))
-      (let ((value nil))
-        (with-syntax-table emacs-lisp-mode-syntax-table
-          (while (progn (forward-comment (point-max)) (not (eobp)))
-            (setq value (eval (read (current-buffer)) t))))
-        (prin1-to-string value)))))
+    ;; `let*' so a read error happens before there is a buffer to lose, and
+    ;; DIRECTORY carries the session's cwd across the buffer switch, since
+    ;; `default-directory' is permanently buffer-local.
+    (let* ((directory default-directory)
+           (form (claude-code--mcp-read-form code))
+           (buffer (generate-new-buffer " *claude-code-eval*" t)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (setq default-directory directory)
+            (let ((value (eval form t)))
+              (let ((print-length nil)
+                    (print-level nil))
+                (prin1-to-string value))))
+        (when (buffer-name buffer) (kill-buffer buffer))))))
 
 (claude-code-mcp-make-tool
  :name "eval"
  :description
- "Evaluate Emacs Lisp in the user's live Emacs and return the printed result.
-CODE may hold several top-level forms; the value of the last form is returned."
+ "Evaluate a single Emacs Lisp form in the user's live Emacs and return the
+printed result.  Wrap several forms in (progn ...).  Evaluation uses lexical
+binding.  The current buffer is a temporary one made for the call and killed
+after it, never a buffer the user can see: name the buffer to act on with
+(with-current-buffer BUFFER ...), or reach the one the user is looking at
+with (window-buffer (selected-window))."
  :args (list (list :name "code" :type 'string
-                   :description "Emacs Lisp source to read and evaluate."))
+                   :description "A single Emacs Lisp form"))
  :handler #'claude-code--mcp-tool-eval)
 
 (defun claude-code--mcp-tool-spawn (prompt model effort worktree worktree-name)

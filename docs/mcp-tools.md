@@ -16,13 +16,15 @@ With `claude-code-mcp-auto-approve` (the default) **every** tool below is pre-au
 
 ## `eval`
 
-Reads and evaluates Emacs Lisp in the user's live Emacs and returns the printed result.
+Reads and evaluates a single Emacs Lisp form in the user's live Emacs and returns the printed result.
 
-| Argument | Type     | Required | Meaning                                |
-|----------|----------|----------|----------------------------------------|
-| `code`   | `string` | yes      | Emacs Lisp source to read and evaluate |
+| Argument | Type     | Required | Meaning                  |
+|----------|----------|----------|--------------------------|
+| `code`   | `string` | yes      | A single Emacs Lisp form |
 
-`code` may hold several top-level forms; each is read and evaluated in order with lexical binding, and `prin1-to-string` of the **last** form's value is returned. Reading happens under the Elisp syntax table, so whitespace and comments between and after forms are skipped — code that is nothing but comments evaluates to nil rather than failing. A malformed form, including an incomplete final one, surfaces its read error as a tool error instead of silently evaluating the valid prefix.
+`code` holds exactly one top-level form, evaluated with lexical binding; `prin1-to-string` of its value is returned, untruncated whatever `print-length` and `print-level` the user runs with. Whitespace and comments around the form are ignored, so code that is nothing but comments evaluates to nil. The form is read before any of it runs, so a malformed one evaluates nothing at all. Trailing text that reads as a second form is refused, asking for both to be wrapped in `(progn ...)`; trailing text that reads as no form — `(+ 1 2))`, `(+ 1 2) (+ 3` — gets the read error instead.
+
+Evaluation runs in a temporary buffer made for the call and killed when it ends, whether the form returned, signalled or timed out, so `(current-buffer)` is never a buffer the user can see and a form that names no buffer touches none. Name the buffer to act on with `(with-current-buffer BUFFER ...)`, or reach the one the user is looking at with `(window-buffer (selected-window))`. That fresh buffer is a default, not a boundary.
 
 Evaluation is aborted after `claude-code-mcp-eval-timeout` seconds. The timeout only interrupts code that yields (I/O, `sit-for`, process waits); a CPU-bound infinite loop runs on.
 
