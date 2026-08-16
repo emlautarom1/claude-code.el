@@ -1272,19 +1272,22 @@ D-Bus is not wanted under test, so requiring `notifications' is a no-op."
   "The notification names the session, declares no action, and keeps BODY as sent.
 An action would cost the raise the jump depends on, so the list stays empty.
 The body reaches the server verbatim: it repairs markup it cannot parse, so a
-message quoting a shell command needs no escaping on the way out."
+message quoting a shell command needs no escaping on the way out.  Urgency
+travels too, since it is what decides whether a banner is drawn at all."
   (let ((posts '())
         (session (claude-code-session--create
                   :id "id-1" :title "Understand the project layout")))
     (claude-code-tests--recording-notify posts
       ;; A value the defcustom does not already hold, so the wiring is tested
       ;; rather than the default.
-      (let ((claude-code-notify-desktop-entry "emacs-nightly"))
+      (let ((claude-code-notify-desktop-entry "emacs-nightly")
+            (claude-code-notify-urgency 'normal))
         (claude-code-notify-desktop session "run `du -sh * | sort -h` <now>"))
       (let ((params (car posts)))
         (should (equal (plist-get params :title) "Understand the project layout"))
         (should (equal (plist-get params :body) "run `du -sh * | sort -h` <now>"))
         (should (equal (plist-get params :desktop-entry) "emacs-nightly"))
+        (should (equal (plist-get params :urgency) 'normal))
         (should-not (plist-member params :actions))))))
 
 (ert-deftest claude-code-test-notify-desktop-follows-only-a-dismissal ()

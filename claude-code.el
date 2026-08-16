@@ -696,6 +696,14 @@ knows which application to raise when one is clicked.  A name matching no
 installed desktop file still notifies, but the click cannot reach Emacs."
   :type 'string)
 
+(defcustom claude-code-notify-urgency 'critical
+  "Urgency `claude-code-notify-desktop' sends with every notification.
+GNOME draws no banner over a fullscreen window below `critical', and a
+`critical' banner stays up until it is acted on instead of timing out."
+  :type '(choice (const :tag "Low -- listed, never bannered" low)
+                 (const :tag "Normal -- times out, hidden by fullscreen" normal)
+                 (const :tag "Critical -- shows over fullscreen, stays up" critical)))
+
 (defvar claude-code--notify-activation-window 1.0
   "Seconds a dismissed notification waits for the desktop to raise Emacs.
 The same window bounds how long one click suppresses the closes of the
@@ -795,6 +803,7 @@ click to Emacs instead of raising it, and the raise is what the jump needs."
      :title (claude-code--session-display-name session)
      :body body
      :desktop-entry claude-code-notify-desktop-entry
+     :urgency claude-code-notify-urgency
      :on-close (lambda (_notification reason)
                  (when (eq reason 'dismissed)
                    (claude-code--notify-follow id))))))
