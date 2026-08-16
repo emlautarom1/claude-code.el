@@ -1,6 +1,6 @@
 # Architecture
 
-The package is two files. `claude-code.el` is the core, organized as four layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
+The package is two files. `claude-code.el` is the core, organized as five layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
 
 ```
 Storage adapter   ~/.claude parsing + cwd encoding   (Claude internals live here)
@@ -8,6 +8,8 @@ Storage adapter   ~/.claude parsing + cwd encoding   (Claude internals live here
 Model             claude-code-session structs, the sessions query, process usage
         │  structs only
 Operations        spawn / resume / kill / delete / rename / send / interrupt / focus
+        │
+Notifications     an instance asking for attention -> claude-code-notify-function
         │
 View              claude-code-sessions-mode + spawn menu + claude-code-sessions
 ```
@@ -62,6 +64,27 @@ Every `claude-code-sessions-*` command reads the view's buffer-local state, so e
 Two commands are global, each resolving its project through `claude-code--project-root`: `claude-code-sessions` and `claude-code-spawn-menu`. `claude-code-sessions` then picks its buffer by the project a view names, never by the buffer name — two projects can share a basename, and a name is free to belong to some unrelated buffer — so it reuses that project's view if there is one (honouring a rename) and otherwise makes a new buffer, where a clashing name takes Emacs's `<2>` suffix. The menu resolves the root **before** `transient-setup` and hands it down as the prefix's `:scope`, so a buffer with no project prompts before the menu appears, and `claude-code--spawn-session` reads the root from the scope instead of the buffer it runs in — that is what frees the menu from the view, which it neither opens nor needs selected. The suffix carries transient's `transient--suffix-only` completion predicate, so `M-x` never offers it.
 
 A spawn displays the new instance with `pop-to-buffer`, so `display-buffer-alist` and window dedication choose the window — the menu runs from any buffer, including a dedicated side window, and must not take it over. `claude-code-focus` and `RET` use `switch-to-buffer`: showing the instance *in the selected window* is what they are for, with `o` as the other-window variant.
+
+## Attention notifications
+
+An instance that wants the user back says so over a terminal escape, which Ghostel decodes and hands to `ghostel-notification-function`. The package binds that variable **buffer-locally** in each instance buffer (`claude-code--install-notifications`, installed from the launch path right after `ghostel-exec` for the same reason title tracking is: the `ghostel-mode` switch wipes buffer-local bindings). Ghostel reads the variable with the terminal buffer current, so the local binding wins for Claude's terminals and every other Ghostel terminal keeps the user's global handler. Nothing polls. Claude picks the channel from the terminal Ghostel reports itself as — `TERM_PROGRAM=ghostty`, advertised only while `ghostel-term` is `xterm-ghostty` and the bundled terminfo resolves. Pinning `preferredNotifChannel` to `ghostty` in `settings.json` asks for that channel whatever the detection concludes, and is the configuration this is verified against.
+
+*When* an instance asks is Claude's decision, not this package's (see [attention notification](glossary.md)). The wait is `messageIdleNotifThresholdMs`, a **top-level key of `~/.claude.json`** in milliseconds, default `60000` — so a finished turn goes quiet for a minute before anything appears. It is undocumented, with no `settings.json`, environment or `claude config` equivalent (the settings validator rejects the name), and `0` means *at once*, not *off*. Edit the file with no session running, since a live one rewrites it. Verified against CLI v2.1.222 and version-volatile, like everything else Claude keeps there.
+
+The package adds one guard of its own, `claude-code--attended-p`: an instance the user is already watching announces nothing. "Watching" means the buffer is the selected window of a focused frame, tested over *every* window showing it, since the same instance can sit in a side window on one frame and be the focus on another.
+
+The hand-off is `claude-code-notify-function`, called with the instance's `claude-code-session` and Claude's message. The struct is built when the notification fires (`claude-code--session-by-id`), so a handler gets the name and status the session has *now*, and the whole model with it. Setting the variable to `nil` turns notifications off.
+
+The default handler, `claude-code-notify-desktop`, posts a desktop notification titled with the session's display name — which is what tells several instances apart — and jumps to the instance when it is clicked. Everything below is measured against GNOME, the only desktop this is claimed to work on:
+
+- **A click raises Emacs; it does not focus it.** GNOME activates the application — switching workspace and marking the window activated, which is what `frame-focus-state` reports — while the keyboard stays where it was: pointer events arrive at the frame and keystrokes do not. Emacs cannot take focus itself either, because Wayland grants it against an activation token that `org.freedesktop.Notifications` has no way to carry. So the jump puts the instance on screen and **the user clicks once before typing**.
+- **The notification declares no actions.** An action would identify the click outright, since `ActionInvoked` names the notification where close signals cannot — but a notification carrying one is never activated, and the raise is worth more than the identity.
+- **A click and a wave-away look identical**, both arriving as `dismissed`. `claude-code--notify-follow` separates them by waiting `claude-code--notify-activation-window` seconds for the raise only a click produces; with no raise, the windows are left alone. It assumes the close arrives before the raise, which is what GNOME does — the D-Bus hop is shorter than the compositor's — but nothing orders the two, so a raise landing first would lose that click.
+- **The first close of a burst wins.** Clicking one notification dismisses every other one the desktop grouped with it, all as `dismissed` and within a millisecond, so the signals alone cannot say which was clicked; what distinguishes it is order. The first close claims the activation window and every close behind it is ignored until the window expires, which also keeps one click to one jump. Two *independent* closes inside one window are indistinguishable from a burst, so waving one notification away and clicking another within the second opens the first.
+- **An already-focused Emacs jumps at once.** `after-focus-change-function` fires on a transition, so with focus already held no raise is coming and waiting for one would drop the click. Nothing distinguishes a click from a wave-away in that state, and a stray window change is the cheaper error.
+- **The target is resolved on arrival**, not when the notification was posted, so an instance killed and resumed meanwhile still opens — in its new buffer. The display runs from a timer so it does not rearrange windows inside the D-Bus handler or the focus hook, and `pop-to-buffer` keeps placement under `display-buffer-alist`.
+
+`claude-code-notify-desktop-entry` names the desktop entry Emacs runs as, which is how the desktop knows *which* application to raise; a name matching no installed desktop file still notifies, but the click cannot reach Emacs.
 
 ## MCP server
 

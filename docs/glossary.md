@@ -39,3 +39,5 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 - **MCP tool** / **tool catalog** — a capability the MCP server advertises to Claude (a name, description, argument schema, and a handler function), registered with `claude-code-mcp-make-tool`. The **tool catalog** is the set of all advertised tools; it is expected to grow, and each one is documented in [`mcp-tools.md`](mcp-tools.md).
 
 - **Session-id path token** — the spawn UUID as it appears in the MCP request path `/mcp/<uuid>`. It multiplexes sessions over the one shared server and keys the real-cwd lookup. It is **not** a security boundary (see the [security decision](architecture.md#decisions)).
+
+- **Attention notification** — the message an instance emits when it wants the user back. It is an *idle* notification: Claude sends one once a turn has ended or an answer is needed and the terminal has been left alone since, not at the turn's end. It travels as a terminal escape that Ghostel decodes, so the package learns about it without polling. What the package does with it is `claude-code-notify-function`; see the [architecture notes](architecture.md#attention-notifications).

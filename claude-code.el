@@ -41,6 +41,7 @@
 (defvar ghostel--process)
 (defvar ghostel-exit-functions)
 (defvar ghostel-buffer-name-function)
+(defvar ghostel-notification-function)
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
@@ -237,6 +238,17 @@ Keys: :buffer (the Ghostel buffer), :origin (project root the instance
 was launched from, normalised with `claude-code--normalize-root') and
 :worktree (the worktree's transcript-directory token, nil for none).")
 
+(defun claude-code--session-display-name (session)
+  "Return SESSION's display name.
+This is the single authority for a session's name, so it cannot drift: the
+name is derived from the transcript on every query, never cached by this
+package.  The sources, in order: the transcript TITLE (a user custom title
+that `/rename' writes, else Claude's generated one), the opening prompt, and
+finally the short session id."
+  (or (claude-code-session-title session)
+      (claude-code-session-last-prompt session)
+      (string-limit (claude-code-session-id session) 8)))
+
 (defun claude-code--normalize-root (path)
   "Return PATH as an absolute, symlink-resolved directory name.
 Claude records a session's cwd as the real (symlink-resolved) path its process
@@ -316,6 +328,17 @@ registry stands in only for a session with no transcript yet."
            :waiting-for (plist-get info :waiting-for)
            (claude-code--transcript-session-args
             tr (unless tr (gethash id claude-code--managed))))))
+
+(defun claude-code--session-by-id (id buffer)
+  "Return the alive `claude-code-session' for managed instance ID in BUFFER.
+Finds the instance's transcript descriptor under the root it was launched
+from, so the struct carries the session's name as well as its live status."
+  (let* ((root (plist-get (gethash id claude-code--managed) :origin))
+         (descriptor (seq-find (lambda (tr) (equal (plist-get tr :id) id))
+                               (and root
+                                    (claude-code--project-transcripts root)))))
+    (claude-code--alive-session id buffer (claude-code--live-status-table)
+                                descriptor)))
 
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
@@ -554,6 +577,7 @@ rather than start it; the `:worktree' request is also recorded in the registry."
                   (funcall claude-code-buffer-name-function root))))
     (ghostel-exec buffer claude-code-cli args)
     (claude-code--install-buffer-name-tracking buffer)
+    (claude-code--install-notifications id buffer)
     (claude-code--register id buffer root (plist-get opts :worktree))
     buffer))
 
@@ -648,6 +672,134 @@ transcript and the next refresh reads it back through
   (switch-to-buffer (claude-code--buffer session)))
 
 
+;;;; Notifications
+;;
+;; An instance asks for attention with a terminal notification escape, which
+;; Ghostel hands to the buffer-local `ghostel-notification-function' installed
+;; here.  What a click does, and why the notification is shaped the way it is,
+;; are in docs/architecture.md.
+
+;; `notifications' ships with Emacs but needs a D-Bus build, so it is required
+;; where it is used rather than at the top level.
+(declare-function notifications-notify "notifications" (&rest params))
+
+(defcustom claude-code-notify-function #'claude-code-notify-desktop
+  "Function announcing that an instance wants the user's attention.
+Called with the instance's `claude-code-session' and the message Claude sent.
+Set to nil to ignore notifications."
+  :type '(choice (const :tag "Disabled" nil) function))
+
+(defcustom claude-code-notify-desktop-entry "emacs"
+  "Basename of the desktop entry this Emacs runs as.
+`claude-code-notify-desktop' sends it with every notification so the desktop
+knows which application to raise when one is clicked.  A name matching no
+installed desktop file still notifies, but the click cannot reach Emacs."
+  :type 'string)
+
+(defvar claude-code--notify-activation-window 1.0
+  "Seconds a dismissed notification waits for the desktop to raise Emacs.
+The same window bounds how long one click suppresses the closes of the
+notifications dismissed alongside it.")
+
+(defvar claude-code--notify-claim nil
+  "The activation window claimed by the first close of a burst, or nil.
+A cons of (WATCH . TIMER), where WATCH is nil when Emacs already held focus
+and no raise had to be waited for.")
+
+(defun claude-code--focused-p ()
+  "Non-nil when any frame has input focus.
+`frame-focus-state' answers for a single frame and several can report focus
+at once, so deciding whether Emacs holds focus means scanning them all."
+  (seq-some (lambda (frame) (eq (frame-focus-state frame) t)) (frame-list)))
+
+(defun claude-code--attended-p (buffer)
+  "Non-nil when the user is looking at BUFFER right now.
+True when BUFFER is the selected window of any focused frame, which is what
+keeps an instance already on screen from announcing itself."
+  (seq-some (lambda (window)
+              (let ((frame (window-frame window)))
+                (and (eq window (frame-selected-window frame))
+                     (eq (frame-focus-state frame) t))))
+            (get-buffer-window-list buffer nil t)))
+
+(defun claude-code--notify (id body)
+  "Announce instance ID's message BODY via `claude-code-notify-function'.
+Silent for an instance that has left the registry, and for one whose buffer
+the user is already attending."
+  (let ((buffer (and claude-code-notify-function
+                     (claude-code--managed-buffer id))))
+    (when (and buffer (not (claude-code--attended-p buffer)))
+      (funcall claude-code-notify-function
+               (claude-code--session-by-id id buffer)
+               body))))
+
+(defun claude-code--install-notifications (id buffer)
+  "Route BUFFER's terminal notifications to those of instance ID.
+The binding is buffer-local, so Ghostel terminals this package does not manage
+keep the user's global handler."
+  (with-current-buffer buffer
+    (setq-local ghostel-notification-function
+                (lambda (_title body) (claude-code--notify id body)))))
+
+(defun claude-code--notify-retire ()
+  "Release the activation window, if one is claimed."
+  (when-let* ((claim claude-code--notify-claim))
+    (setq claude-code--notify-claim nil)
+    (when (car claim)
+      (remove-function after-focus-change-function (car claim)))
+    (cancel-timer (cdr claim))))
+
+(defun claude-code--notify-show (id)
+  "Display managed instance ID, resolved now rather than when it announced.
+An instance killed and resumed meanwhile is hosted in a new buffer, and that
+is the one to open.  The display runs from a timer so that it does not
+rearrange windows inside the D-Bus handler or focus hook that asked for it,
+and `pop-to-buffer' keeps placement under `display-buffer-alist'."
+  (run-at-time 0 nil
+               (lambda ()
+                 (when-let* ((buffer (claude-code--managed-buffer id)))
+                   (pop-to-buffer buffer)))))
+
+(defun claude-code--notify-follow (id)
+  "Display instance ID if the notification announcing it was the one clicked.
+The first close of a burst is the clicked one, and it claims
+`claude-code--notify-activation-window' seconds.  Within that window the
+closes of the notifications dismissed alongside it are ignored, and a raise --
+which only a click produces -- displays the instance.  An already-focused
+Emacs has no raise coming, so it displays at once."
+  (unless claude-code--notify-claim
+    (let ((expiry (run-at-time claude-code--notify-activation-window nil
+                               #'claude-code--notify-retire)))
+      (if (claude-code--focused-p)
+          (progn
+            (setq claude-code--notify-claim (cons nil expiry))
+            (claude-code--notify-show id))
+        (let (watch)
+          ;; Only the watch is dropped once the raise lands; the claim stands
+          ;; until it expires, so a close arriving behind the raise is still
+          ;; ignored rather than jumping again.
+          (setq watch (lambda ()
+                        (when (claude-code--focused-p)
+                          (remove-function after-focus-change-function watch)
+                          (claude-code--notify-show id))))
+          (setq claude-code--notify-claim (cons watch expiry))
+          (add-function :after after-focus-change-function watch))))))
+
+(defun claude-code-notify-desktop (session body)
+  "Post BODY as a desktop notification that jumps to SESSION when clicked.
+The notification declares no actions: a desktop with one to invoke hands the
+click to Emacs instead of raising it, and the raise is what the jump needs."
+  (require 'notifications)
+  (let ((id (claude-code-session-id session)))
+    (notifications-notify
+     :title (claude-code--session-display-name session)
+     :body body
+     :desktop-entry claude-code-notify-desktop-entry
+     :on-close (lambda (_notification reason)
+                 (when (eq reason 'dismissed)
+                   (claude-code--notify-follow id))))))
+
+
 ;;;; View
 ;;
 ;; A `tabulated-list-mode' buffer listing every session of a project, grouped by
@@ -682,17 +834,6 @@ folded.")
               (raw (cons (format "unknown (%s)" raw) 'default))))
     ('external (cons "external" 'font-lock-comment-face))
     ('dead (cons "dead" 'shadow))))
-
-(defun claude-code--session-display-name (session)
-  "Return SESSION's display name.
-This is the single authority for a session's name, so it cannot drift: the
-name is derived from the transcript on every query, never cached by this
-package.  The sources, in order: the transcript TITLE (a user custom title
-that `/rename' writes, else Claude's generated one), the opening prompt, and
-finally the short session id."
-  (or (claude-code-session-title session)
-      (claude-code-session-last-prompt session)
-      (string-limit (claude-code-session-id session) 8)))
 
 (defun claude-code--format-relative-time (time now)
   "Return a compact age string for TIME relative to NOW.

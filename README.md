@@ -12,6 +12,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
 - **`transient` spawn menu** (`M-x claude-code-spawn-menu` from any buffer, `n` in the view) for the spawn flags: worktree, model, effort.
+- **Attention notifications** — an instance left waiting raises a desktop notification named after the session; clicking it brings Emacs forward, switching workspace if needed, and pops that instance into view. Claude raises these on an idle timer — about a minute after a turn ends, [tunable in `~/.claude.json`](docs/architecture.md#attention-notifications). Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -21,6 +22,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - [Ghostel](https://github.com/dakra/ghostel) — hosts each instance's terminal. Loaded lazily, so the package byte-compiles and tests without its native module.
 - [`web-server`](https://github.com/eschulte/emacs-web-server) — HTTP transport for the MCP server.
 - The `claude` CLI on your `PATH`
+- For desktop notifications: an Emacs built with D-Bus, and a notification daemon. Verified on GNOME, where a click raises Emacs and shows the instance but does not hand over the keyboard — you click once to start typing. Other daemons dispatch a click differently and are not covered yet.
 
 ## Install
 
