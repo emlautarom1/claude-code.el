@@ -83,6 +83,10 @@ session external and every other fixture session dead."
                  ,@body)))
          (kill-buffer buf)))))
 
+(defun claude-code-tests--goto-session (id)
+  "Move point to the row of session ID in the view."
+  (claude-code--goto-line-where (lambda () (equal id (tabulated-list-get-id)))))
+
 (defmacro claude-code-tests--without-requiring (features &rest body)
   "Run BODY with a `require' of any feature in FEATURES a no-op.
 Every other feature still loads normally.  Shadowing `features' itself would
@@ -1629,112 +1633,17 @@ group, so `d' has no target there and `k' does."
       (should (member "dead" claude-code--collapsed))
       (should (equal (point) header)))))
 
-(ert-deftest claude-code-test-view-toggle-non-last-group ()
-  "Folding a group other than the last one still lands on its own header.
-Dead sorts last, where holding the line happens to clamp onto the header; a
-group with others below it is the case that tells the two targets apart."
-  (let ((promoted "11111111-1111-4111-8111-111111111111"))
-    (cl-letf* ((real (symbol-function 'claude-code--session-liveness))
-               ((symbol-function 'claude-code--session-liveness)
-                (lambda (s) (if (equal (claude-code-session-id s) promoted)
-                                'alive
-                              (funcall real s)))))
-      (claude-code-tests--in-fixture-view '(1002)
-        (setq claude-code--collapsed nil)
-        (claude-code-sessions-refresh)
-        ;; Groups now read Alive, External, Dead, so Alive has rows below it.
-        (claude-code--goto-group "alive")
-        (let ((header (point)))
-          (should (equal (line-number-at-pos) 1))
-          (forward-line 1)
-          (should (equal (tabulated-list-get-id) promoted))
-          (claude-code-sessions-toggle-group)
-          (should (member "alive" claude-code--collapsed))
-          (should (equal (point) header))
-          (should (equal (claude-code--group-at-point) "alive")))))))
-
-(ert-deftest claude-code-test-view-refresh-keeps-point ()
-  "A refresh keeps point on its row, and follows that row when it changes group."
+(ert-deftest claude-code-test-view-refresh-keeps-the-row-at-point ()
+  "`g' leaves point on its row, which is what `claude-code--redraw' asks for."
   (claude-code-tests--in-fixture-view '(1002)
     (setq claude-code--collapsed nil)
     (claude-code-sessions-refresh)
     (claude-code--goto-group "dead")
     (forward-line 1)
-    (let ((id (tabulated-list-get-id))
-          (line (line-number-at-pos)))
+    (let ((id (tabulated-list-get-id)))
       (should id)
       (claude-code-sessions-refresh)
-      (should (equal (tabulated-list-get-id) id))
-      (should (equal (line-number-at-pos) line))
-      ;; The row moving to another group takes point with it: id wins over line.
-      (cl-letf (((symbol-function 'claude-code--session-liveness)
-                 (let ((real (symbol-function 'claude-code--session-liveness)))
-                   (lambda (s) (if (equal (claude-code-session-id s) id)
-                                   'external
-                                 (funcall real s))))))
-        (claude-code-sessions-refresh)
-        (should (equal (tabulated-list-get-id) id))
-        (should (equal (claude-code--group-at-point) "external"))
-        (should-not (equal (line-number-at-pos) line))))))
-
-(ert-deftest claude-code-test-view-refresh-keeps-other-windows ()
-  "A redraw restores every window showing the view, not just the selected one.
-The reprint's `erase-buffer' collapses each `window-point' to the top, so a
-second window would otherwise lose its row whenever the first one refreshes."
-  (claude-code-tests--in-fixture-view '(1002)
-    (setq claude-code--collapsed nil)
-    (claude-code-sessions-refresh)
-    (save-window-excursion
-      (delete-other-windows)
-      (set-window-buffer (selected-window) (current-buffer))
-      (let ((other (split-window-below)))
-        (set-window-buffer other (current-buffer))
-        (claude-code--goto-group "dead")
-        (forward-line 2)
-        (set-window-point other (point))
-        ;; The selected window looks elsewhere, so only the other window's own
-        ;; bookkeeping can put its point back.
-        (goto-char (point-min))
-        (let ((place (claude-code--place (window-point other))))
-          (should (car place))
-          (claude-code-sessions-refresh)
-          (should (equal (claude-code--place (window-point other)) place)))))))
-
-(ert-deftest claude-code-test-view-delete-keeps-point ()
-  "Deleting a row leaves point on the row that took its place, so `d d' walks down."
-  (let ((deleted '()))
-    (cl-letf* ((real (symbol-function 'claude-code-project-sessions))
-               ((symbol-function 'claude-code-delete)
-                (lambda (s) (push (claude-code-session-id s) deleted)))
-               ((symbol-function 'claude-code-project-sessions)
-                (lambda (&rest args)
-                  (seq-remove (lambda (s)
-                                (member (claude-code-session-id s) deleted))
-                              (apply real args))))
-               ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-      (claude-code-tests--in-fixture-view '(1002)
-        (setq claude-code--collapsed nil)
-        (claude-code-sessions-refresh)
-        (claude-code--goto-group "external")
-        (forward-line 1)
-        (let ((survivor (tabulated-list-get-id)))
-          (claude-code--goto-group "dead")
-          (forward-line 1)
-          (let ((line (line-number-at-pos))
-                (doomed (tabulated-list-get-id))
-                (successor (save-excursion (forward-line 1)
-                                           (tabulated-list-get-id))))
-            (should (and survivor doomed successor))
-            (claude-code-sessions-delete)
-            (should (equal deleted (list doomed)))
-            (should (equal (line-number-at-pos) line))
-            (should (equal (tabulated-list-get-id) successor))
-            ;; Emptying the group takes its header with it; point clamps to the
-            ;; last row rather than being stranded past the end of the buffer.
-            (claude-code-sessions-delete)
-            (claude-code-sessions-delete)
-            (should (= (length deleted) 3))
-            (should (equal (tabulated-list-get-id) survivor))))))))
+      (should (equal (tabulated-list-get-id) id)))))
 
 (ert-deftest claude-code-test-view-pins-default-directory ()
   "Opening the view pins `default-directory' to the project root, and it sticks."
@@ -2197,7 +2106,7 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
                              #'revert-buffer
                              (lambda () (tabulated-list-widen-current-column 1))))
         ;; Park on a marked row: the width commands read the entry at point.
-        (claude-code--goto-session (car marked))
+        (claude-code-tests--goto-session (car marked))
         (funcall reprint)
         (should (equal marked (claude-code-tests--tagged-ids)))))))
 

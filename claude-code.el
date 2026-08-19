@@ -1006,12 +1006,6 @@ Return nil and leave point alone when no line matches."
        (claude-code--goto-line-where
         (lambda () (equal key (get-text-property (point) 'claude-code-group))))))
 
-(defun claude-code--goto-session (id)
-  "Move point to the row of session ID, when it is displayed."
-  (and id
-       (claude-code--goto-line-where
-        (lambda () (equal id (tabulated-list-get-id))))))
-
 (defun claude-code--print-entry (id cols)
   "Print the row for ID with COLS, tagging it when ID is in `claude-code--marks'.
 The view's `tabulated-list-printer': tagging here rather than after the fact
@@ -1053,67 +1047,19 @@ BUFFER -- a minibuffer, or one dedicated to its buffer, a side window among them
   (unless (derived-mode-p 'claude-code-sessions-mode)
     (user-error "Not in a Claude sessions buffer")))
 
-(defun claude-code--place (&optional pos)
-  "Return where POS, or point, sits as (ID LINE COLUMN).
-ID is the session id of the line, nil on a group header."
-  (save-excursion
-    (when pos (goto-char pos))
-    (list (tabulated-list-get-id) (line-number-at-pos) (current-column))))
-
-(defun claude-code--goto-place (place &optional group)
-  "Move point back to PLACE, a `claude-code--place' taken before a reprint.
-GROUP, when given, is the group the caller acted on and outranks PLACE."
-  (pcase-let ((`(,id ,line ,column) place))
-    (unless (or (claude-code--goto-group group)
-                (claude-code--goto-session id))
-      (goto-char (point-min))
-      (forward-line (1- line))
-      ;; The buffer ends in a newline, so an overshoot lands on an empty line.
-      (when (and (eobp) (not (bobp))) (forward-line -1))
-      (move-to-column column))))
-
 (defun claude-code--redraw (&optional group)
-  "Reprint the view, keeping the cursor where the reader left it.
-Every command that mutates sessions redraws through here, so this is the one
-place responsible for not losing point.  It lands on, in order: GROUP's header
-when given, so a fold stays on the group it acted on; the session id that was
-at point, so a killed session keeps the cursor as it moves to another group;
-failing both, the same line and column, which lands on whatever took a removed
-row's place — a run of deletions therefore walks down the list.
-
-Identity first with a line-number fallback is what `dired-revert' does: a line
-number survives the rows above point changing, a buffer position does not.
-Like `dired-restore-positions' this covers every window showing the view, not
-just the selected one, since the reprint's `erase-buffer' collapses all their
-`window-point's to the top.  Only the acting window gets GROUP; the others had
-no part in the fold.  Their scroll is restored too, so a row keeps its height
-on screen instead of the window jumping to the top."
-  (let ((place (claude-code--place))
-        (windows (mapcar (lambda (window)
-                           (list window
-                                 (claude-code--place (window-point window))
-                                 (- (line-number-at-pos (window-point window))
-                                    (line-number-at-pos (window-start window)))))
-                         (get-buffer-window-list nil 0 t))))
-    (tabulated-list-print t)
-    (claude-code--goto-place place group)
-    (pcase-dolist (`(,window ,window-place ,window-line) windows)
-      (when (eq (window-buffer window) (current-buffer))
-        (unless (eq window (selected-window))
-          ;; The selected window's point IS buffer point, already restored.
-          (save-excursion
-            (claude-code--goto-place window-place)
-            (set-window-point window (point))))
-        (set-window-start window
-                          (save-excursion
-                            (goto-char (window-point window))
-                            (forward-line (- window-line))
-                            (line-beginning-position))
-                          ;; Ignored if it would push point off screen.
-                          t)))))
+  "Reprint the view, leaving point on the header of GROUP when given.
+Every command that mutates sessions redraws through here, which is what makes
+it the place to say where the cursor lands.  `tabulated-list-print' puts point
+back on the row it was on, by session id, and at the top of the buffer when
+that row is no longer printed.  A caller that acted on a group says so, and
+that outranks the row: `claude-code-sessions-toggle-group' names the group it
+folded, which is what makes `TAB TAB' fold and unfold in place."
+  (tabulated-list-print t)
+  (claude-code--goto-group group))
 
 (defun claude-code-sessions-refresh ()
-  "Recompute and redraw the sessions view, keeping the cursor where it was."
+  "Recompute and redraw the sessions view."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (claude-code--redraw))
