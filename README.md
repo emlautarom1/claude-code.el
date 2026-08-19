@@ -60,6 +60,8 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `g`       | refresh                                                     |
 | `?`       | describe the mode, listing every keybinding                 |
 
+An instance appears in the selected window. A window that cannot host it — a side window, or any window dedicated to its buffer — keeps what it has and the instance opens in another window; an instance already on screen is shown there rather than a second time. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this.
+
 ## Programmatic API
 
 ```elisp
@@ -82,7 +84,6 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 (claude-code-rename session "name")  ; alive sessions only
 (claude-code-send-text session "hello" t)
 (claude-code-interrupt session)
-(claude-code-focus session)
 ```
 
 ## Emacs as an MCP server

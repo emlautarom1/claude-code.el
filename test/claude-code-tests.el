@@ -1142,6 +1142,24 @@ change cannot show the instance twice."
           (should-not (claude-code-tests--thunk-at log 0))
           (should (equal shown (list buf))))))))
 
+(ert-deftest claude-code-test-notify-does-not-claim-the-selected-window ()
+  "A notification jump displays with `pop-to-buffer', not `claude-code--show'.
+Every other notify test stubs `pop-to-buffer' -- which `claude-code--show' calls
+-- so none of them would notice this opt-out being dropped."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((calls '())
+          (log '()))
+      (cl-letf (((symbol-function 'pop-to-buffer)
+                 (lambda (b &rest _) (push (list 'pop b) calls)))
+                ((symbol-function 'claude-code--show)
+                 (lambda (b &rest _) (push (list 'show b) calls)))
+                ((symbol-function 'claude-code--managed-buffer)
+                 (lambda (_id) buf)))
+        (claude-code-tests--capturing-timers log
+          (claude-code--notify-show "id-1")
+          (funcall (claude-code-tests--thunk-at log 0))))
+      (should (equal calls (list (list 'pop buf)))))))
+
 (ert-deftest claude-code-test-notify-follow-leaves-a-dismissal-alone ()
   "Waving a notification away never rearranges windows.
 A dismissal and a click both close as `dismissed'; only the click raises
@@ -1456,7 +1474,7 @@ never hands one to an operation that would only refuse it."
       (should (equal (funcall ids 'dead) '("d"))))))
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
-  "RET displays alive rows in the selected window, resuming otherwise.
+  "RET displays alive rows through `claude-code--show', resuming otherwise.
 A dead row prompts first; an external row reaches `claude-code-resume'
 without a prompt, so the model's guard is the only refusal
 \(`claude-code-test-resume-refuses-external')."
@@ -1470,8 +1488,8 @@ without a prompt, so the model's guard is the only refusal
                (lambda (_s) 'terminal))
               ((symbol-function 'claude-code-resume)
                (lambda (root id) (push (list 'resume root id) calls) 'terminal))
-              ((symbol-function 'switch-to-buffer)
-               (lambda (b &rest _) (push (list 'switch b) calls)))
+              ((symbol-function 'claude-code--show)
+               (lambda (b &rest _) (push (list 'show b) calls)))
               ((symbol-function 'claude-code--refresh-views)
                (lambda () (push '(refresh) calls)))
               ((symbol-function 'claude-code-sessions-toggle-group)
@@ -1483,21 +1501,21 @@ without a prompt, so the model's guard is the only refusal
         ;; A group header (no session at point) toggles.
         (claude-code-sessions-visit)
         (should (equal calls '((toggle))))
-        ;; An alive row lands in the selected window, without a prompt.
+        ;; An alive row is displayed without a prompt.
         (setq at-point alive calls nil)
         (claude-code-sessions-visit)
-        (should (equal calls '((switch terminal))))
+        (should (equal calls '((show terminal))))
         ;; An external row goes to the model unprompted, and the returned
-        ;; buffer lands in the selected window after the redraw.
+        ;; buffer is displayed after the redraw.
         (setq at-point external calls nil)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((resume "/r" "e") (refresh) (switch terminal))))
+                       '((resume "/r" "e") (refresh) (show terminal))))
         ;; A dead row asks first: yes resumes, refreshes and displays...
         (setq at-point dead calls nil answer t)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((ask) (resume "/r" "d") (refresh) (switch terminal))))
+                       '((ask) (resume "/r" "d") (refresh) (show terminal))))
         ;; ...no stops at the prompt.
         (setq calls nil answer nil)
         (claude-code-sessions-visit)
@@ -1900,7 +1918,7 @@ other buffer asks `project.el', which prompts when the buffer has no project."
     (cl-letf (((symbol-function 'claude-code-spawn)
                (lambda (root &rest kw) (setq spawn-args (cons root kw))))
               ((symbol-function 'claude-code--refresh-views) #'ignore)
-              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'claude-code--show) #'ignore)
               ((symbol-function 'read-string) (lambda (&rest _) ""))
               ;; Stubbed at the real arity, which the transient built into
               ;; Emacs 30 caps at zero.
@@ -1938,7 +1956,7 @@ is stubbed here."
                      (setq spawn-args (cons root kw))
                      (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code--refresh-views) #'ignore)
-                  ((symbol-function 'pop-to-buffer) #'ignore)
+                  ((symbol-function 'claude-code--show) #'ignore)
                   ((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
                   ((symbol-function 'project-root) (lambda (_p) "/home/test/proj")))
           (with-temp-buffer
@@ -1987,10 +2005,9 @@ the acting view's root would leave a view of the same session stale."
                   ((symbol-function 'claude-code-resume) (lambda (&rest _) instance))
                   ((symbol-function 'claude-code-kill) #'ignore)
                   ((symbol-function 'claude-code-delete) #'ignore)
-                  ;; The spawn displays with `pop-to-buffer', the resume with
-                  ;; the `switch-to-buffer' RET hands down.
-                  ((symbol-function 'pop-to-buffer) #'ignore)
-                  ((symbol-function 'switch-to-buffer) #'ignore)
+                  ;; Both the spawn and the resume RET drives display through
+                  ;; the one policy.
+                  ((symbol-function 'claude-code--show) #'ignore)
                   ((symbol-function 'read-string) (lambda (&rest _) ""))
                   ((symbol-function 'y-or-n-p) (lambda (_) t))
                   ((symbol-function 'yes-or-no-p) (lambda (_) t)))
@@ -2028,9 +2045,9 @@ the acting view's root would leave a view of the same session stale."
             (list acting sibling other projectless instance)))))
 
 (ert-deftest claude-code-test-spawn-displays-the-instance ()
-  "A spawn displays its instance, through `display-buffer' rather than in place.
-The menu runs from any buffer, so the instance must not take over the window
-that spawned it; focusing a row from the view stays same-window."
+  "A spawn displays its instance through `claude-code--show', from any buffer.
+Where an instance lands is one decision, made in one place; `RET' reaching the
+same policy is `claude-code-test-sessions-visit-dispatch'."
   (let ((shown '())
         (instance (generate-new-buffer " *cc-instance*")))
     (unwind-protect
@@ -2038,18 +2055,81 @@ that spawned it; focusing a row from the view stays same-window."
                    (lambda (&rest _) (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code--refresh-views) #'ignore)
                   ((symbol-function 'read-string) (lambda (&rest _) ""))
-                  ((symbol-function 'pop-to-buffer)
-                   (lambda (b &rest _) (push (list 'pop b) shown)))
-                  ((symbol-function 'switch-to-buffer)
-                   (lambda (b &rest _) (push (list 'switch b) shown))))
+                  ((symbol-function 'claude-code--show)
+                   (lambda (b &rest _) (push b shown))))
           (with-temp-buffer (claude-code--spawn-session "/r"))
-          (claude-code-tests--with-managed-buffer session-buffer
-            (claude-code-focus (claude-code-session--create
-                                :id "id" :alive-p t :buffer session-buffer))
-            (should (equal (reverse shown)
-                           (list (list 'pop instance)
-                                 (list 'switch session-buffer))))))
+          (should (equal shown (list instance))))
       (kill-buffer instance))))
+
+(ert-deftest claude-code-test-show-prefers-the-selected-window ()
+  "`claude-code--show' takes the selected window only when it can host the buffer.
+Run against real windows: an ordinary selected window is reused; a dedicated one
+-- a side window among them -- keeps its buffer and the instance goes elsewhere;
+and a window already showing the instance wins over the selected one, since a
+second window would shrink the terminal to whichever of the two is smaller."
+  (let ((instance (generate-new-buffer " *cc-instance*"))
+        (occupant (generate-new-buffer " *cc-occupant*"))
+        (sidebar (generate-new-buffer " *cc-sidebar*")))
+    (unwind-protect
+        ;; Nothing of the user's may decide the outcome: the three variables
+        ;; `display-buffer' consults before this function's own action, the
+        ;; split thresholds, and the window parameters that would otherwise make
+        ;; `delete-other-windows' refuse (from a side window) or leave a
+        ;; `no-delete-other-windows' sibling standing.  `save-window-excursion'
+        ;; restores the layout, so the suite is safe to run from `M-x ert' in a
+        ;; live frame and not only in batch.
+        (let ((display-buffer-overriding-action nil)
+              (display-buffer-alist nil)
+              (display-buffer-base-action nil)
+              (split-height-threshold 4)
+              (split-width-threshold nil)
+              (ignore-window-parameters t))
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) occupant)
+            (claude-code--show instance)
+            (should (eq (window-buffer (selected-window)) instance))
+            (should (= (length (window-list)) 1))
+
+            ;; The instance is on screen nowhere here, so reuse cannot be what
+            ;; spares the side window.
+            (delete-other-windows)
+            (set-window-buffer (selected-window) occupant)
+            (let ((side (display-buffer
+                         sidebar '(display-buffer-in-side-window (side . bottom)))))
+              (select-window side)
+              (claude-code--show instance)
+              (should (eq (window-buffer side) sidebar))
+              (should (eq (window-dedicated-p side) 'side))
+              ;; Which window `display-buffer' then finds is its business; that
+              ;; the instance is on screen and selected, and not here, is not.
+              (should-not (eq (selected-window) side))
+              (should (eq (window-buffer (selected-window)) instance)))
+
+            (delete-other-windows)
+            (set-window-buffer (selected-window) occupant)
+            (let ((elsewhere (split-window)))
+              (set-window-buffer elsewhere instance)
+              (claude-code--show instance)
+              (should (eq (selected-window) elsewhere))
+              (should (= (length (get-buffer-window-list instance nil t)) 1)))
+
+            ;; Expressing the preference as a `display-buffer' action is what
+            ;; leaves the user the last word, which a `switch-to-buffer' would
+            ;; quietly take away.
+            (delete-other-windows)
+            (set-window-buffer (selected-window) occupant)
+            (let* ((kept (selected-window))
+                   (display-buffer-alist
+                    `((,(regexp-quote (buffer-name instance))
+                       display-buffer-in-side-window (side . bottom)))))
+              (claude-code--show instance)
+              (should (eq (window-buffer kept) occupant))
+              (should (eq (window-parameter (get-buffer-window instance) 'window-side)
+                          'bottom)))))
+      (kill-buffer instance)
+      (kill-buffer occupant)
+      (kill-buffer sidebar))))
 
 (ert-deftest claude-code-test-command-surface ()
   "The spawn menu's suffix is never offered by `M-x'; the entry points always are.

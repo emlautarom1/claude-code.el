@@ -7,7 +7,7 @@ Storage adapter   ~/.claude parsing + cwd encoding   (Claude internals live here
         │  returns plain data
 Model             claude-code-session structs, the sessions query, process usage
         │  structs only
-Operations        spawn / resume / kill / delete / rename / send / interrupt / focus
+Operations        spawn / resume / kill / delete / rename / send / interrupt
         │
 Notifications     an instance asking for attention -> claude-code-notify-function
         │
@@ -16,7 +16,7 @@ View              claude-code-sessions-mode + spawn menu + claude-code-sessions
 
 ## Model / view separation
 
-Every fundamental capability is a plain function usable from Elisp without the UI: `claude-code-spawn`, `claude-code-resume`, `claude-code-kill`, `claude-code-delete`, `claude-code-rename`, `claude-code-send-text`, `claude-code-interrupt`, `claude-code-focus`, and the query `claude-code-project-sessions`. The view is a thin presentation and command layer over these.
+Every fundamental capability is a plain function usable from Elisp without the UI: `claude-code-spawn`, `claude-code-resume`, `claude-code-kill`, `claude-code-delete`, `claude-code-rename`, `claude-code-send-text`, `claude-code-interrupt`, and the query `claude-code-project-sessions`. The view is a thin presentation and command layer over these.
 
 ## Storage-adapter boundary
 
@@ -30,7 +30,7 @@ All knowledge of Claude's on-disk formats is quarantined in the *Storage adapter
 - **External** = a transcript for the project that is *not* an Emacs-managed instance but whose `sessions/*.json` PID is still alive — i.e. a `claude` running the session in some other terminal. It is flagged `external-p`, and it gets its own group in the view. It is deliberately **not** called "dead": a process is handling it. Resume and delete both refuse it **in the model**, so a headless caller cannot attach a second process to it either, and both check by **id** through `claude-code--external-p`, not only the flag on a struct.
 - **Dead** = every remaining transcript — no process, inside or outside Emacs, is running it. Only dead sessions can be resumed or deleted.
 
-This realises the decision that **aliveness is Emacs-managed only**: a session is alive exactly when Emacs holds its terminal, which also guarantees focus and send-text always work on alive rows.
+This realises the decision that **aliveness is Emacs-managed only**: a session is alive exactly when Emacs holds its terminal, which also guarantees send-text and interrupt always work on alive rows.
 
 The **id is the only durable name for a session**, which is what those states are decided by, and it has two consequences:
 
@@ -63,7 +63,9 @@ Every `claude-code-sessions-*` command reads the view's buffer-local state, so e
 
 Two commands are global, each resolving its project through `claude-code--project-root`: `claude-code-sessions` and `claude-code-spawn-menu`. `claude-code-sessions` then picks its buffer by the project a view names, never by the buffer name — two projects can share a basename, and a name is free to belong to some unrelated buffer — so it reuses that project's view if there is one (honouring a rename) and otherwise makes a new buffer, where a clashing name takes Emacs's `<2>` suffix. The menu resolves the root **before** `transient-setup` and hands it down as the prefix's `:scope`, so a buffer with no project prompts before the menu appears, and `claude-code--spawn-session` reads the root from the scope instead of the buffer it runs in — that is what frees the menu from the view, which it neither opens nor needs selected. The suffix carries transient's `transient--suffix-only` completion predicate, so `M-x` never offers it.
 
-A spawn displays the new instance with `pop-to-buffer`, so `display-buffer-alist` and window dedication choose the window — the menu runs from any buffer, including a dedicated side window, and must not take it over. `claude-code-focus` and `RET` use `switch-to-buffer`: showing the instance *in the selected window* is what they are for, with `o` as the other-window variant.
+A spawn and `RET` both display the instance through one function, `claude-code--show`, so where an instance lands is decided in one place. It prefers the selected window, which an ordinary window yields to — spawning with `n` from the view puts the instance where the view was — with two things outranking the preference. A window **on the current frame** already showing the instance wins, because Ghostel sizes the pty to the *smallest* window showing a buffer and an instance displayed twice renders short in the larger one; a copy on another frame is invisible to that check, since reuse across frames would mean raising one, which is a heavier act than displaying a buffer. And a selected window that cannot host it — a minibuffer, or one dedicated to its buffer, a side window among them — keeps what it has while the instance goes elsewhere; the menu runs from any buffer, so it must not evict a sidebar. Since the preference is expressed as a `display-buffer` action rather than `switch-to-buffer`, `display-buffer-alist` outranks all of it: placing instances somewhere specific stays a matter of configuring that.
+
+Two paths opt out. The notification jump does so at no cost (below). `o` (`claude-code-sessions-visit-other-window`) asks for a window other than the selected one and pays for it: on an instance that is *already* the selected window it opens a second one, and the pty shrinks to the smaller — the price of a command whose whole purpose is the other window.
 
 ## Attention notifications
 
@@ -83,7 +85,7 @@ The default handler, `claude-code-notify-desktop`, posts a desktop notification 
 - **The first close of a burst wins.** Clicking one notification dismisses every other one the desktop grouped with it, all as `dismissed` and within a millisecond, so the signals alone cannot say which was clicked; what distinguishes it is order. The first close claims the activation window and every close behind it is ignored until the window expires, which also keeps one click to one jump. Two *independent* closes inside one window are indistinguishable from a burst, so waving one notification away and clicking another within the second opens the first.
 - **An already-focused Emacs jumps at once.** `after-focus-change-function` fires on a transition, so with focus already held no raise is coming and waiting for one would drop the click. Nothing distinguishes a click from a wave-away in that state, and a stray window change is the cheaper error.
 - **A fullscreen window hides every banner but a critical one.** `MessageTray._updateState` draws nothing while the primary monitor is fullscreen (or the session is busy) unless the notification is `forFeedback` — internal to the shell, unreachable over D-Bus — or `Urgency.CRITICAL`. The freedesktop `urgency` hint maps straight onto that and defaults to `NORMAL` when absent, so an unset urgency means the notification is filed in the message list and never drawn. `claude-code-notify-urgency` sends `critical`, which costs the auto-dismissal: the shell arms no timeout for a critical banner, so it stays until it is acted on.
-- **The target is resolved on arrival**, not when the notification was posted, so an instance killed and resumed meanwhile still opens — in its new buffer. The display runs from a timer so it does not rearrange windows inside the D-Bus handler or the focus hook, and `pop-to-buffer` keeps placement under `display-buffer-alist`.
+- **The target is resolved on arrival**, not when the notification was posted, so an instance killed and resumed meanwhile still opens — in its new buffer. The display runs from a timer so it does not rearrange windows inside the D-Bus handler or the focus hook, and it is the one path that does **not** go through `claude-code--show`: a plain `pop-to-buffer` is right here, because nothing about a notification arriving in the background says the window the user is typing in should give way to it.
 
 `claude-code-notify-desktop-entry` names the desktop entry Emacs runs as, which is how the desktop knows *which* application to raise; a name matching no installed desktop file still notifies, but the click cannot reach Emacs.
 

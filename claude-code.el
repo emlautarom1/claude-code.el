@@ -667,10 +667,6 @@ transcript and the next refresh reads it back through
   (with-current-buffer (claude-code--buffer session)
     (ghostel-send-C-c)))
 
-(defun claude-code-focus (session)
-  "Display SESSION's instance buffer in the selected window."
-  (switch-to-buffer (claude-code--buffer session)))
-
 
 ;;;; Notifications
 ;;
@@ -761,8 +757,9 @@ keep the user's global handler."
   "Display managed instance ID, resolved now rather than when it announced.
 An instance killed and resumed meanwhile is hosted in a new buffer, and that
 is the one to open.  The display runs from a timer so that it does not
-rearrange windows inside the D-Bus handler or focus hook that asked for it,
-and `pop-to-buffer' keeps placement under `display-buffer-alist'."
+rearrange windows inside the D-Bus handler or focus hook that asked for it, and
+deliberately not through `claude-code--show': a notification is no reason for
+the window the user is typing in to give way."
   (run-at-time 0 nil
                (lambda ()
                  (when-let* ((buffer (claude-code--managed-buffer id)))
@@ -1042,6 +1039,15 @@ its model operation accepts."
 
 ;;;;; Commands
 
+(defun claude-code--show (buffer)
+  "Display BUFFER, preferring the selected window.
+A window on this frame already showing BUFFER outranks the selected one, since
+Ghostel sizes the pty to the smallest window showing a buffer and an instance
+displayed twice renders short in the larger.  A selected window that cannot host
+BUFFER -- a minibuffer, or one dedicated to its buffer, a side window among them
+-- keeps what it has."
+  (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-same-window))))
+
 (defun claude-code--ensure-sessions-mode ()
   "Signal a `user-error' unless the current buffer is a sessions view."
   (unless (derived-mode-p 'claude-code-sessions-mode)
@@ -1166,16 +1172,16 @@ A dead session is resumed after confirmation."
         (funcall display buffer))))))
 
 (defun claude-code-sessions-visit ()
-  "Visit the session at point in the selected window, or toggle a group.
+  "Visit the session at point, preferring the selected window, or toggle a group.
 A dead session is resumed first, after confirmation."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (if-let* ((session (claude-code--session-at-point)))
-      (claude-code--visit-session session #'switch-to-buffer)
+      (claude-code--visit-session session #'claude-code--show)
     (claude-code-sessions-toggle-group)))
 
 (defun claude-code-sessions-visit-other-window ()
-  "Visit the session at point in another window.
+  "Visit the session at point in a window other than the selected one.
 A dead session is resumed first, after confirmation."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
@@ -1343,7 +1349,7 @@ ARGS comes from a live `claude-code-spawn-menu'; the
                     :model (transient-arg-value "--model=" args)
                     :effort (transient-arg-value "--effort=" args))))
     (claude-code--refresh-views)
-    (pop-to-buffer (cdr instance))))
+    (claude-code--show (cdr instance))))
 
 ;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.
 (put 'claude-code--spawn-session 'completion-predicate #'transient--suffix-only)

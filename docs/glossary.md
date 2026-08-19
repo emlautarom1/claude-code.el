@@ -9,7 +9,7 @@ match Claude Code's own vocabulary wherever one exists.
 
 - **Instance** (a.k.a. *claude instance*) — a running `claude` process working on a session. In this package every instance is hosted in a [Ghostel](https://github.com/dakra/ghostel) terminal buffer.
 
-- **Instance buffer** — the Ghostel terminal buffer that hosts a running instance, named `*claude: <title>*` (Ghostel tracks the terminal title Claude sets; the status-indicator glyph Claude prefixes to that title is stripped, and before the first title the buffer is seeded as `*claude: <project>*`). This is the buffer you switch to (via *focus*) to talk to a live session directly, as you would in any terminal.
+- **Instance buffer** — the Ghostel terminal buffer that hosts a running instance, named `*claude: <title>*` (Ghostel tracks the terminal title Claude sets; the status-indicator glyph Claude prefixes to that title is stripped, and before the first title the buffer is seeded as `*claude: <project>*`). This is the buffer you switch to (`RET` on the row, or `o` for another window) to talk to a live session directly, as you would in any terminal.
 
 - **Managed instance** — an instance this package launched and tracks (it has an instance buffer in Emacs). Only managed instances make a session *alive* in the view.
 
