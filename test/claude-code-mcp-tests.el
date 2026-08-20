@@ -246,8 +246,10 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
     (should (equal (alist-get 'type (alist-get 'worktree properties)) "boolean"))
     (should (equal (alist-get 'type (alist-get 'worktree_name properties))
                    "string"))
+    (should (equal (alist-get 'type (alist-get 'name properties)) "string"))
     (should-not (assq 'enum (alist-get 'model properties)))
-    (should-not (assq 'enum (alist-get 'effort properties)))))
+    (should-not (assq 'enum (alist-get 'effort properties)))
+    (should-not (assq 'enum (alist-get 'name properties)))))
 
 (ert-deftest claude-code-mcp-test-tool-schema-shapes ()
   "A no-arg tool advertises `properties':{}, and an optional arg is omittable."
@@ -596,9 +598,10 @@ and the id is what the caller has to find the session by afterwards."
                  (claude-code-mcp-tests--call-tool
                   "sess" "spawn" '(prompt . "do the thing") '(model . "opus")
                   '(effort . "xhigh") '(worktree . t)
-                  '(worktree_name . "feat")))))
+                  '(worktree_name . "feat") '(name . "a long name")))))
         (should (equal (nth 1 (car execs))
-                       (list "--session-id" id "--worktree=feat"
+                       (list "--session-id" id "--name=a long name"
+                             "--worktree=feat"
                              "--model" "opus" "--effort" "xhigh"
                              "--mcp-config" "{}" "--" "do the thing"))))
       ;; The flag alone asks for an auto-named worktree.
@@ -629,7 +632,7 @@ and the id is what the caller has to find the session by afterwards."
       ;; would reach the CLI and kill the instance at startup.
       (claude-code-mcp-tests--call-tool
        "sess" "spawn" '(prompt . "") '(model . "") '(effort . "")
-       '(worktree . t) '(worktree_name . ""))
+       '(worktree . t) '(worktree_name . "") '(name . ""))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree" "--mcp-config" "{}")))
       ;; Neither the model nor the effort is held to a set of values: an unknown

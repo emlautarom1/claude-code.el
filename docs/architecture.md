@@ -37,7 +37,7 @@ The **id is the only durable name for a session**, which is what those states ar
 - Liveness never depends on the root a query names, because one session can belong to two roots (see [storage model](storage-model.md#worktrees)). The registry's launch root answers *membership* alone, and only until Claude writes a transcript.
 - A struct is only as fresh as the query that built it, so a resume or a relaunch between the query and the act must not let a stale row damage a live instance: `claude-code-delete` re-checks by id, and `claude-code-kill` acts on the buffer the struct names rather than on its id.
 
-The struct holds the transcript's raw name sources (the `title` and the last prompt), and the *displayed* name is computed in exactly one place — `claude-code--session-display-name` — and is never cached, so it always reflects the transcript (including a `/rename`, which lands as a `custom-title`) and cannot drift.
+The struct holds the transcript's raw name sources (the `title` and the last prompt), and the *displayed* name is computed in exactly one place — `claude-code--session-display-name` — and is never cached, so it always reflects the transcript (including a `/rename`, and a name given at spawn — both land as a `custom-title`) and cannot drift.
 
 ### Registry lifecycle
 

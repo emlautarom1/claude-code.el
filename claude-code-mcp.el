@@ -227,15 +227,17 @@ with (window-buffer (selected-window))."
                    :description "A single Emacs Lisp form"))
  :handler #'claude-code--mcp-tool-eval)
 
-(defun claude-code--mcp-tool-spawn (prompt model effort worktree worktree-name)
+(defun claude-code--mcp-tool-spawn (prompt name model effort worktree
+                                           worktree-name)
   "Handle the `spawn' tool; return the new session's id.
-PROMPT, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
+PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
 WORKTREE-NAME standing in for WORKTREE.  The root is not among them: an
 instance runs where the session that asked for it runs."
   (unless claude-code--mcp-session-cwd
     (error "No working directory known for the calling session"))
   (car (claude-code-spawn claude-code--mcp-session-cwd
-                          :prompt prompt :model model :effort effort
+                          :prompt prompt :name name
+                          :model model :effort effort
                           :worktree (or worktree-name worktree))))
 
 (claude-code-mcp-make-tool
@@ -250,6 +252,9 @@ that it survived startup."
  :args (list (list :name "prompt" :type 'string :optional t
                    :description
                    "Initial prompt; without one the instance starts idle.")
+             (list :name "name" :type 'string :optional t
+                   :description
+                   "Display name for the session, shown in the sessions view.")
              (list :name "model" :type 'string :optional t
                    :description
                    "Model alias (opus, sonnet, haiku, fable) or full name.")

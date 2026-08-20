@@ -10,8 +10,8 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
-- **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
-- **`transient` spawn menu** (`M-x claude-code-spawn-menu` from any buffer, `n` in the view) for the spawn flags: worktree, model, effort.
+- **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a display name, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
+- **`transient` spawn menu** (`M-x claude-code-spawn-menu` from any buffer, `n` in the view) for the spawn flags: name, worktree, model, effort.
 - **Attention notifications** — an instance left waiting raises a desktop notification named after the session; clicking it brings Emacs forward, switching workspace if needed, and pops that instance into view. Claude raises these on an idle timer — about a minute after a turn ends, [tunable in `~/.claude.json`](docs/architecture.md#attention-notifications). Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
@@ -44,21 +44,21 @@ For `use-package` users:
 
 Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to spawn an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. Keys in the sessions view:
 
-| Key       | Action                                                      |
-| --------- | ----------------------------------------------------------- |
-| `RET`     | focus an alive session / resume a dead one / toggle a group |
-| `o`       | like `RET`, but visit the session in another window         |
-| `TAB`     | collapse or expand the group at point                       |
-| `n`       | open the spawn menu (worktree/model/effort; `n` spawns)     |
-| `k`       | kill the marked instances, or the one at point              |
-| `d`       | delete the marked dead sessions, or the one at point        |
-| `r`       | rename the session at point                                 |
-| `i`       | interrupt (SIGINT) the session at point                     |
-| `s`       | send a line of text to the session at point                 |
-| `m` / `u` | mark / unmark the session at point                          |
-| `G`       | cycle grouping (status ↔ liveness)                          |
-| `g`       | refresh                                                     |
-| `?`       | describe the mode, listing every keybinding                 |
+| Key       | Action                                                       |
+| --------- | ------------------------------------------------------------ |
+| `RET`     | focus an alive session / resume a dead one / toggle a group  |
+| `o`       | like `RET`, but visit the session in another window          |
+| `TAB`     | collapse or expand the group at point                        |
+| `n`       | open the spawn menu (name/worktree/model/effort; `n` spawns) |
+| `k`       | kill the marked instances, or the one at point               |
+| `d`       | delete the marked dead sessions, or the one at point         |
+| `r`       | rename the session at point                                  |
+| `i`       | interrupt (SIGINT) the session at point                      |
+| `s`       | send a line of text to the session at point                  |
+| `m` / `u` | mark / unmark the session at point                           |
+| `G`       | cycle grouping (status ↔ liveness)                           |
+| `g`       | refresh                                                      |
+| `?`       | describe the mode, listing every keybinding                  |
 
 An instance appears in the selected window. A window that cannot host it — a side window, or any window dedicated to its buffer — keeps what it has and the instance opens in another window; an instance already on screen is shown there rather than a second time. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this.
 
@@ -69,6 +69,9 @@ An instance appears in the selected window. A window that cannot host it — a s
 (claude-code-spawn (project-root (project-current t))
                    :prompt "Explain this repository" :model "opus")
 ;; => (SESSION-ID . BUFFER)
+
+;; Spawn under a display name, which is what the sessions view shows.
+(claude-code-spawn root :name "release audit")
 
 ;; Spawn in a git worktree.
 (claude-code-spawn root :worktree t)          ; auto-named

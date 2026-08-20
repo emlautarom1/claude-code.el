@@ -613,6 +613,12 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
                   :session-id "ID" :model "opus" :effort "low" :prompt "hi")
                  '("--session-id" "ID" "--model" "opus" "--effort" "low"
                    "--" "hi")))
+  (should (equal (claude-code--build-args :session-id "ID" :name "a long name")
+                 '("--session-id" "ID" "--name=a long name")))
+  ;; A name is passed on as it came, an empty one included: it is the CLI that
+  ;; reads that as no name.
+  (should (equal (claude-code--build-args :session-id "ID" :name "")
+                 '("--session-id" "ID" "--name=")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree t)
                  '("--session-id" "ID" "--worktree")))
   (should (equal (claude-code--build-args :session-id "ID" :worktree "feat")
@@ -627,6 +633,11 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
   (should (equal (claude-code--build-args :session-id "ID" :worktree t
                                           :prompt "hi")
                  '("--session-id" "ID" "--worktree" "--" "hi")))
+  (should (equal (claude-code--build-args
+                  :session-id "ID" :name "review" :worktree "feat"
+                  :model "opus" :effort "low" :prompt "hi")
+                 '("--session-id" "ID" "--name=review" "--worktree=feat"
+                   "--model" "opus" "--effort" "low" "--" "hi")))
   ;; Empty prompt is dropped (and so is the terminator).
   (should (equal (claude-code--build-args :session-id "ID" :prompt "")
                  '("--session-id" "ID"))))
@@ -635,7 +646,7 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
   "Resume returns only \"--resume=ID\" and ignores new-session arguments."
   (should (equal (claude-code--build-args :resume "ID") '("--resume=ID")))
   (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus"
-                                          :effort "high")
+                                          :effort "high" :name "review")
                  '("--resume=ID")))
   (should (equal (claude-code--build-args :resume "ID" :session-id "ID")
                  '("--resume=ID"))))
@@ -1925,50 +1936,94 @@ other buffer asks `project.el', which prompts when the buffer has no project."
               ((symbol-function 'transient-args)
                (lambda (prefix)
                  (unless prefix (error "Not a transient prefix: nil"))
-                 '("--worktree" "--model=opus" "--effort=xhigh"))))
+                 '("--worktree" "--model=opus" "--effort=xhigh"
+                   "--name=a long name"))))
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
         (let ((transient-current-command nil))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/r" :prompt nil :worktree nil :model nil :effort nil)))
+                       '("/r" :prompt nil :name nil :worktree nil :model nil
+                         :effort nil)))
         ;; With a menu live the root comes from its scope, not from whichever
         ;; buffer the suffix happens to run in.
         (let ((transient-current-command 'claude-code-spawn-menu))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/scoped" :prompt nil :worktree t :model "opus"
-                         :effort "xhigh")))))))
+                       '("/scoped" :prompt nil :name "a long name" :worktree t
+                         :model "opus" :effort "xhigh")))))))
+
+(defmacro claude-code-tests--driving-spawn-menu (spawns &rest body)
+  "Run BODY able to work the real menu, pushing (ROOT . OPTIONS) onto SPAWNS.
+Nothing about transient is stubbed: BODY drives the menu with
+`execute-kbd-macro', and the project it resolves is \"/home/test/proj\".  The
+menu opens with no value set and the state it leaves behind is put back
+afterwards -- the value a `transient-set' pins and the history an infix read
+records -- so a suite run inside a live Emacs (as `M-x ert' is) neither reads
+nor disturbs the user's own menu."
+  (declare (indent 1))
+  `(let* ((,spawns '())
+          (instance (generate-new-buffer " *cc-instance*"))
+          (prefix (get 'claude-code-spawn-menu 'transient--prefix))
+          (set-p (slot-boundp prefix 'value))
+          (set-value (and set-p (oref prefix value)))
+          (transient-history (copy-tree transient-history)))
+     (slot-makeunbound prefix 'value)
+     (unwind-protect
+         (cl-letf (((symbol-function 'claude-code-spawn)
+                    (lambda (root &rest options)
+                      (push (cons root options) ,spawns)
+                      (cons "spawned-id" instance)))
+                   ((symbol-function 'claude-code--refresh-views) #'ignore)
+                   ((symbol-function 'claude-code--show) #'ignore)
+                   ((symbol-function 'project-current) (lambda (&rest _) 'proj))
+                   ((symbol-function 'project-root)
+                    (lambda (_project) "/home/test/proj")))
+           ,@body)
+       ;; A failure mid-macro would otherwise leave transient's keymap on
+       ;; `overriding-terminal-local-map' and its hooks armed for every later
+       ;; test, hiding the real failure behind unrelated ones.
+       (transient--emergency-exit)
+       (if set-p (oset prefix value set-value) (slot-makeunbound prefix 'value))
+       (when (buffer-live-p instance) (kill-buffer instance)))))
 
 (ert-deftest claude-code-test-spawn-menu-scope-reaches-the-suffix ()
   "The real menu carries its project through to the spawn.
 Driven through transient itself, keys and all: handing the project down as the
 prefix's scope is what frees the menu from the view, so nothing about transient
 is stubbed here."
-  (let ((spawn-args nil)
-        (instance (generate-new-buffer " *cc-instance*")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'claude-code-spawn)
-                   (lambda (root &rest kw)
-                     (setq spawn-args (cons root kw))
-                     (cons "spawned-id" instance)))
-                  ((symbol-function 'claude-code--refresh-views) #'ignore)
-                  ((symbol-function 'claude-code--show) #'ignore)
-                  ((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
-                  ((symbol-function 'project-root) (lambda (_p) "/home/test/proj")))
-          (with-temp-buffer
-            (claude-code-spawn-menu)
-            ;; `-w' toggles the worktree switch, `n' spawns, RET answers the
-            ;; initial-prompt read with the empty string.
-            (execute-kbd-macro (kbd "- w n RET")))
-          (should (equal spawn-args
-                         (list (claude-code--normalize-root "/home/test/proj")
-                               :prompt nil :worktree t :model nil :effort nil))))
-      ;; A failure mid-macro would otherwise leave transient's keymap on
-      ;; `overriding-terminal-local-map' and its hooks armed for every later
-      ;; test, hiding the real failure behind unrelated ones.
-      (transient--emergency-exit)
-      (kill-buffer instance))))
+  (claude-code-tests--driving-spawn-menu spawns
+    (with-temp-buffer
+      (claude-code-spawn-menu)
+      ;; `-n' reads a name, `-w' toggles the worktree switch, `n' spawns, and
+      ;; RET answers the initial-prompt read with the empty string.
+      (execute-kbd-macro (kbd "- n r e v i e w RET - w n RET")))
+    (should (equal (car spawns)
+                   (list (claude-code--normalize-root "/home/test/proj")
+                         :prompt nil :name "review" :worktree t
+                         :model nil :effort nil)))))
+
+(ert-deftest claude-code-test-spawn-menu-forgets-the-name ()
+  "A name is spent on the session it spawns; a later menu never reoffers it.
+Transient drops a prefix's value when the menu exits, and the name infix is
+`:unsavable', so even the value `transient-set' pins for later spawns -- the
+model here -- carries no name into them."
+  (claude-code-tests--driving-spawn-menu spawns
+    (with-temp-buffer
+      (claude-code-spawn-menu)
+      (execute-kbd-macro (kbd "- n r e v i e w RET - m o p u s RET"))
+      ;; `transient-set' is called rather than keyed: which key runs it is
+      ;; transient's business, and the menu stays up either way.
+      (call-interactively #'transient-set)
+      (execute-kbd-macro (kbd "n RET")))
+    (with-temp-buffer
+      (claude-code-spawn-menu)
+      (execute-kbd-macro (kbd "n RET")))
+    (should (equal (mapcar (lambda (spawn)
+                             (list (plist-get (cdr spawn) :name)
+                                   (plist-get (cdr spawn) :model)))
+                           (reverse spawns))
+                   '(("review" "opus") (nil "opus"))))))
 
 (ert-deftest claude-code-test-mutations-refresh-every-view ()
   "Spawn, resume, kill and delete redraw every sessions view, displayed or not.
@@ -2474,15 +2529,18 @@ the instance is still retired."
       (should (= fired 1)))))
 
 (ert-deftest claude-code-test-integration-lifecycle ()
-  "Spawn a real instance, see it register a session, then kill and delete it."
+  "Spawn a real named instance, see it register a session, then kill and delete.
+The name is given as several words to show that it reaches the CLI whole."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))
+         (name "emacs integration name")
          buffer id pid mcp-port)
     (unwind-protect
         (claude-code-tests--with-top-level-env
           (let ((instance (claude-code-spawn
-                           root :prompt "Respond with the single word: pong")))
+                           root :name name
+                           :prompt "Respond with the single word: pong")))
             (setq id (car instance))
             (setq buffer (cdr instance)))
           (should (string-match-p claude-code-tests--uuid-re id))
@@ -2500,6 +2558,15 @@ the instance is still retired."
                                  (and s (claude-code-session-status s))))
                     45)
                    '("busy" "idle" "waiting")))
+          ;; The name given at spawn is the name the view shows: the CLI records
+          ;; it in the transcript this package takes a session's name from.
+          (should (claude-code-tests--await
+                   (lambda ()
+                     (let ((s (claude-code-tests--find-session
+                               (claude-code-project-sessions root) id)))
+                       (equal (and s (claude-code--session-display-name s))
+                              name)))
+                   15))
           (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (claude-code-session-alive-p s))
             ;; The server dies with the *last* instance, so this has to be it.
