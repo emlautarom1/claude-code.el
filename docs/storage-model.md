@@ -10,8 +10,7 @@ For the background-agent / FleetView subsystem (a separate concern this package 
 
 ## Running instances — `sessions/<pid>.json`
 
-Claude writes one JSON file per running process, named by OS PID. The fields
-this package reads:
+Claude writes one JSON file per running process, named by OS PID. The fields this package reads:
 
 | Field        | Meaning                                                    |
 | ------------ | ---------------------------------------------------------- |

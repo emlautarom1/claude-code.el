@@ -13,7 +13,8 @@
 ;; Orchestrate and manage Claude Code CLI sessions from Emacs, scoped to the
 ;; current `project.el' project.  Running instances are hosted in `ghostel'
 ;; terminal buffers.  A "claude sessions" view lists every session of a project
-;; (alive and dead) and offers spawn/resume/kill/rename/inspect actions.
+;; -- alive, external or dead -- and offers visit, spawn, resume, kill, delete,
+;; rename, send-text and interrupt actions.
 ;;
 ;; The package is split into a programmatic model (plain functions operating on
 ;; `claude-code-session' structs) and a view layer.  All knowledge of the
@@ -210,10 +211,8 @@ back into a name or path (see docs/storage-model.md)."
 ;;;; Model
 ;;
 ;; The rest of the package works with `claude-code-session' structs produced by
-;; `claude-code-project-sessions'.  A session has one of three liveness states
-;; (`claude-code--session-liveness'): "alive" when Emacs manages a live Ghostel
-;; instance for it, "external" when a `claude' process runs it outside Emacs, and
-;; "dead" when no process is running it at all.
+;; `claude-code-project-sessions', each in one of the three liveness states
+;; `claude-code--session-liveness' classifies.
 
 (cl-defstruct (claude-code-session (:constructor claude-code-session--create)
                                    (:copier nil))
@@ -418,9 +417,9 @@ RSS is in kibibytes."
                       (lambda (p) (gethash p (car snap)))
                     #'process-attributes))
            (children (if snap
-                         ;; The walk splices destructively, and this list is
-                         ;; the snapshot's own -- every later row reads it too.
-                         (lambda (p) (copy-sequence (gethash p (cdr snap))))
+                         ;; The walk must not splice into this list: it is
+                         ;; the snapshot's own and every later row reads it.
+                         (lambda (p) (gethash p (cdr snap)))
                        #'claude-code--child-pids))
            (cpu 0.0) (rss 0) (stack (list pid)) (found nil))
       ;; Only a found process queues children, so FOUND means PID itself ran.
@@ -430,7 +429,7 @@ RSS is in kibibytes."
             (setq found t)
             (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
             (cl-incf rss (or (alist-get 'rss a) 0))
-            (setq stack (nconc (funcall children p) stack)))))
+            (setq stack (append (funcall children p) stack)))))
       (and found (cons cpu rss)))))
 
 (defun claude-code--session-cwd (id)
@@ -672,9 +671,8 @@ only SUBMIT sends the RET that actually submits."
 
 (defun claude-code-rename (session name)
   "Rename SESSION to NAME by sending a /rename command to its instance.
-The new name is not cached: Claude records it as a `custom-title' line in the
-transcript and the next refresh reads it back through
-`claude-code--session-display-name', so there is one source of truth."
+Claude records the new name as a `custom-title' line in the transcript, which
+is where `claude-code--session-display-name' reads it back on the next refresh."
   (unless (claude-code-session-alive-p session)
     (user-error "Can only rename an alive session"))
   (claude-code-send-text session (format "/rename %s" name) t))
@@ -1067,12 +1065,8 @@ BUFFER -- a minibuffer, or one dedicated to its buffer, a side window among them
 
 (defun claude-code--redraw (&optional group)
   "Reprint the view, leaving point on the header of GROUP when given.
-Every command that mutates sessions redraws through here, which is what makes
-it the place to say where the cursor lands.  `tabulated-list-print' puts point
-back on the row it was on, by session id, and at the top of the buffer when
-that row is no longer printed.  A caller that acted on a group says so, and
-that outranks the row: `claude-code-sessions-toggle-group' names the group it
-folded, which is what makes `TAB TAB' fold and unfold in place."
+Without GROUP, `tabulated-list-print' restores point to the row it was on by
+session id, and to the top of the buffer when that row is no longer printed."
   (tabulated-list-print t)
   (claude-code--goto-group group))
 

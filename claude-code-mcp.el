@@ -212,7 +212,7 @@ that names no buffer touches none.  The value prints in full, whatever
               (let ((print-length nil)
                     (print-level nil))
                 (prin1-to-string value))))
-        (when (buffer-name buffer) (kill-buffer buffer))))))
+        (kill-buffer buffer)))))
 
 (claude-code-mcp-make-tool
  :name "eval"

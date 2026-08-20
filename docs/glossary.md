@@ -1,7 +1,6 @@
 # Glossary
 
-Terms used throughout `claude-code.el` and its documentation. They are chosen to
-match Claude Code's own vocabulary wherever one exists.
+Terms used throughout `claude-code.el` and its documentation. They are chosen to match Claude Code's own vocabulary wherever one exists.
 
 - **Session** — a single Claude Code conversation, identified by a UUID (`sessionId`). A session's history lives in a transcript on disk and outlives any process. Its *liveness* is one of three states — *alive*, *external*, or *dead* (defined below).
 

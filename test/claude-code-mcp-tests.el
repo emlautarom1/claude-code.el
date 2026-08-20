@@ -699,8 +699,9 @@ start an instance in an unrelated project."
 
 (ert-deftest claude-code-mcp-test-boolean-args ()
   "A `boolean' argument reaches its handler as a Lisp truth value.
-The parser renders JSON false as `:json-false'/`:false' and null as `:null',
-all non-nil in Lisp, so each must arrive as nil."
+The parser renders JSON false as `:false' and null as `:null'; the
+serializer's `:json-false' is tolerated as a second spelling.  All are
+non-nil in Lisp, so each must reach the handler as nil."
   (let ((seen 'unset))
     (claude-code-mcp-tests--with-tools '("cc-mcp-test-bool")
       (claude-code-mcp-make-tool
