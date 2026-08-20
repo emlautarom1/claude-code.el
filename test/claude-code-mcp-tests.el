@@ -14,9 +14,9 @@
 (require 'cl-lib)
 (require 'claude-code)
 (require 'claude-code-mcp)
-;; For the scaffolding the sibling suite owns: `claude-code-tests--with-registry',
-;; which every isolated test here expands into, and the integration helpers
-;; `claude-code-tests--with-top-level-env' and `claude-code-tests--await'.
+;; For the `claude-code-tests--' scaffolding the sibling suite owns, starting
+;; with `claude-code-tests--with-registry', which every isolated test here
+;; expands into.
 (require 'claude-code-tests)
 
 (defmacro claude-code-mcp-tests--isolated (&rest body)
@@ -39,6 +39,7 @@ every caller starts from a listening server."
        (unwind-protect
            (let ((,port (claude-code--mcp-ensure-server)))
              (should (integerp ,port))
+             (should (claude-code-tests--listening-p ,port))
              ,@body)
          (claude-code-mcp-stop)))))
 
@@ -785,17 +786,31 @@ all non-nil in Lisp, so each must arrive as nil."
   "The shared server is torn down by the last instance to exit, not the first."
   (claude-code-tests--with-managed-buffer buf
     (claude-code-tests--with-managed-buffer other
-      (claude-code-mcp-tests--with-server _port
+      (claude-code-mcp-tests--with-server port
         (puthash "a" (list :buffer buf) claude-code--managed)
         (puthash "b" (list :buffer other) claude-code--managed)
         ;; One of two exiting leaves the server up for the survivor.
-        (claude-code--on-exit buf)
+        (with-current-buffer buf (claude-code--on-buffer-kill))
         (should (= (hash-table-count claude-code--managed) 1))
         (should claude-code--mcp-server)
         ;; The last one takes it down.
-        (claude-code--on-exit other)
+        (with-current-buffer other (claude-code--on-buffer-kill))
         (should (zerop (hash-table-count claude-code--managed)))
-        (should-not claude-code--mcp-server)))))
+        (should-not claude-code--mcp-server)
+        (should-not (claude-code-tests--listening-p port))))))
+
+(ert-deftest claude-code-mcp-test-stops-when-the-last-instance-is-killed ()
+  "Killing the last instance takes the shared server down with it.
+The server's lifetime hangs on the registry emptying, and a killed instance
+reports that from its buffer."
+  (claude-code-tests--with-managed-buffer buf
+    (claude-code-mcp-tests--with-server port
+      (claude-code--register "a" buf "/r" nil)
+      (claude-code-kill (claude-code-session--create
+                         :id "a" :alive-p t :buffer buf))
+      (should (zerop (hash-table-count claude-code--managed)))
+      (should-not claude-code--mcp-server)
+      (should-not (claude-code-tests--listening-p port)))))
 
 (ert-deftest claude-code-mcp-test-ensure-server-idempotent ()
   "Ensuring twice yields one listener on the same port; stop tears it down."

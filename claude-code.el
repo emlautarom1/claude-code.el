@@ -39,7 +39,7 @@
 (declare-function ghostel-send-C-c "ghostel" ())
 (defvar ghostel--pid)
 (defvar ghostel--process)
-(defvar ghostel-exit-functions)
+(defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-buffer-name-function)
 (defvar ghostel-notification-function)
 
@@ -524,29 +524,43 @@ Installs `claude-code--ghostel-buffer-name' as a buffer-local
             (substring s 17 20) (substring s 20 32))))
 
 (defvar claude-code-last-instance-exit-hook nil
-  "Hook run once the last managed instance has exited.")
+  "Hook run once the last managed instance has exited.
+A handler that signals is reported and skipped, so it costs neither the
+handlers behind it nor the `kill-buffer' this may be running inside.")
 
-(defun claude-code--on-exit (buffer &optional _event)
-  "Unregister the managed session hosted in BUFFER when its process exits.
-Registered on `ghostel-exit-functions', which calls its functions with
-\(BUFFER EVENT) for every Ghostel terminal; the EVENT is unused here.
-Exits of terminals this package does not manage are ignored:
-`claude-code-last-instance-exit-hook' runs only when this exit removed
-the registry's last entry."
-  (let ((dead (cl-loop for id being the hash-keys of claude-code--managed
-                       using (hash-values plist)
-                       when (eq (plist-get plist :buffer) buffer)
-                       collect id)))
+(defun claude-code--on-buffer-kill ()
+  "Unregister the instance hosted in the buffer being killed.
+An instance shares its buffer's lifetime, so this buffer-local
+`kill-buffer-hook' is the one report of one ending.  Entries are retired by
+matching the buffer, so a terminal this package does not manage retires none,
+and `claude-code-last-instance-exit-hook' runs only for the kill that removed
+the last entry."
+  (let* ((buffer (current-buffer))
+         (dead (cl-loop for id being the hash-keys of claude-code--managed
+                        using (hash-values plist)
+                        when (eq (plist-get plist :buffer) buffer)
+                        collect id)))
     (dolist (id dead)
       (remhash id claude-code--managed))
     (when (and dead (zerop (hash-table-count claude-code--managed)))
-      (run-hooks 'claude-code-last-instance-exit-hook))))
+      (run-hook-wrapped 'claude-code-last-instance-exit-hook
+                        (lambda (handler)
+                          (condition-case err (funcall handler)
+                            ((error quit)
+                             (message "claude-code: last-instance hook %S signalled: %S"
+                                      handler err)))
+                          nil)))))
 
 (defun claude-code--register (id buffer origin worktree)
   "Record instance ID hosted in BUFFER, launched from ORIGIN, with WORKTREE.
 Stored under :worktree is the transcript-directory token of a named worktree
-request, nil otherwise."
-  (add-hook 'ghostel-exit-functions #'claude-code--on-exit)
+request, nil otherwise.  Registering a live BUFFER also wires up the entry's
+removal: BUFFER is made to die with its process, so its kill is the one event
+that retires the entry.  Must run after `ghostel-exec', whose `ghostel-mode'
+switch would wipe the buffer-local flag."
+  (with-current-buffer buffer
+    (setq-local ghostel-kill-buffer-on-exit t)
+    (add-hook 'kill-buffer-hook #'claude-code--on-buffer-kill nil t))
   (puthash id (list :buffer buffer :origin origin
                     :worktree (and (stringp worktree)
                                    (claude-code--worktree-token worktree)))
@@ -609,14 +623,11 @@ a session a `claude' outside Emacs is running."
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer.
-The registry entry goes only while it still names SESSION's buffer, so a session
-rehosted since the struct was built keeps its registration."
+Killing the buffer is what unregisters, so a session rehosted since SESSION was
+built keeps the registration its new buffer holds."
   (unless (claude-code-session-alive-p session)
     (user-error "Session %s is not alive" (claude-code-session-id session)))
-  (let* ((id (claude-code-session-id session))
-         (buffer (claude-code-session-buffer session)))
-    (when (eq buffer (plist-get (gethash id claude-code--managed) :buffer))
-      (remhash id claude-code--managed))
+  (let ((buffer (claude-code-session-buffer session)))
     (when (buffer-live-p buffer)
       (let ((kill-buffer-query-functions nil))
         (kill-buffer buffer)))))

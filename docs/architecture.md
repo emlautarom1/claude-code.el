@@ -35,13 +35,15 @@ This realises the decision that **aliveness is Emacs-managed only**: a session i
 The **id is the only durable name for a session**, which is what those states are decided by, and it has two consequences:
 
 - Liveness never depends on the root a query names, because one session can belong to two roots (see [storage model](storage-model.md#worktrees)). The registry's launch root answers *membership* alone, and only until Claude writes a transcript.
-- A struct is only as fresh as the query that built it, so `claude-code-delete` and `claude-code-kill` re-check by id: a resume or a relaunch between the query and the act must not turn a stale row into damage to a live instance.
+- A struct is only as fresh as the query that built it, so a resume or a relaunch between the query and the act must not let a stale row damage a live instance: `claude-code-delete` re-checks by id, and `claude-code-kill` acts on the buffer the struct names rather than on its id.
 
 The struct holds the transcript's raw name sources (the `title` and the last prompt), and the *displayed* name is computed in exactly one place — `claude-code--session-display-name` — and is never cached, so it always reflects the transcript (including a `/rename`, which lands as a `custom-title`) and cannot drift.
 
 ### Registry lifecycle
 
-`claude-code-spawn` / `claude-code-resume` create a Ghostel buffer, record it in `claude-code--managed`, and register `claude-code--on-exit` on `ghostel-exit-functions`. A spawn generates the session id, so it hands back `(ID . BUFFER)`: the buffer is renamed after Claude's terminal title, leaving the id as the caller's only stable handle on what it just started. When the process dies the entry is removed and the session naturally becomes dead on the next query.
+`claude-code-spawn` / `claude-code-resume` create a Ghostel buffer and record it in `claude-code--managed`. A spawn generates the session id, so it hands back `(ID . BUFFER)`: the buffer is renamed after Claude's terminal title, leaving the id as the caller's only stable handle on what it just started.
+
+Registering an instance is also what wires up its removal, and it does so by making the instance and its buffer share a lifetime: `claude-code--register` sets `ghostel-kill-buffer-on-exit` buffer-locally, so Ghostel kills the buffer the moment the process exits, whatever the user's global preference. Every way an instance can end therefore passes through `kill-buffer`, and a buffer-local `kill-buffer-hook` (`claude-code--on-buffer-kill`) is the single event that retires the entry — for a process that exited, for `claude-code-kill`, and for a user's own `C-x k` alike. Only the kill that removes the last entry runs `claude-code-last-instance-exit-hook`, whose handlers are individually shielded (see its docstring). Once the entry is gone the session naturally becomes dead on the next query.
 
 ### Resource usage
 

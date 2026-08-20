@@ -10,6 +10,10 @@
 (require 'cl-lib)
 (require 'claude-code)
 
+;; Declared so a `let' on it binds dynamically in tests that run without
+;; Ghostel loaded.
+(defvar ghostel-kill-buffer-on-exit)
+
 (defvar claude-code-tests--fixtures
   (expand-file-name
    "fixtures" (file-name-directory (or load-file-name buffer-file-name)))
@@ -43,6 +47,16 @@ The buffer is killed afterwards even when BODY already killed it."
      (let ((,var (generate-new-buffer " *cc-test*")))
        (unwind-protect (progn ,@body)
          (when (buffer-live-p ,var) (kill-buffer ,var))))))
+
+(defun claude-code-tests--listening-p (port)
+  "Return non-nil when something accepts a loopback connection on PORT.
+Asked of the OS rather than of Emacs, so a listener the package forgot about
+still counts."
+  (when-let* ((proc (ignore-errors
+                      (make-network-process :name "cc-port-probe"
+                                            :host "127.0.0.1" :service port))))
+    (delete-process proc)
+    t))
 
 (defmacro claude-code-tests--with-live-pids (pids &rest body)
   "Run BODY with exactly the pids in PIDS reading as live processes.
@@ -690,35 +704,99 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
     (should (eq ghostel-buffer-name-function
                 #'claude-code--ghostel-buffer-name))))
 
-(ert-deftest claude-code-test-on-exit-unregisters ()
-  "Process exit removes the instance's registry entry."
+(ert-deftest claude-code-test-buffer-kill-unregisters ()
+  "An instance's buffer dying removes its registry entry."
   (claude-code-tests--with-managed-buffer buf
-    (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
-    (claude-code--on-exit buf "finished\n")
+    (claude-code--register "id-1" buf "/r" nil)
+    (kill-buffer buf)
     (should (zerop (hash-table-count claude-code--managed)))))
 
-(ert-deftest claude-code-test-on-exit-runs-last-instance-hook-on-transition ()
-  "The hook fires exactly when a managed exit empties the registry.
-Unmanaged terminal exits never fire it — not even while the registry is
-empty, the steady state once every instance has exited."
+(ert-deftest claude-code-test-buffer-kill-runs-last-instance-hook-on-transition ()
+  "The hook fires exactly when a managed kill empties the registry.
+Unmanaged terminals never fire it — not even while the registry is empty, the
+steady state once every instance has exited."
   (claude-code-tests--with-managed-buffer buf
     (claude-code-tests--with-managed-buffer stranger
       (let* ((fired 0)
              (claude-code-last-instance-exit-hook
               (list (lambda () (cl-incf fired)))))
-        ;; Empty registry: an unmanaged exit must not fire the hook.
-        (claude-code--on-exit stranger "finished\n")
+        ;; Empty registry: an unmanaged terminal must not fire the hook.
+        (with-current-buffer stranger (claude-code--on-buffer-kill))
         (should (= fired 0))
-        ;; Non-empty registry, unmanaged exit: still nothing.
+        ;; Non-empty registry, unmanaged terminal: still nothing.
         (puthash "id-1" (list :buffer buf :origin "/r") claude-code--managed)
-        (claude-code--on-exit stranger "finished\n")
+        (with-current-buffer stranger (claude-code--on-buffer-kill))
         (should (= fired 0))
-        ;; The managed exit that empties the registry fires it once.
-        (claude-code--on-exit buf "finished\n")
+        ;; The managed kill that empties the registry fires it once.
+        (with-current-buffer buf (claude-code--on-buffer-kill))
         (should (= fired 1))
-        ;; A repeat exit event for the same buffer does not fire it again.
-        (claude-code--on-exit buf "finished\n")
+        ;; A repeat report for the same buffer does not fire it again.
+        (with-current-buffer buf (claude-code--on-buffer-kill))
         (should (= fired 1))))))
+
+(ert-deftest claude-code-test-buffer-kill-survives-a-failing-hook ()
+  "A signalling handler costs neither the kill nor the handlers behind it.
+`kill-buffer' propagates a signal out of `kill-buffer-hook' and abandons the
+kill, which would leave a live instance nothing holds a registration for.  The
+handler behind it must still run: `claude-code-mcp-stop' sits there, and
+skipping it leaves the MCP server listening with no instance left.  A `quit'
+reaches both of those as readily as an `error' does, and clears more guards."
+  (dolist (signaller (list (lambda () (error "boom"))
+                           (lambda () (signal 'quit nil))))
+    (claude-code-tests--with-managed-buffer buf
+      (let* ((reached nil)
+             (reported nil)
+             (claude-code-last-instance-exit-hook
+              (list signaller (lambda () (setq reached t)))))
+        (claude-code--register "id-e" buf "/r" nil)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
+          ;; Caught so an escaping `quit' fails this test rather than ending it
+          ;; as an ERT `QUIT', which leaves the run green.
+          (condition-case nil (kill-buffer buf) ((error quit) nil)))
+        (should-not (buffer-live-p buf))
+        (should (zerop (hash-table-count claude-code--managed)))
+        (should reached)
+        ;; Skipping a handler silently would leave the failure invisible.
+        (should (string-match-p "last-instance hook" (or reported "")))))))
+
+(ert-deftest claude-code-test-process-exit-reaches-the-kill-hook ()
+  "A process exit retires the instance however the user configured Ghostel.
+Stands in for the one branch of `ghostel--sentinel' this depends on: it kills
+the buffer with the buffer current, so the buffer-local setting decides.  No pty
+runs here, which is the point -- CI has none."
+  (dolist (global '(t nil))
+    (claude-code-tests--with-managed-buffer buf
+      (let* ((fired 0)
+             (ghostel-kill-buffer-on-exit global)
+             (claude-code-last-instance-exit-hook
+              (list (lambda () (cl-incf fired)))))
+        (claude-code--register "id-s" buf "/r" nil)
+        (with-current-buffer buf
+          (when ghostel-kill-buffer-on-exit (kill-buffer buf)))
+        (should-not (buffer-live-p buf))
+        (should (zerop (hash-table-count claude-code--managed)))
+        (should (= fired 1))))))
+
+(ert-deftest claude-code-test-launch-ties-the-instance-to-its-buffer ()
+  "The launch path makes the buffer both die with its process and report it.
+Losing either half strands the entry: with no kill hook nothing retires it, and
+with no buffer-local setting a user's global nil leaves the buffer alive after
+its process exits, so no kill is ever coming."
+  (claude-code-tests--with-registry
+    (let ((execs '()))
+      (claude-code-tests--recording-launch execs
+        (let* ((fired 0)
+               (claude-code-last-instance-exit-hook
+                (list (lambda () (cl-incf fired))))
+               (ghostel-kill-buffer-on-exit nil)
+               (buffer (cdr (claude-code-spawn "/r"))))
+          (should (eq t (buffer-local-value 'ghostel-kill-buffer-on-exit buffer)))
+          (should (memq #'claude-code--on-buffer-kill
+                        (buffer-local-value 'kill-buffer-hook buffer)))
+          (kill-buffer buffer)
+          (should (zerop (hash-table-count claude-code--managed)))
+          (should (= fired 1)))))))
 
 (ert-deftest claude-code-test-launch-shared-by-spawn-and-resume ()
   "Spawn and resume host their instance through one launch path.
@@ -811,13 +889,19 @@ makes it external."
           (should (= (length execs) 1)))))))
 
 (ert-deftest claude-code-test-kill ()
-  "Killing an alive session drops its registry entry and buffer."
+  "Killing an alive session drops its registry entry and buffer, and reports it.
+The entry goes because the buffer died, so the instance is registered through
+`claude-code--register', which is what wires that up."
   (claude-code-tests--with-managed-buffer buf
-    (puthash "id-k" (list :buffer buf :origin "/r") claude-code--managed)
-    (claude-code-kill (claude-code-session--create
-                       :id "id-k" :alive-p t :buffer buf))
-    (should-not (gethash "id-k" claude-code--managed))
-    (should-not (buffer-live-p buf))
+    (let* ((fired 0)
+           (claude-code-last-instance-exit-hook
+            (list (lambda () (cl-incf fired)))))
+      (claude-code--register "id-k" buf "/r" nil)
+      (claude-code-kill (claude-code-session--create
+                         :id "id-k" :alive-p t :buffer buf))
+      (should-not (gethash "id-k" claude-code--managed))
+      (should-not (buffer-live-p buf))
+      (should (= fired 1)))
     ;; A dead session cannot be killed.
     (should-error (claude-code-kill
                    (claude-code-session--create :id "d" :alive-p nil))
@@ -828,16 +912,20 @@ makes it external."
 The struct names the buffer it was built from; once that instance has exited and
 a resume has hosted the same session in another buffer, the registry belongs to
 the new one.  Dropping it by id alone would orphan a running instance -- live,
-but invisible to every query and to `claude-code--on-exit'."
+but invisible to every query and to `claude-code--on-buffer-kill'."
   (claude-code-tests--with-registry
     (let ((old (generate-new-buffer " *cc-old*"))
           (new (generate-new-buffer " *cc-new*")))
       (unwind-protect
           (progn
             (claude-code--register "id-r" old "/r" nil)
-            (let ((stale (claude-code-session--create
-                          :id "id-r" :alive-p t :buffer old)))
+            (let* ((fired 0)
+                   (claude-code-last-instance-exit-hook
+                    (list (lambda () (cl-incf fired))))
+                   (stale (claude-code-session--create
+                           :id "id-r" :alive-p t :buffer old)))
               (kill-buffer old)
+              (should (= fired 1))
               (claude-code--register "id-r" new "/r" nil)
               (claude-code-kill stale)
               (should (eq (plist-get (gethash "id-r" claude-code--managed) :buffer)
@@ -2307,12 +2395,90 @@ tests themselves run inside a Claude Code session."
   "Return the transcript directory under `claude-code-config-dir' for CWD."
   (expand-file-name (claude-code--encode-cwd cwd) (claude-code--projects-dir)))
 
+(defmacro claude-code-tests--with-registered-pty (buffer fired &rest body)
+  "Run BODY with BUFFER a registered instance on a real pty, FIRED its exit count.
+FIRED counts `claude-code-last-instance-exit-hook' runs.  `cat' just holds the
+pty open; no `claude' is involved.  The registry and the hook are private to
+the run."
+  (declare (indent 2))
+  `(claude-code-tests--with-registry
+     (let* ((,fired 0)
+            (claude-code-last-instance-exit-hook
+             (list (lambda () (cl-incf ,fired))))
+            (,buffer (generate-new-buffer " *cc-integration-pty*")))
+       (unwind-protect
+           (progn (ghostel-exec ,buffer "cat" nil)
+                  (claude-code--register "pty-id" ,buffer "/tmp" nil)
+                  ,@body)
+         (when (buffer-live-p ,buffer)
+           (let ((kill-buffer-query-functions nil)) (kill-buffer ,buffer)))))))
+
+(ert-deftest claude-code-test-integration-buffer-kill-unregisters ()
+  "A real terminal killed buffer-first reports its instance's exit.
+Ghostel runs no `ghostel-exit-functions' for such a terminal, which the unit
+tests cannot see: they kill plain buffers with no process behind them."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (require 'ghostel)
+  (let ((exits 0))
+    (claude-code-tests--with-registered-pty buffer fired
+      (add-hook 'ghostel-exit-functions (lambda (&rest _) (cl-incf exits)))
+      (unwind-protect
+          (progn
+            (should (claude-code--session-process buffer))
+            (let ((kill-buffer-query-functions nil)) (kill-buffer buffer))
+            ;; Wait for an exit-function call that must never arrive.
+            (claude-code-tests--await (lambda () (> exits 0)) 3)
+            (should (= exits 0))
+            (should (zerop (hash-table-count claude-code--managed)))
+            (should (= fired 1)))
+        (remove-hook 'ghostel-exit-functions
+                     (car ghostel-exit-functions))))))
+
+(ert-deftest claude-code-test-integration-exit-kills-the-buffer ()
+  "A real process exit kills the instance buffer and retires it, once.
+The buffer-local `ghostel-kill-buffer-on-exit' is what guarantees this, so the
+user's global preference must not reach it -- a nil there is exactly the case
+that would otherwise leave a dead instance registered forever."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (require 'ghostel)
+  (dolist (global '(t nil))
+    (let ((ghostel-kill-buffer-on-exit global))
+      (claude-code-tests--with-registered-pty buffer fired
+        (signal-process (buffer-local-value 'ghostel--pid buffer) 'SIGTERM)
+        (should (claude-code-tests--await
+                 (lambda () (not (buffer-live-p buffer))) 5))
+        (should (zerop (hash-table-count claude-code--managed)))
+        ;; Give a second report the chance to arrive that it must not take.
+        (claude-code-tests--await (lambda () (> fired 1)) 0.5)
+        (should (= fired 1))))))
+
+(ert-deftest claude-code-test-integration-exit-kill-is-never-queried ()
+  "The kill that follows a process exit cannot be blocked by a query.
+`ghostel-query-before-killing' guards on the process still being live, and by
+sentinel time it is not -- so a user who asks to be queried is never asked, and
+the instance is still retired."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (require 'ghostel)
+  (let ((asked nil)
+        (ghostel-query-before-killing t))
+    (claude-code-tests--with-registered-pty buffer fired
+      (cl-letf (((symbol-function 'yes-or-no-p)
+                 (lambda (&rest _) (setq asked t) nil))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (setq asked t) nil)))
+        (signal-process (buffer-local-value 'ghostel--pid buffer) 'SIGTERM)
+        (should (claude-code-tests--await
+                 (lambda () (not (buffer-live-p buffer))) 5)))
+      (should-not asked)
+      (should (zerop (hash-table-count claude-code--managed)))
+      (should (= fired 1)))))
+
 (ert-deftest claude-code-test-integration-lifecycle ()
   "Spawn a real instance, see it register a session, then kill and delete it."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))
-         buffer id pid)
+         buffer id pid mcp-port)
     (unwind-protect
         (claude-code-tests--with-top-level-env
           (let ((instance (claude-code-spawn
@@ -2336,7 +2502,18 @@ tests themselves run inside a Claude Code session."
                    '("busy" "idle" "waiting")))
           (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (claude-code-session-alive-p s))
+            ;; The server dies with the *last* instance, so this has to be it.
+            (should (= (hash-table-count claude-code--managed) 1))
+            ;; The instance is talking to a live server; killing it is what has
+            ;; to take that server down.
+            (should claude-code--mcp-server)
+            (setq mcp-port (claude-code--mcp-port))
+            (should (integerp mcp-port))
             (claude-code-kill s))
+          ;; The socket has to be gone, not just the variable holding it:
+          ;; clearing the variable alone would hide a listener left running.
+          (should-not claude-code--mcp-server)
+          (should-not (claude-code-tests--listening-p mcp-port))
           ;; The model reports it dead immediately (it is no longer managed)...
           (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (or (null s) (not (claude-code-session-alive-p s)))))
