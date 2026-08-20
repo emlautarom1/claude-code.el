@@ -32,16 +32,15 @@ Evaluation is aborted after `claude-code-mcp-eval-timeout` seconds. The timeout 
 
 Starts another Claude Code instance in Emacs and returns its session id.
 
-| Argument        | Type      | Required | Meaning                                                |
-|-----------------|-----------|----------|--------------------------------------------------------|
-| `prompt`        | `string`  | no       | Initial prompt; without one the instance starts idle   |
-| `name`          | `string`  | no       | Display name for the session                           |
-| `model`         | `string`  | no       | Model alias (`opus`, `sonnet`, …) or a full model name |
-| `effort`        | `string`  | no       | Effort level (`low`, `medium`, `high`, `xhigh`, `max`) |
-| `worktree`      | `boolean` | no       | Run the instance in a new git worktree                 |
-| `worktree_name` | `string`  | no       | Name for that worktree; asks for one on its own        |
+| Argument   | Type     | Required | Meaning                                                |
+|------------|----------|----------|--------------------------------------------------------|
+| `prompt`   | `string` | no       | Initial prompt; without one the instance starts idle   |
+| `name`     | `string` | no       | Display name for the session                           |
+| `model`    | `string` | no       | Model alias (`opus`, `sonnet`, …) or a full model name |
+| `effort`   | `string` | no       | Effort level (`low`, `medium`, `high`, `xhigh`, `max`) |
+| `worktree` | `string` | no       | Name of a new git worktree to run the instance in      |
 
-The name, prompt, model, effort and worktree the [spawn menu](../README.md#usage) offers a user, plus a name for the *worktree*, which the menu has no field for: `name` is the session's own display name, the one the sessions view shows, while `worktree_name` names the checkout it runs in. What the tool does *not* take is a directory: the root is the **caller's own** `claude-code--mcp-session-cwd`, so an instance always lands in the tree its parent is working in, and a call whose session id names no known session is refused rather than started somewhere arbitrary. Asking for a worktree of course moves the instance out of that tree and into a fresh checkout, which carries none of the caller's uncommitted work. Naming one asks for it: a `worktree_name` is honoured whether or not `worktree` came with it, false included, since a JSON false reaches the handler as the same nil an omitted argument does. Neither the model nor the effort is held to a set of values: both are the CLI's own vocabulary, passed through as given, so a level or an alias the CLI gains works here without a change. Neither name is checked either; a display name is whatever the caller wants read in the view.
+The name, prompt, model, effort and worktree the [spawn menu](../README.md#usage) offers a user: `name` is the session's own display name, the one the sessions view shows, while `worktree` names the checkout it runs in. What the tool does *not* take is a directory: the root is the **caller's own** `claude-code--mcp-session-cwd`, so an instance always lands in the tree its parent is working in, and a call whose session id names no known session is refused rather than started somewhere arbitrary. Asking for a worktree of course moves the instance out of that tree and into a fresh checkout, which carries none of the caller's uncommitted work. Naming a worktree is the only way this tool asks for one, where the menu's `-w` only ever asks for an unnamed one: the two front ends reach disjoint halves of `claude-code-spawn`'s `:worktree`. Hold the name to letters, digits, hyphens and underscores. Nothing here checks it — it reaches the CLI as given, which makes both the directory and the branch — so a name git refuses is an instance that dies at startup. Git's own rules are wider in places (`a.b` and `feature/login` are both legal) and narrower in others (a leading or trailing `.`, a `..`, a space, and `~^:?*[\` are not), and a `/` nests the checkout one level deeper while a `.` costs precision in the *Worktree* column (see the [storage model](storage-model.md#worktrees)). Neither the model nor the effort is held to a set of values: both are the CLI's own vocabulary, passed through as given, so a level or an alias the CLI gains works here without a change. The display name is not checked either; it is whatever the caller wants read in the view.
 
 The tool returns the id `claude-code-spawn` generates, which is the only durable handle on the new session: Claude renames its buffer after the terminal title within seconds of starting. An id means the instance was **launched**, not that it survived startup — an invalid model or effort is the CLI's error to report, inside a terminal the caller is not reading.
 

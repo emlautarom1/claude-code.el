@@ -229,18 +229,17 @@ with (window-buffer (selected-window))."
                    :description "A single Emacs Lisp form"))
  :handler #'claude-code--mcp-tool-eval)
 
-(defun claude-code--mcp-tool-spawn (prompt name model effort worktree
-                                           worktree-name)
+(defun claude-code--mcp-tool-spawn (prompt name model effort worktree)
   "Handle the `spawn' tool; return the new session's id.
 PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
-WORKTREE-NAME standing in for WORKTREE.  The root is not among them: an
-instance runs where the session that asked for it runs."
+WORKTREE the name of the checkout to run in.  The root is not among them: an
+instance is launched from the directory of the session that asked for it."
   (unless claude-code--mcp-session-cwd
     (error "No working directory known for the calling session"))
   (car (claude-code-spawn claude-code--mcp-session-cwd
                           :prompt prompt :name name
                           :model model :effort effort
-                          :worktree (or worktree-name worktree))))
+                          :worktree worktree)))
 
 (claude-code-mcp-make-tool
  :name "spawn"
@@ -263,10 +262,11 @@ that it survived startup."
              (list :name "effort" :type 'string :optional t
                    :description
                    "Reasoning effort level: low, medium, high, xhigh or max.")
-             (list :name "worktree" :type 'boolean :optional t
-                   :description "Run the instance in a new git worktree.")
-             (list :name "worktree_name" :type 'string :optional t
-                   :description "Name for that worktree; implies worktree."))
+             (list :name "worktree" :type 'string :optional t
+                   :description
+                   "Name of a new git worktree to run the instance in.  Letters,
+digits, hyphens and underscores are safe; a name git refuses kills the instance
+at startup."))
  :handler #'claude-code--mcp-tool-spawn)
 
 

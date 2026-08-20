@@ -243,9 +243,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   (let* ((schema (claude-code-mcp-tests--tool-schema "spawn"))
          (properties (alist-get 'properties schema)))
     (should (equal (alist-get 'required schema) []))
-    (should (equal (alist-get 'type (alist-get 'worktree properties)) "boolean"))
-    (should (equal (alist-get 'type (alist-get 'worktree_name properties))
-                   "string"))
+    (should (equal (alist-get 'type (alist-get 'worktree properties)) "string"))
     (should (equal (alist-get 'type (alist-get 'name properties)) "string"))
     (should-not (assq 'enum (alist-get 'model properties)))
     (should-not (assq 'enum (alist-get 'effort properties)))
@@ -616,58 +614,48 @@ and the id is what the caller has to find the session by afterwards."
                        (list "--session-id" id "--mcp-config" "{}")))))))
 
 (ert-deftest claude-code-mcp-test-spawn-options ()
-  "Every option reaches the CLI; a worktree name stands in for the flag."
+  "Every option reaches the CLI, and a worktree is asked for by name."
   (let ((execs '()))
     (claude-code-mcp-tests--with-caller "/home/test/proj" execs
       (let ((id (claude-code-mcp-tests--result-text
                  (claude-code-mcp-tests--call-tool
                   "sess" "spawn" '(prompt . "do the thing") '(model . "opus")
-                  '(effort . "xhigh") '(worktree . t)
-                  '(worktree_name . "feat") '(name . "a long name")))))
+                  '(effort . "xhigh") '(worktree . "feat")
+                  '(name . "a long name")))))
         (should (equal (nth 1 (car execs))
                        (list "--session-id" id "--name=a long name"
                              "--worktree=feat"
                              "--model" "opus" "--effort" "xhigh"
                              "--mcp-config" "{}" "--" "do the thing"))))
-      ;; The flag alone asks for an auto-named worktree.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . t))
-      (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree" "--mcp-config" "{}")))
-      ;; A name alone asks for that worktree, as its description promises.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree_name . "solo"))
+      ;; A name on its own is the whole request.
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . "solo"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree=solo" "--mcp-config" "{}")))
       ;; The name joins the flag in one argument, so a caller-chosen name the
       ;; CLI would otherwise take for a flag of its own cannot become one.
       (claude-code-mcp-tests--call-tool "sess" "spawn"
-                                        '(worktree_name . "--ax-screen-reader"))
+                                        '(worktree . "--ax-screen-reader"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree=--ax-screen-reader" "--mcp-config" "{}")))
-      ;; JSON false is normalized to nil, so no worktree is requested.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :false))
-      (should-not (member "--worktree" (nth 1 (car execs))))
-      ;; A name given alongside a false flag still asks for the worktree: a
-      ;; name is a request for one, and the flag carries nothing to weigh it
-      ;; against -- false and omitted reach the handler alike.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :false)
-                                        '(worktree_name . "named"))
-      (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree=named" "--mcp-config" "{}")))
+      ;; A worktree is asked for by name, so a value that is not one is
+      ;; refused, and refused before anything is launched.
+      (dolist (value '(t :false))
+        (let* ((launched (length execs))
+               (error-object
+                (alist-get 'error (claude-code-mcp-tests--call-tool
+                                   "sess" "spawn" (cons 'worktree value)))))
+          (should (equal (alist-get 'code error-object) -32602))
+          (should (string-match-p "must be of type string"
+                                  (alist-get 'message error-object)))
+          (should (= (length execs) launched))))
       ;; An empty string is an omitted option, not an empty value: `--model ""'
-      ;; would reach the CLI and kill the instance at startup.
+      ;; would reach the CLI and kill the instance at startup, and an unnamed
+      ;; worktree is no worktree.
       (claude-code-mcp-tests--call-tool
        "sess" "spawn" '(prompt . "") '(model . "") '(effort . "")
-       '(worktree . t) '(worktree_name . "") '(name . ""))
+       '(worktree . "") '(name . ""))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree" "--mcp-config" "{}")))
-      ;; A boolean carries no empty string: the flag is held to its own type
-      ;; rather than read as a quiet no.
-      (should (string-match-p
-               "must be of type boolean"
-               (alist-get 'message
-                          (alist-get 'error
-                                     (claude-code-mcp-tests--call-tool
-                                      "sess" "spawn" '(worktree . ""))))))
+                     (list "--mcp-config" "{}")))
       ;; Neither the model nor the effort is held to a set of values: an unknown
       ;; one reaches the CLI, whose error it is to report.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(effort . "turbo"))
