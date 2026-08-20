@@ -286,9 +286,10 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   "A value contradicting the advertised schema is a -32602; the handler is not run.
 The schema is what a caller builds its call from, so a wrong type or a value
 outside an `:enum' is a protocol error rather than something to pass on.  An
-empty string is a value for a required argument and an omission for an optional
-one -- a handler forwarding it to a process would otherwise emit an option with
-nothing after it."
+empty string is a value only a string carries: that value for a required
+argument, an omission for an optional one -- a handler forwarding it to a
+process would otherwise emit an option with nothing after it -- and for any
+other type the contradiction it looks like."
   (let ((seen 'unset))
     (claude-code-mcp-tests--isolated
       (claude-code-mcp-tests--with-tools '("cc-mcp-test-schema")
@@ -313,6 +314,12 @@ nothing after it."
         (pcase-dolist (`(,arguments . ,message)
                        '((((text . 42)) . "type")
                          (((text . "t") (flag . "yes")) . "type")
+                         ;; Only a boolean takes false, and no type takes an
+                         ;; empty string but a string: the caller named the
+                         ;; argument, so what it sent is the wrong type rather
+                         ;; than nothing at all.
+                         (((text . :false)) . "type")
+                         (((text . "t") (flag . "")) . "type")
                          (((text . "t") (level . "turbo")) . "one of")
                          ;; A required argument sent as JSON null is as absent
                          ;; as one never sent: null is not a string.
@@ -362,9 +369,9 @@ able to hear no."
                                                 arguments)))))
           (should (eq seen 'unset)))))))
 
-(ert-deftest claude-code-mcp-test-arguments-must-be-an-object ()
-  "A call whose `arguments' is not an object is the caller's error, not ours.
-JSON null stands for the object it did not send, since `arguments' is optional;
+(ert-deftest claude-code-mcp-test-params-and-arguments-must-be-objects ()
+  "A `params' or `arguments' that is not an object is the caller's error.
+JSON null stands for the object a call did not send, since both are optional;
 anything else is a -32602 rather than a Lisp type error dressed up as -32603."
   (claude-code-mcp-tests--with-tools '("cc-mcp-test-noargs")
     (claude-code-mcp-make-tool
@@ -391,7 +398,27 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
                                          (cons 'arguments arguments)))))))
           (should (equal (alist-get 'code error-object) -32602))
           (should (string-match-p "must be an object"
-                                  (alist-get 'message error-object))))))))
+                                  (alist-get 'message error-object)))))
+      ;; `params' is what a tool name is read from, so it answers for its own
+      ;; shape rather than letting `alist-get' answer for it.
+      (dolist (params (list "code" 42 (vector 1 2)))
+        (let ((error-object
+               (alist-get 'error (claude-code--mcp-handle-request
+                                  "sess"
+                                  (claude-code-mcp-tests--request
+                                   "tools/call" 3 params)))))
+          (should (equal (alist-get 'code error-object) -32602))
+          (should (string-match-p "must be an object"
+                                  (alist-get 'message error-object)))))
+      ;; Null is the absent object here too, leaving the absent name to answer.
+      (should (string-match-p
+               "Unknown tool"
+               (alist-get 'message
+                          (alist-get 'error
+                                     (claude-code--mcp-handle-request
+                                      "sess"
+                                      (claude-code-mcp-tests--request
+                                       "tools/call" 4 :null)))))))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
   "A tool sees its caller's cwd for the call, and nil for an id naming nothing.
@@ -633,6 +660,14 @@ and the id is what the caller has to find the session by afterwards."
        '(worktree . t) '(worktree_name . "") '(name . ""))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree" "--mcp-config" "{}")))
+      ;; A boolean carries no empty string: the flag is held to its own type
+      ;; rather than read as a quiet no.
+      (should (string-match-p
+               "must be of type boolean"
+               (alist-get 'message
+                          (alist-get 'error
+                                     (claude-code-mcp-tests--call-tool
+                                      "sess" "spawn" '(worktree . ""))))))
       ;; Neither the model nor the effort is held to a set of values: an unknown
       ;; one reaches the CLI, whose error it is to report.
       (claude-code-mcp-tests--call-tool "sess" "spawn" '(effort . "turbo"))
