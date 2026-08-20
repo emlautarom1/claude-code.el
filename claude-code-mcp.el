@@ -319,7 +319,7 @@ An argument is required unless its spec carries a non-nil :optional flag."
 Reports `claude-code--mcp-protocol-version'."
   (list (cons 'protocolVersion claude-code--mcp-protocol-version)
         (cons 'capabilities
-              (list (cons 'tools (list (cons 'listChanged :json-false)))))
+              (list (cons 'tools (list (cons 'listChanged :false)))))
         (cons 'serverInfo
               (list (cons 'name "claude-code.el")
                     (cons 'version "0.1.0")))))
@@ -366,7 +366,7 @@ condemn: sent as false it is an answer, and only the call says so."
                    (enum (plist-get spec :enum))
                    (optional (plist-get spec :optional))
                    (value (cdr (assq (intern name) arguments)))
-                   (false (memq value '(:json-false :false))))
+                   (false (eq value :false)))
               (when (or false (eq value :null))
                 (setq value nil))
               (when (and optional (equal value ""))
@@ -406,7 +406,7 @@ that do not hold to the tool's schema; a tool that itself errors yields an
             (list (cons 'content
                         (vector (list (cons 'type "text")
                                       (cons 'text (format "%s" result)))))
-                  (cons 'isError :json-false)))
+                  (cons 'isError :false)))
         ((error quit)
          (list (cons 'content
                      (vector (list (cons 'type "text")
@@ -477,10 +477,8 @@ only for the parse."
        (process-contact (ws-process claude-code--mcp-server) :service)))
 
 (defun claude-code--mcp-serialize (envelope)
-  "Serialize response ENVELOPE alist to a JSON string for the wire.
-Uses `:json-false' for JSON false and `:null' for JSON null so envelope
-values round-trip to the shapes the MCP client expects."
-  (json-serialize envelope :false-object :json-false :null-object :null))
+  "Serialize response ENVELOPE alist to a JSON string for the wire."
+  (json-serialize envelope))
 
 (defun claude-code--mcp-send (process response)
   "Write RESPONSE alist to PROCESS as an HTTP 200 JSON reply and close it."

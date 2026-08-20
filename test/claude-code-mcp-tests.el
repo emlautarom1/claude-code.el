@@ -125,7 +125,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
     ;; `listChanged' is JSON false, not nil (wire-shape check).
     (should (eq (alist-get 'listChanged
                            (alist-get 'tools (alist-get 'capabilities result)))
-                :json-false)))
+                :false)))
   ;; A request carrying no version gets the same server version.
   (let ((result (alist-get 'result
                            (claude-code--mcp-handle-request
@@ -280,7 +280,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
                                  "tools/call" 2
                                  (list (cons 'name "cc-mcp-test-opt")
                                        (cons 'arguments nil))))))))
-      (should (eq (alist-get 'isError result) :json-false)))))
+      (should (eq (alist-get 'isError result) :false)))))
 
 (ert-deftest claude-code-mcp-test-args-hold-to-the-schema ()
   "A value contradicting the advertised schema is a -32602; the handler is not run.
@@ -343,14 +343,12 @@ able to hear no."
          :args (list (list :name "confirm" :type 'boolean
                            :description "Required."))
          :handler (lambda (confirm) (setq seen confirm) "ok"))
-        (dolist (false '(:json-false :false))
-          (setq seen 'unset)
-          (let ((result (alist-get 'result
-                                   (claude-code-mcp-tests--call-tool
-                                    "sess" "cc-mcp-test-confirm"
-                                    (cons 'confirm false)))))
-            (should (eq (alist-get 'isError result) :json-false))
-            (should (null seen))))
+        (let ((result (alist-get 'result
+                                 (claude-code-mcp-tests--call-tool
+                                  "sess" "cc-mcp-test-confirm"
+                                  '(confirm . :false)))))
+          (should (eq (alist-get 'isError result) :false))
+          (should (null seen)))
         ;; Omitted it is missing, and so is null: only false is an answer, so
         ;; a caller that sent nothing in particular is not read as a no.
         (dolist (arguments '(nil ((confirm . :null))))
@@ -381,7 +379,7 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
                         (list (cons 'name "cc-mcp-test-noargs")
                               (cons 'arguments :null))))))
         (should (eq (alist-get 'isError (alist-get 'result response))
-                    :json-false)))
+                    :false)))
       ;; A scalar or an array is not an arguments object.
       (dolist (arguments (list "code" 42 (vector 1 2)))
         (let ((error-object
@@ -427,11 +425,11 @@ the `eval' tests reach through `claude-code-mcp-tests--eval-answer'."
     (should (equal (alist-get 'type (aref content 0)) "text"))
     (should (equal (alist-get 'text (aref content 0)) "42"))
     ;; Success is JSON false, not nil (wire-shape check).
-    (should (eq (alist-get 'isError result) :json-false)))
+    (should (eq (alist-get 'isError result) :false)))
   ;; Empty code is nil, not a read error.
   (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval ""))))
     (should (equal (alist-get 'text (aref (alist-get 'content result) 0)) "nil"))
-    (should (eq (alist-get 'isError result) :json-false))))
+    (should (eq (alist-get 'isError result) :false))))
 
 (defvar claude-code-mcp-tests--x nil
   "Scratch special variable for the `eval' tool tests.")
@@ -443,7 +441,7 @@ the `eval' tests reach through `claude-code-mcp-tests--eval-answer'."
                   "(progn (setq claude-code-mcp-tests--x 5)
                           (* claude-code-mcp-tests--x
                              claude-code-mcp-tests--x))")))
-    (should (eq (car answer) :json-false))
+    (should (eq (car answer) :false))
     (should (equal (cdr answer) "25"))))
 
 (ert-deftest claude-code-mcp-test-eval-refuses-several-forms ()
@@ -493,7 +491,7 @@ unbalanced, so the caller needs the syntax error instead."
                   ;; Nothing but comments evaluates to nil, not a read error.
                   (";; just a comment" . "nil")))
     (let ((answer (claude-code-mcp-tests--eval-answer (car case))))
-      (should (eq (car answer) :json-false))
+      (should (eq (car answer) :false))
       (should (equal (cdr answer) (cdr case))))))
 
 (ert-deftest claude-code-mcp-test-eval-survives-a-buffer-switch ()
@@ -509,7 +507,7 @@ Nothing of that buffer may be read as source, and its point must not move."
                  (answer (claude-code-mcp-tests--eval-answer
                           (format "(progn (set-buffer %S) :submitted)"
                                   (buffer-name buffer)))))
-            (should (eq (car answer) :json-false))
+            (should (eq (car answer) :false))
             (should (equal (cdr answer) ":submitted"))
             (should (null claude-code-mcp-tests--x))
             (should (= (with-current-buffer buffer (point)) 1))))
@@ -552,7 +550,7 @@ Nothing of that buffer may be read as source, and its point must not move."
     (let ((result (alist-get 'result
                              (claude-code-mcp-tests--call-tool
                               "sess" "eval" (cons 'code "default-directory")))))
-      (should (eq (alist-get 'isError result) :json-false))
+      (should (eq (alist-get 'isError result) :false))
       (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
                      "\"/home/test/proj/\"")))))
 
@@ -580,7 +578,7 @@ and the id is what the caller has to find the session by afterwards."
       (let* ((response (claude-code-mcp-tests--call-tool "sess" "spawn"))
              (id (claude-code-mcp-tests--result-text response)))
         (should (eq (alist-get 'isError (alist-get 'result response))
-                    :json-false))
+                    :false))
         (should (string-match-p claude-code-tests--uuid-re id))
         (should (= (length execs) 1))
         ;; The instance was registered under that id, launched from the
@@ -619,12 +617,12 @@ and the id is what the caller has to find the session by afterwards."
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree=--ax-screen-reader" "--mcp-config" "{}")))
       ;; JSON false is normalized to nil, so no worktree is requested.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :json-false))
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :false))
       (should-not (member "--worktree" (nth 1 (car execs))))
       ;; A name given alongside a false flag still asks for the worktree: a
       ;; name is a request for one, and the flag carries nothing to weigh it
       ;; against -- false and omitted reach the handler alike.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :json-false)
+      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . :false)
                                         '(worktree_name . "named"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree=named" "--mcp-config" "{}")))
@@ -668,6 +666,15 @@ start an instance in an unrelated project."
                           (claude-code--mcp-serialize
                            (claude-code--mcp-error :null -32700 "Parse error")))))
 
+(ert-deftest claude-code-mcp-test-serialize-carries-a-parsed-false ()
+  "An `id' the parser produced serializes without translation on the way back."
+  (let* ((body (concat "{\"jsonrpc\":\"2.0\",\"id\":false,"
+                       "\"method\":\"initialize\"}"))
+         (response (claude-code--mcp-response-for-body "sess" body nil)))
+    (should (eq (alist-get 'id response) :false))
+    (should (string-match-p "\"id\":false"
+                            (claude-code--mcp-serialize response)))))
+
 ;;;; Tool registry
 
 (ert-deftest claude-code-mcp-test-make-tool ()
@@ -699,9 +706,8 @@ start an instance in an unrelated project."
 
 (ert-deftest claude-code-mcp-test-boolean-args ()
   "A `boolean' argument reaches its handler as a Lisp truth value.
-The parser renders JSON false as `:false' and null as `:null'; the
-serializer's `:json-false' is tolerated as a second spelling.  All are
-non-nil in Lisp, so each must reach the handler as nil."
+The parser renders JSON false as `:false' and null as `:null', both non-nil in
+Lisp, so each must reach the handler as nil."
   (let ((seen 'unset))
     (claude-code-mcp-tests--with-tools '("cc-mcp-test-bool")
       (claude-code-mcp-make-tool
@@ -716,7 +722,7 @@ non-nil in Lisp, so each must reach the handler as nil."
                                                       (claude-code-mcp-tests--tool-schema
                                                        "cc-mcp-test-bool"))))
                      "boolean"))
-      (dolist (case '((:json-false . nil) (:false . nil) (:null . nil) (t . t)))
+      (dolist (case '((:false . nil) (:null . nil) (t . t)))
         (setq seen 'unset)
         (claude-code-mcp-tests--isolated
           (claude-code--mcp-handle-request
@@ -900,8 +906,7 @@ tries to open a server-to-client SSE stream."
 Returns nil for a reply that carries no body (an empty 202)."
   (let ((body (claude-code-mcp-tests--raw-body raw)))
     (when (and body (not (string-empty-p body)))
-      (json-parse-string body :object-type 'alist
-                         :false-object :json-false :null-object :null))))
+      (json-parse-string body :object-type 'alist))))
 
 (defun claude-code-mcp-tests--rpc (port session-id request)
   "Send REQUEST alist to SESSION-ID on PORT; return the parsed response alist.
@@ -951,7 +956,7 @@ Returns nil for an empty (notification) reply that carries no body."
            (result (alist-get 'result resp)))
       (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
                      "42"))
-      (should (eq (alist-get 'isError result) :json-false)))
+      (should (eq (alist-get 'isError result) :false)))
     ;; A body declared longer than delivered reaches the handler truncated --
     ;; web-server frames by the blank line, not Content-Length -- and is
     ;; refused with -32700 on the wire.
@@ -1054,7 +1059,7 @@ ignored so a partially-created worktree is still cleaned up."
                                                             "default-directory"))))))))
                  (result (alist-get 'result resp))
                  (text (alist-get 'text (aref (alist-get 'content result) 0))))
-            (should (eq (alist-get 'isError result) :json-false))
+            (should (eq (alist-get 'isError result) :false))
             ;; `text' is `prin1-to-string' of the bound directory (quoted).
             (should (equal (read text) (file-name-as-directory cwd)))))
       (advice-remove 'claude-code--mcp-handle-request probe)
