@@ -63,5 +63,7 @@ view shows nothing and spawning looks broken. Strip those variables before
 spawning. The integration test does this via
 `claude-code-tests--with-top-level-env`; an ad-hoc `emacs --batch` harness needs
 `env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION …`. A normally launched Emacs
-never has these variables, so **production code deliberately does not touch the
-environment** — this is a test/debug concern only.
+never has these variables, so **production code deliberately leaves the nesting
+markers alone** — this is a test/debug concern only. The renderer variables are
+the only ones the spawn path touches at all; everything else is inherited from
+Emacs as-is.

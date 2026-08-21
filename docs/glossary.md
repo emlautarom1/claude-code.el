@@ -39,4 +39,6 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Session-id path token** — the spawn UUID as it appears in the MCP request path `/mcp/<uuid>`. It multiplexes sessions over the one shared server and keys the real-cwd lookup. It is **not** a security boundary (see the [security decision](architecture.md#decisions)).
 
+- **Inline renderer** / **fullscreen renderer** — Claude's two ways of drawing itself in a terminal, its `tui` setting's two values: the classic main-screen renderer (`"default"`) and the flicker-free alt-screen renderer with virtualized scrollback (`"fullscreen"`). Which one an instance gets is `claude-code-renderer`; see the [architecture notes](architecture.md#the-renderer).
+
 - **Attention notification** — the message an instance emits when it wants the user back. It is an *idle* notification: Claude sends one once a turn has ended or an answer is needed and the terminal has been left alone since, not at the turn's end. It travels as a terminal escape that Ghostel decodes, so the package learns about it without polling. What the package does with it is `claude-code-notify-function`; see the [architecture notes](architecture.md#attention-notifications).

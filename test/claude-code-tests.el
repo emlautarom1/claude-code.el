@@ -129,7 +129,10 @@ module is absent under test, so requiring it is a no-op."
        ,@body)))
 
 (defmacro claude-code-tests--recording-launch (execs &rest body)
-  "Run BODY with the launch path stubbed, pushing (BUFFER ARGS) onto EXECS.
+  "Run BODY with the launch path stubbed, pushing (BUFFER ARGS ENV) onto EXECS.
+ENV is what the instance would have inherited, modelling only the two things
+that decide it: the pre-spawn hook runs in the instance's buffer, over a
+`process-environment' sharing its tail with Emacs's own.
 Neither Ghostel's native module nor the MCP server is wanted under test, so
 requiring either is a no-op and the MCP CLI arguments are a fixed stand-in.
 Every buffer a launch hosted is killed afterwards, however BODY exits."
@@ -138,7 +141,15 @@ Every buffer a launch hosted is killed afterwards, however BODY exits."
      (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
                 (lambda (_id) '("--mcp-config" "{}")))
                ((symbol-function 'ghostel-exec)
-                (lambda (buffer _program args) (push (list buffer args) ,execs))))
+                (lambda (buffer _program args)
+                  (push (list buffer args
+                              (with-current-buffer buffer
+                                (let ((process-environment
+                                       (append '("INSIDE_EMACS=ghostel")
+                                               process-environment)))
+                                  (run-hooks 'ghostel-pre-spawn-hook)
+                                  process-environment)))
+                        ,execs))))
        (unwind-protect (progn ,@body)
          (dolist (call ,execs)
            (when (buffer-live-p (nth 0 call)) (kill-buffer (nth 0 call))))))))
@@ -864,6 +875,78 @@ instance, and install title tracking; only the CLI argument list differs."
                              "Claude Code" "Claude is waiting for your input"))))
               (should (equal (nreverse routed)
                              (list "given-id" spawned-id))))))))))
+
+(ert-deftest claude-code-test-launch-forces-the-renderer ()
+  "A launch hands the instance the renderer `claude-code-renderer' names.
+ALT-SCREEN abbreviates CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN.  Both variables
+are pinned up front so the test does not read whatever the developer exports."
+  (claude-code-tests--with-registry
+    (let* ((alt-screen "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+           (execs '())
+           (process-environment
+            (append (list (concat alt-screen "=0") "CLAUDE_CODE_NO_FLICKER=0")
+                    (copy-sequence process-environment))))
+      (claude-code-tests--recording-launch execs
+        (cl-flet ((child-env (name)
+                    ;; What the instance of the latest launch inherited.
+                    (let ((process-environment (nth 2 (car execs))))
+                      (getenv name))))
+          (should (eq claude-code-renderer 'inline))
+          (claude-code-spawn "/r")
+          (should (equal (child-env alt-screen) "1"))
+          ;; Rewritten for the child, not in Emacs's own list.
+          (should (equal (getenv alt-screen) "0"))
+          ;; The hook is retired with the launch that installed it, or it
+          ;; would force the renderer on every later Ghostel terminal.
+          (should-not (bound-and-true-p ghostel-pre-spawn-hook))
+          ;; `fullscreen' has to drop the inherited entry, not just add
+          ;; NO_FLICKER: the CLI reads it first.
+          (let ((process-environment
+                 (cons (concat alt-screen "=1")
+                       (copy-sequence process-environment)))
+                (claude-code-renderer 'fullscreen))
+            (claude-code-spawn "/r")
+            (should (equal (child-env "CLAUDE_CODE_NO_FLICKER") "1"))
+            (should-not (child-env alt-screen))
+            ;; Dropped for the child, not out of Emacs's own list.
+            (should (equal (getenv alt-screen) "1")))
+          ;; A nil renderer sets nothing.
+          (let ((claude-code-renderer nil))
+            (claude-code-spawn "/r")
+            (should (equal (child-env alt-screen) "0"))
+            (should (equal (child-env "CLAUDE_CODE_NO_FLICKER") "0")))
+          ;; Delivered from a buffer that binds `process-environment'
+          ;; locally, where a `let' would not reach the instance's buffer.
+          (with-temp-buffer
+            (setq-local process-environment
+                        (copy-sequence process-environment))
+            (claude-code-spawn "/r")
+            (should (equal (child-env alt-screen) "1")))
+          ;; And past a buffer-local `ghostel-pre-spawn-hook', which a `let'
+          ;; on the hook would have bound instead of the default value.
+          (with-temp-buffer
+            (add-hook 'ghostel-pre-spawn-hook #'ignore nil t)
+            (claude-code-spawn "/r")
+            (should (equal (child-env alt-screen) "1"))))))))
+
+(ert-deftest claude-code-test-launch-rejects-an-unknown-renderer ()
+  "A `claude-code-renderer' naming no renderer stops the launch building anything.
+Its `defcustom' type only guards `setopt' and Customize, so a `setq' still
+reaches here, and neither the MCP server nor the buffer would be registered for
+shutdown."
+  (claude-code-tests--with-registry
+    (let ((execs '())
+          (mcp-calls 0)
+          (buffers (buffer-list)))
+      (claude-code-tests--recording-launch execs
+        (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
+                   (lambda (_id) (cl-incf mcp-calls) '())))
+          (let ((claude-code-renderer 'tui))
+            (should-error (claude-code-spawn "/r") :type 'user-error)))
+        (should (null execs))
+        (should (zerop mcp-calls))
+        (should-not (seq-difference (buffer-list) buffers))
+        (should-not (bound-and-true-p ghostel-pre-spawn-hook))))))
 
 (ert-deftest claude-code-test-resume-returns-existing ()
   "Resuming an already-managed live session returns it and spawns nothing."
@@ -2549,6 +2632,16 @@ The name is given as several words to show that it reaches the CLI whole."
                       #'claude-code--ghostel-buffer-name))
           (setq pid (buffer-local-value 'ghostel--pid buffer))
           (should (claude-code--pid-live-p pid))
+          ;; Ghostel ran the pre-spawn hook: the renderer entry is in
+          ;; the spawned process's own environment.
+          (when (file-readable-p (format "/proc/%d/environ" pid))
+            (should (member "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1"
+                            (split-string
+                             (with-temp-buffer
+                               (insert-file-contents-literally
+                                (format "/proc/%d/environ" pid))
+                               (buffer-string))
+                             "\0" t))))
           ;; A live status only appears once the child writes its sessions file,
           ;; which only happens for a real (non-nested) session.
           (should (member

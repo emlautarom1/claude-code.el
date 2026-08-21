@@ -576,23 +576,68 @@ switch would wipe the buffer-local flag."
       (user-error "Session %s has no live buffer" (claude-code-session-id session)))
     buffer))
 
+(defcustom claude-code-renderer 'inline
+  "Renderer to launch Claude instances on.
+`inline' is the classic main-screen renderer, which leaves the scrollback and
+the mouse to Emacs; `fullscreen' is the flicker-free alt-screen renderer with
+virtualized scrollback.  Either is forced over Claude's own `tui' setting; nil
+defers to it."
+  :type '(choice (const :tag "Inline -- classic main-screen renderer" inline)
+                 (const :tag "Fullscreen -- alt-screen, virtualized scrollback"
+                        fullscreen)
+                 (const :tag "Default -- Claude's own `tui' setting" nil)))
+
+(defun claude-code--renderer-env ()
+  "Return the environment `claude-code-renderer' asks for.
+A list of (NAME . VALUE) cells, a nil VALUE meaning unset and no cells meaning
+leave the environment alone.  Signals a `user-error' for a value naming no
+valid renderer option."
+  (pcase claude-code-renderer
+    ('nil '())
+    ('inline '(("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" . "1")))
+    ('fullscreen '(("CLAUDE_CODE_NO_FLICKER" . "1")
+                   ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")))
+    (other (user-error "Unknown `claude-code-renderer': %S" other))))
+
+(defun claude-code--apply-renderer-env (cells)
+  "Set the (NAME . VALUE) CELLS in the environment Ghostel will spawn into.
+A `ghostel-pre-spawn-hook' function: the `setq' below is safe only because
+Ghostel binds `process-environment' around the hook."
+  ;; Copied first because `setenv' would otherwise rewrite, in place, the
+  ;; entries that binding shares with Emacs's own environment.
+  (setq process-environment (copy-sequence process-environment))
+  (dolist (cell cells)
+    (setenv (car cell) (cdr cell))))
+
 (defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
 origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
-rather than start it; the `:worktree' request is also recorded in the registry."
+rather than start it; the `:worktree' request is also recorded in the registry.
+The instance is launched on `claude-code-renderer'."
   (require 'ghostel)
   (require 'claude-code-mcp)
-  (let* ((root (claude-code--normalize-root project-root))
+  (let* (;; Resolved first so a bad value aborts before the MCP server is
+         ;; started or a buffer created.
+         (renderer-env (claude-code--renderer-env))
+         (root (claude-code--normalize-root project-root))
          (args (apply #'claude-code--build-args
                       :session-id id
                       :mcp-args (claude-code--mcp-cli-args id)
                       opts))
          (default-directory (file-name-as-directory root))
          (buffer (generate-new-buffer
-                  (funcall claude-code-buffer-name-function root))))
-    (ghostel-exec buffer claude-code-cli args)
+                  (funcall claude-code-buffer-name-function root)))
+         ;; `add-hook' rather than a `let': it writes the hook's default value,
+         ;; which is the one Ghostel reads in the instance's own buffer.
+         (renderer-hook
+          (lambda () (claude-code--apply-renderer-env renderer-env))))
+    (when renderer-env
+      (add-hook 'ghostel-pre-spawn-hook renderer-hook))
+    (unwind-protect
+        (ghostel-exec buffer claude-code-cli args)
+      (remove-hook 'ghostel-pre-spawn-hook renderer-hook))
     (claude-code--install-buffer-name-tracking buffer)
     (claude-code--install-notifications id buffer)
     (claude-code--register id buffer root (plist-get opts :worktree))
