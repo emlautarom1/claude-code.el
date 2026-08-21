@@ -1815,6 +1815,38 @@ group, so `d' has no target there and `k' does."
       (should (member "dead" claude-code--collapsed))
       (should (equal (point) header)))))
 
+(ert-deftest claude-code-test-view-line-motion-with-n-and-p ()
+  "`n' and `p' are Emacs's own line motion, and `c' opens the create menu.
+The view binds neither, so motion is `tabulated-list-mode-map's `next-line' and
+`previous-line': a line at a time, group headers included."
+  (claude-code-tests--in-fixture-view '(1002)
+    (should (eq (keymap-lookup claude-code-sessions-mode-map "n") #'next-line))
+    (should (eq (keymap-lookup claude-code-sessions-mode-map "p")
+                #'previous-line))
+    (should (eq (keymap-lookup claude-code-sessions-mode-map "c")
+                #'claude-code-spawn-menu))
+    (setq claude-code--collapsed nil)
+    (claude-code-sessions-refresh)
+    (claude-code--goto-group "dead")
+    (let ((header (point))
+          ;; Batch has no window to move by visual lines in.
+          (line-move-visual nil)
+          (down (keymap-lookup claude-code-sessions-mode-map "n"))
+          (up (keymap-lookup claude-code-sessions-mode-map "p")))
+      ;; Down from a header onto its first row, and on to the next row.
+      (call-interactively down)
+      (let ((first (tabulated-list-get-id)))
+        (should first)
+        (call-interactively down)
+        (should (tabulated-list-get-id))
+        (should-not (equal (tabulated-list-get-id) first))
+        (call-interactively up)
+        (should (equal (tabulated-list-get-id) first)))
+      ;; Up from the first row lands on the header, which carries no session.
+      (call-interactively up)
+      (should (equal (point) header))
+      (should-not (tabulated-list-get-id)))))
+
 (ert-deftest claude-code-test-view-refresh-keeps-the-row-at-point ()
   "`g' leaves point on its row, which is what `claude-code--redraw' asks for."
   (claude-code-tests--in-fixture-view '(1002)
@@ -2078,9 +2110,9 @@ is stubbed here."
   (claude-code-tests--driving-spawn-menu spawns
     (with-temp-buffer
       (claude-code-spawn-menu)
-      ;; `-n' reads a name, `-w' toggles the worktree switch, `n' spawns, and
-      ;; RET answers the initial-prompt read with the empty string.
-      (execute-kbd-macro (kbd "- n r e v i e w RET - w n RET")))
+      ;; `-n' reads a name, `-w' toggles the worktree switch, `c' creates the
+      ;; session, and RET answers the initial-prompt read with the empty string.
+      (execute-kbd-macro (kbd "- n r e v i e w RET - w c RET")))
     (should (equal (car spawns)
                    (list (claude-code--normalize-root "/home/test/proj")
                          :prompt nil :name "review" :worktree t
@@ -2098,10 +2130,10 @@ model here -- carries no name into them."
       ;; `transient-set' is called rather than keyed: which key runs it is
       ;; transient's business, and the menu stays up either way.
       (call-interactively #'transient-set)
-      (execute-kbd-macro (kbd "n RET")))
+      (execute-kbd-macro (kbd "c RET")))
     (with-temp-buffer
       (claude-code-spawn-menu)
-      (execute-kbd-macro (kbd "n RET")))
+      (execute-kbd-macro (kbd "c RET")))
     (should (equal (mapcar (lambda (spawn)
                              (list (plist-get (cdr spawn) :name)
                                    (plist-get (cdr spawn) :model)))

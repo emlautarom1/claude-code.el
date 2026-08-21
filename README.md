@@ -10,8 +10,8 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
 - **External sessions** — a `claude` running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
-- **Actions** — focus an alive instance, resume a dead session, spawn a new one (with an initial prompt, a display name, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
-- **`transient` spawn menu** (`M-x claude-code-spawn-menu` from any buffer, `n` in the view) for the spawn flags: name, worktree, model, effort.
+- **Actions** — focus an alive instance, resume a dead session, create a new one (with an initial prompt, a display name, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
+- **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
 - **Native scrollback** — instances run on Claude's inline renderer whatever your `tui` setting says, so the conversation lands in the Emacs buffer and the mouse stays Emacs's. `claude-code-renderer` can ask for Claude's alt-screen renderer instead, or `nil` to leave your setting alone; see [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance left waiting raises a desktop notification named after the session; clicking it brings Emacs forward, switching workspace if needed, and pops that instance into view. Claude raises these on an idle timer — about a minute after a turn ends, [tunable in `~/.claude.json`](docs/architecture.md#attention-notifications). Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
@@ -43,14 +43,15 @@ For `use-package` users:
 
 ## Usage
 
-Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to spawn an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. Keys in the sessions view:
+Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to create an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. Keys in the sessions view:
 
 | Key       | Action                                                       |
 | --------- | ------------------------------------------------------------ |
 | `RET`     | focus an alive session / resume a dead one / toggle a group  |
 | `o`       | like `RET`, but visit the session in another window          |
 | `TAB`     | collapse or expand the group at point                        |
-| `n`       | open the spawn menu (name/worktree/model/effort; `n` spawns) |
+| `c`       | open the create menu (name/worktree/model/effort)            |
+| `n` / `p` | move down / up a line (rows and group headers alike)         |
 | `k`       | kill the marked instances, or the one at point               |
 | `d`       | delete the marked dead sessions, or the one at point         |
 | `r`       | rename the session at point                                  |

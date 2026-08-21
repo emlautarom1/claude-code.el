@@ -13,7 +13,7 @@
 ;; Orchestrate and manage Claude Code CLI sessions from Emacs, scoped to the
 ;; current `project.el' project.  Running instances are hosted in `ghostel'
 ;; terminal buffers.  A "claude sessions" view lists every session of a project
-;; -- alive, external or dead -- and offers visit, spawn, resume, kill, delete,
+;; -- alive, external or dead -- and offers visit, create, resume, kill, delete,
 ;; rename, send-text and interrupt actions.
 ;;
 ;; The package is split into a programmatic model (plain functions operating on
@@ -1286,7 +1286,7 @@ however the batch ends."
   "RET" #'claude-code-sessions-visit
   "o"   #'claude-code-sessions-visit-other-window
   "TAB" #'claude-code-sessions-toggle-group
-  "n"   #'claude-code-spawn-menu
+  "c"   #'claude-code-spawn-menu
   "k"   #'claude-code-sessions-kill
   "d"   #'claude-code-sessions-delete
   "r"   #'claude-code-sessions-rename
@@ -1336,10 +1336,9 @@ belongs to, prompting for a project when it belongs to none."
       (claude-code--normalize-root (project-root (project-current t)))))
 
 (defun claude-code--spawn-session (root &optional args)
-  "Spawn a session for ROOT with the spawn options in ARGS and display it.
-ARGS comes from a live `claude-code-spawn-menu'; the
-`interactive' form reads ROOT from that menu's scope, falling back to
-`claude-code--project-root'."
+  "Create a session for ROOT with the options in ARGS and display it.
+ARGS comes from a live `claude-code-spawn-menu'; the `interactive' form reads
+ROOT from that menu's scope, falling back to `claude-code--project-root'."
   (interactive (if transient-current-command
                    (list (or (transient-scope) (claude-code--project-root))
                          (transient-args transient-current-command))
@@ -1360,7 +1359,7 @@ ARGS comes from a live `claude-code-spawn-menu'; the
 
 ;;;###autoload
 (transient-define-prefix claude-code-spawn-menu ()
-  "Spawn a new session for a project, with options."
+  "Create a new session for a project, with options."
   ["Arguments"
    ;; A name belongs to one session, so it is `:unsavable': that keeps it out
    ;; of the value `transient-set' would pin on every later spawn.
@@ -1368,8 +1367,8 @@ ARGS comes from a live `claude-code-spawn-menu'; the
    ("-w" "Worktree" "--worktree")
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
    ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))]
-  ["Spawn"
-   ("n" "New session" claude-code--spawn-session)]
+  ["Create"
+   ("c" "New session" claude-code--spawn-session)]
   (interactive)
   (transient-setup 'claude-code-spawn-menu nil nil
                    :scope (claude-code--project-root)))
