@@ -55,19 +55,19 @@ A subtree needs to know who parents whom, and the two ways of learning that diff
 
 ## The renderer
 
-`claude-code-renderer` picks which of Claude's two renderers an instance gets, defaulting to `inline` — the one that leaves the scrollback and the mouse to Emacs. A value naming neither renderer is a `user-error`, raised ahead of the MCP server and the instance buffer, since neither would be registered for shutdown.
+`claude-code-renderer` puts an instance on the [inline or the fullscreen renderer](glossary.md). It defaults to `nil`, drawing the instance the way a `claude` in any other terminal would be: the `tui` setting if there is one, and otherwise whatever the installed CLI defaults to. Any other value is a `user-error`, raised ahead of the MCP server and the instance buffer, since neither would be registered for shutdown.
 
-There is no CLI flag. The choice is the `tui` setting, which the CLI reads only *after* two environment variables, so either value here beats a user, project, local, `--settings` or **managed-policy** setting alike; `nil` opts out and leaves that resolution alone.
+There is no CLI flag. The choice is the `tui` setting, which the CLI reads only *after* two environment variables, so either non-nil value here beats a user, project, local, `--settings` or **managed-policy** setting alike.
 
 | `claude-code-renderer` | `tui`          | Environment                                                                  |
 |------------------------|----------------|------------------------------------------------------------------------------|
-| `inline` (default)     | `"default"`    | `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`                                     |
+| `nil` (default)        | whichever      | untouched                                                                    |
+| `inline`               | `"default"`    | `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`                                     |
 | `fullscreen`           | `"fullscreen"` | `CLAUDE_CODE_NO_FLICKER=1`, `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` **unset** |
-| `nil`                  | whichever      | untouched                                                                    |
 
 The unset is not optional: `DISABLE_ALTERNATE_SCREEN` is read first and wins outright, so an inherited one silently overrides `fullscreen`.
 
-`claude-code--apply-renderer-env` sets them from `ghostel-pre-spawn-hook`, which Ghostel runs **in the instance's own buffer** over the environment the child will inherit. Everything simpler is defeated by a buffer-local binding in the *calling* buffer, which is where a launch starts: a `let` on `process-environment` is invisible in the instance's buffer once `envrc` or `buffer-env` has made it local — as they do in every project buffer — and `ghostel-environment`, Ghostel's own option for static entries (and one that expresses the unset natively, as a bare `KEY`), is `setq-local`'d there from `.dir-locals.el` by `ghostel-mode` itself. `add-hook` avoids the trap one level up: it writes the hook's *default* value, the one `run-hooks` sees in a fresh buffer.
+`claude-code--apply-renderer-env` sets them from `ghostel-pre-spawn-hook`, which Ghostel runs **in the instance's own buffer** over the environment the child will inherit. Everything simpler is defeated by a buffer-local binding in the *calling* buffer, which is where a launch starts: a `let` on `process-environment` is invisible in the instance's buffer once `envrc` or `buffer-env` has made it local — as they do in every project buffer — and `ghostel-environment`, Ghostel's own option for static entries (and one that expresses the unset natively, as a bare `KEY`), is `setq-local`'d there from `.dir-locals.el` by `ghostel-mode` itself. The launch therefore writes the hook's *default* value itself, the one `run-hooks` sees in a fresh buffer. Not `add-hook`, which has the same trap: it redirects to the calling buffer's local value wherever one exists without the `t` marker, so a `setq-local` there would swallow the renderer silently.
 
 `/tui` inside a running instance relaunches it with both variables dropped, so switching by hand still works.
 
@@ -133,5 +133,5 @@ All JSON crosses the wire through the C built-ins `json-serialize`/`json-parse-s
 4. **Worktree sessions appear under their parent project**, with the worktree's encoded directory token in the *Worktree* column.
 5. **Native Claude vocabulary** (`busy`/`idle`/`waiting`) is surfaced verbatim.
 6. **Storage internals are quarantined** in the storage-adapter section.
-7. **The renderer is Emacs's to choose**, over the user's `tui` setting, and defaults to inline so the scrollback stays in the Emacs buffer (see [the renderer](#the-renderer)).
+7. **Emacs forces no renderer**; `claude-code-renderer` is the override over the user's `tui` setting (see [the renderer](#the-renderer)).
 8. **The MCP server trusts the local machine.** Stated honestly: the default `claude-code-mcp-auto-approve` pre-authorizes **every registered tool**, so the spawned `claude` invokes them without a prompt — and since the catalog holds `eval`, that means the loopback server executes **arbitrary Elisp in the user's live Emacs** (buffer contents, in-memory secrets, the full Emacs API) driven by whatever process holds the URL. `spawn` adds no authority on top of that — `eval` can call `claude-code-spawn` itself — but it does make instances **recursive**: a spawned instance is pre-authorized to spawn its own, and nothing caps the fan-out, so a prompt that delegates freely costs real processes and real tokens. The `/mcp/<uuid>` path is only a multiplexing key, **not** a security boundary: the full URL (uuid included) sits on `claude`'s command line, visible to any same-user process via `ps`/`/proc`. So the real boundary is the loopback bind plus single-user trust — acceptable only on a machine where every local user is trusted. Turn it off with `claude-code-mcp-enabled nil`, or drop auto-approval with `claude-code-mcp-auto-approve nil` (Claude then prompts per call).

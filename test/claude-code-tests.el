@@ -10,9 +10,9 @@
 (require 'cl-lib)
 (require 'claude-code)
 
-;; Declared so a `let' on it binds dynamically in tests that run without
-;; Ghostel loaded.
+;; Stand-ins for Ghostel's own definitions, since tests run without it loaded.
 (defvar ghostel-kill-buffer-on-exit)
+(defvar ghostel-pre-spawn-hook nil)
 
 (defvar claude-code-tests--fixtures
   (expand-file-name
@@ -153,6 +153,32 @@ Every buffer a launch hosted is killed afterwards, however BODY exits."
        (unwind-protect (progn ,@body)
          (dolist (call ,execs)
            (when (buffer-live-p (nth 0 call)) (kill-buffer (nth 0 call))))))))
+
+(defconst claude-code-tests--alt-screen "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
+  "The renderer variable the CLI reads before the other and before `tui'.")
+
+(defconst claude-code-tests--no-flicker "CLAUDE_CODE_NO_FLICKER"
+  "The renderer variable asking for the alt-screen renderer.")
+
+(defmacro claude-code-tests--with-renderer-launch (child-env &rest body)
+  "Run BODY over a stubbed launch path, both renderer variables pinned to \"0\".
+CHILD-ENV names a function of one variable name, bound over BODY, returning
+what the instance of the latest launch inherited; \"0\" therefore reads as an
+inheritance the launch left alone.  Pinning them keeps the test off whatever
+the developer exports."
+  (declare (indent 1))
+  (let ((execs (gensym "execs")))
+    `(claude-code-tests--with-registry
+       (let ((,execs '())
+             (process-environment
+              (append (list (concat claude-code-tests--alt-screen "=0")
+                            (concat claude-code-tests--no-flicker "=0"))
+                      (copy-sequence process-environment))))
+         (claude-code-tests--recording-launch ,execs
+           (cl-flet ((,child-env (name)
+                       (let ((process-environment (nth 2 (car ,execs))))
+                         (getenv name))))
+             ,@body))))))
 
 ;;;; Storage adapter
 
@@ -876,58 +902,70 @@ instance, and install title tracking; only the CLI argument list differs."
               (should (equal (nreverse routed)
                              (list "given-id" spawned-id))))))))))
 
-(ert-deftest claude-code-test-launch-forces-the-renderer ()
-  "A launch hands the instance the renderer `claude-code-renderer' names.
-ALT-SCREEN abbreviates CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN.  Both variables
-are pinned up front so the test does not read whatever the developer exports."
-  (claude-code-tests--with-registry
-    (let* ((alt-screen "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
-           (execs '())
-           (process-environment
-            (append (list (concat alt-screen "=0") "CLAUDE_CODE_NO_FLICKER=0")
-                    (copy-sequence process-environment))))
-      (claude-code-tests--recording-launch execs
-        (cl-flet ((child-env (name)
-                    ;; What the instance of the latest launch inherited.
-                    (let ((process-environment (nth 2 (car execs))))
-                      (getenv name))))
-          (should (eq claude-code-renderer 'inline))
+(ert-deftest claude-code-test-launch-leaves-the-renderer-to-claude ()
+  "A launch naming no renderer touches neither renderer variable.
+A `ghostel-pre-spawn-hook' the user put there themselves also comes through
+the launch as they left it."
+  (claude-code-tests--with-renderer-launch child-env
+    (should (null (default-value 'claude-code-renderer)))
+    (unwind-protect
+        (progn
+          (add-hook 'ghostel-pre-spawn-hook #'ignore)
           (claude-code-spawn "/r")
-          (should (equal (child-env alt-screen) "1"))
-          ;; Rewritten for the child, not in Emacs's own list.
-          (should (equal (getenv alt-screen) "0"))
-          ;; The hook is retired with the launch that installed it, or it
-          ;; would force the renderer on every later Ghostel terminal.
-          (should-not (bound-and-true-p ghostel-pre-spawn-hook))
-          ;; `fullscreen' has to drop the inherited entry, not just add
-          ;; NO_FLICKER: the CLI reads it first.
-          (let ((process-environment
-                 (cons (concat alt-screen "=1")
-                       (copy-sequence process-environment)))
-                (claude-code-renderer 'fullscreen))
-            (claude-code-spawn "/r")
-            (should (equal (child-env "CLAUDE_CODE_NO_FLICKER") "1"))
-            (should-not (child-env alt-screen))
-            ;; Dropped for the child, not out of Emacs's own list.
-            (should (equal (getenv alt-screen) "1")))
-          ;; A nil renderer sets nothing.
-          (let ((claude-code-renderer nil))
-            (claude-code-spawn "/r")
-            (should (equal (child-env alt-screen) "0"))
-            (should (equal (child-env "CLAUDE_CODE_NO_FLICKER") "0")))
-          ;; Delivered from a buffer that binds `process-environment'
-          ;; locally, where a `let' would not reach the instance's buffer.
-          (with-temp-buffer
-            (setq-local process-environment
-                        (copy-sequence process-environment))
-            (claude-code-spawn "/r")
-            (should (equal (child-env alt-screen) "1")))
-          ;; And past a buffer-local `ghostel-pre-spawn-hook', which a `let'
-          ;; on the hook would have bound instead of the default value.
-          (with-temp-buffer
-            (add-hook 'ghostel-pre-spawn-hook #'ignore nil t)
-            (claude-code-spawn "/r")
-            (should (equal (child-env alt-screen) "1"))))))))
+          (should (equal (default-value 'ghostel-pre-spawn-hook) '(ignore))))
+      (remove-hook 'ghostel-pre-spawn-hook #'ignore))
+    (should (equal (child-env claude-code-tests--alt-screen) "0"))
+    (should (equal (child-env claude-code-tests--no-flicker) "0"))))
+
+(ert-deftest claude-code-test-launch-forces-the-inline-renderer ()
+  "`inline' hands the instance CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN.
+Emacs's own environment keeps the value it had, and the hook that delivered
+the new one is retired with the launch that installed it, or it would force
+the renderer on every later Ghostel terminal."
+  (claude-code-tests--with-renderer-launch child-env
+    (let ((claude-code-renderer 'inline))
+      (claude-code-spawn "/r")
+      (should (equal (child-env claude-code-tests--alt-screen) "1"))
+      (should (equal (getenv claude-code-tests--alt-screen) "0"))
+      (should-not (default-value 'ghostel-pre-spawn-hook)))))
+
+(ert-deftest claude-code-test-launch-forces-the-fullscreen-renderer ()
+  "`fullscreen' adds CLAUDE_CODE_NO_FLICKER and drops the inherited ALT-SCREEN.
+ALT-SCREEN abbreviates CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN, which the CLI
+reads first: an inherited one would override `fullscreen' outright, so adding
+NO_FLICKER is not enough.  It is dropped for the child, not out of Emacs's own
+list."
+  (claude-code-tests--with-renderer-launch child-env
+    (let ((process-environment
+           (cons (concat claude-code-tests--alt-screen "=1")
+                 (copy-sequence process-environment)))
+          (claude-code-renderer 'fullscreen))
+      (claude-code-spawn "/r")
+      (should (equal (child-env claude-code-tests--no-flicker) "1"))
+      (should-not (child-env claude-code-tests--alt-screen))
+      (should (equal (getenv claude-code-tests--alt-screen) "1"))
+      (should-not (default-value 'ghostel-pre-spawn-hook)))))
+
+(ert-deftest claude-code-test-launch-renderer-outlives-buffer-locals ()
+  "The renderer reaches the instance from a calling buffer holding either local.
+A `let' on `process-environment' is invisible in the instance's buffer once
+`envrc' or `buffer-env' has made it local, as they do in every project buffer.
+`add-hook' has the matching trap: it writes the calling buffer's local value
+of `ghostel-pre-spawn-hook' when one exists without the `t' marker, where
+`run-hooks' in the instance's fresh buffer would never see it."
+  (claude-code-tests--with-renderer-launch child-env
+    (let ((claude-code-renderer 'inline))
+      (with-temp-buffer
+        (setq-local process-environment (copy-sequence process-environment))
+        (claude-code-spawn "/r")
+        (should (equal (child-env claude-code-tests--alt-screen) "1")))
+      (dolist (local (list (list #'ignore) (list #'ignore t)))
+        (with-temp-buffer
+          (setq-local ghostel-pre-spawn-hook local)
+          (claude-code-spawn "/r")
+          (should (equal (child-env claude-code-tests--alt-screen) "1"))
+          ;; Delivered through the default value, leaving the local alone.
+          (should (equal ghostel-pre-spawn-hook local)))))))
 
 (ert-deftest claude-code-test-launch-rejects-an-unknown-renderer ()
   "A `claude-code-renderer' naming no renderer stops the launch building anything.
@@ -2653,9 +2691,10 @@ The name is given as several words to show that it reaches the CLI whole."
          buffer id pid mcp-port)
     (unwind-protect
         (claude-code-tests--with-top-level-env
-          (let ((instance (claude-code-spawn
-                           root :name name
-                           :prompt "Respond with the single word: pong")))
+          (let* ((claude-code-renderer 'inline)
+                 (instance (claude-code-spawn
+                            root :name name
+                            :prompt "Respond with the single word: pong")))
             (setq id (car instance))
             (setq buffer (cdr instance)))
           (should (string-match-p claude-code-tests--uuid-re id))
@@ -2664,8 +2703,8 @@ The name is given as several words to show that it reaches the CLI whole."
                       #'claude-code--ghostel-buffer-name))
           (setq pid (buffer-local-value 'ghostel--pid buffer))
           (should (claude-code--pid-live-p pid))
-          ;; Ghostel ran the pre-spawn hook: the renderer entry is in
-          ;; the spawned process's own environment.
+          ;; Ghostel ran the pre-spawn hook: the entry the `inline' renderer
+          ;; asks for is in the spawned process's own environment.
           (when (file-readable-p (format "/proc/%d/environ" pid))
             (should (member "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1"
                             (split-string

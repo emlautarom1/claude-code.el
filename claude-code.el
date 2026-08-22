@@ -576,16 +576,15 @@ switch would wipe the buffer-local flag."
       (user-error "Session %s has no live buffer" (claude-code-session-id session)))
     buffer))
 
-(defcustom claude-code-renderer 'inline
-  "Renderer to launch Claude instances on.
+(defcustom claude-code-renderer nil
+  "Renderer to force Claude instances onto, or nil to leave the choice to Claude.
 `inline' is the classic main-screen renderer, which leaves the scrollback and
 the mouse to Emacs; `fullscreen' is the flicker-free alt-screen renderer with
-virtualized scrollback.  Either is forced over Claude's own `tui' setting; nil
-defers to it."
-  :type '(choice (const :tag "Inline -- classic main-screen renderer" inline)
+virtualized scrollback.  Either is forced over Claude's own `tui' setting."
+  :type '(choice (const :tag "Default -- Claude's own `tui' setting" nil)
+                 (const :tag "Inline -- classic main-screen renderer" inline)
                  (const :tag "Fullscreen -- alt-screen, virtualized scrollback"
-                        fullscreen)
-                 (const :tag "Default -- Claude's own `tui' setting" nil)))
+                        fullscreen)))
 
 (defun claude-code--renderer-env ()
   "Return the environment `claude-code-renderer' asks for.
@@ -615,7 +614,7 @@ PROJECT-ROOT is the directory it is launched from and recorded as the instance's
 origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
 rather than start it; the `:worktree' request is also recorded in the registry.
-The instance is launched on `claude-code-renderer'."
+The instance is launched on `claude-code-renderer' when it names one."
   (require 'ghostel)
   (require 'claude-code-mcp)
   (let* (;; Resolved first so a bad value aborts before the MCP server is
@@ -629,15 +628,19 @@ The instance is launched on `claude-code-renderer'."
          (default-directory (file-name-as-directory root))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
-         ;; `add-hook' rather than a `let': it writes the hook's default value,
-         ;; which is the one Ghostel reads in the instance's own buffer.
          (renderer-hook
           (lambda () (claude-code--apply-renderer-env renderer-env))))
+    ;; The default value is the one Ghostel reads in the instance's own buffer.
     (when renderer-env
-      (add-hook 'ghostel-pre-spawn-hook renderer-hook))
+      (set-default 'ghostel-pre-spawn-hook
+                   (cons renderer-hook
+                         (default-value 'ghostel-pre-spawn-hook))))
     (unwind-protect
         (ghostel-exec buffer claude-code-cli args)
-      (remove-hook 'ghostel-pre-spawn-hook renderer-hook))
+      (when renderer-env
+        (set-default 'ghostel-pre-spawn-hook
+                     (delq renderer-hook
+                           (default-value 'ghostel-pre-spawn-hook)))))
     (claude-code--install-buffer-name-tracking buffer)
     (claude-code--install-notifications id buffer)
     (claude-code--register id buffer root (plist-get opts :worktree))
