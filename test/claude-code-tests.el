@@ -1236,53 +1236,64 @@ it back from whatever buffer happens to be current."
                  "Claude Code" "Claude is waiting for your input"))
       (should (equal seen '(("id-1" "Claude is waiting for your input")))))))
 
+(ert-deftest claude-code-test-frame-focused-p ()
+  "Focus is a `t' focus state on a visible frame, and nothing else."
+  (let ((visible (list (cons 'f t)))
+        (state (list (cons 'f t))))
+    (cl-letf (((symbol-function 'frame-visible-p)
+               (lambda (frame) (alist-get frame visible)))
+              ((symbol-function 'frame-focus-state)
+               (lambda (&optional frame) (alist-get frame state))))
+      (should (claude-code--frame-focused-p 'f))
+      ;; A platform that cannot tell is not focus.
+      (setf (alist-get 'f state) 'unknown)
+      (should-not (claude-code--frame-focused-p 'f))
+      (setf (alist-get 'f state) nil)
+      (should-not (claude-code--frame-focused-p 'f))
+      ;; Minimized while the window manager owed it a focus-out.
+      (setf (alist-get 'f state) t)
+      (setf (alist-get 'f visible) nil)
+      (should-not (claude-code--frame-focused-p 'f)))))
+
 (ert-deftest claude-code-test-focused-p ()
   "Focus is decided over every frame, not just the selected one.
 `frame-focus-state' answers for one frame and more than one can report focus,
-so a raise landing on a frame other than the selected one still counts.  An
-`unknown' answer is not focus."
-  (let ((states '((f1 . nil) (f2 . nil))))
+so a raise landing on a frame other than the selected one still counts."
+  (let ((states (list (cons 'f1 nil) (cons 'f2 nil))))
     (cl-letf (((symbol-function 'frame-list) (lambda () '(f1 f2)))
+              ((symbol-function 'frame-visible-p) (lambda (_frame) t))
               ((symbol-function 'frame-focus-state)
                (lambda (&optional frame) (alist-get frame states))))
       (should-not (claude-code--focused-p))
       ;; Focus on the frame that is not first in the list still counts.
       (setf (alist-get 'f2 states) t)
-      (should (claude-code--focused-p))
-      ;; A platform that cannot tell is not a raise.
-      (setf (alist-get 'f2 states) 'unknown)
-      (should-not (claude-code--focused-p)))))
+      (should (claude-code--focused-p)))))
 
-(ert-deftest claude-code-test-attended-p ()
-  "A buffer is attended when any focused frame has it selected.
-Every window showing it is considered: one displayed in a side window as well
-as in a focused frame's selected window is being watched, and looking only at
-the window that happens to come first would miss that."
+(ert-deftest claude-code-test-on-screen-p ()
+  "A buffer is on screen when a focused frame shows it, selected or not.
+Every window showing it is tested, since the same instance can sit on an
+unfocused frame and a focused one at once, and looking only at the window that
+happens to come first would miss that."
   (claude-code-tests--with-managed-buffer buf
-    (let ((windows '(side main))
-          (frames '((side . f1) (main . f2)))
-          (selected '((f1 . other) (f2 . main)))
-          (states '((f1 . t) (f2 . t))))
+    (let ((windows (list 'elsewhere 'here))
+          (frames '((elsewhere . f1) (here . f2)))
+          (states (list (cons 'f1 nil) (cons 'f2 t))))
       (cl-letf (((symbol-function 'get-buffer-window-list)
                  (lambda (&rest _) windows))
                 ((symbol-function 'window-frame)
                  (lambda (window) (alist-get window frames)))
-                ((symbol-function 'frame-selected-window)
-                 (lambda (frame) (alist-get frame selected)))
+                ((symbol-function 'frame-visible-p) (lambda (_frame) t))
                 ((symbol-function 'frame-focus-state)
                  (lambda (&optional frame) (alist-get frame states))))
-        ;; Selected on f2, which has focus, even though f1 lists it first.
-        (should (claude-code--attended-p buf))
-        ;; Same windows, but the frame holding it selected lost focus.
+        ;; No frame here has a selected window: the predicate asks for none.
+        (should (claude-code--on-screen-p buf))
+        ;; Every frame showing it lost focus.
         (setf (alist-get 'f2 states) nil)
-        (should-not (claude-code--attended-p buf))
-        ;; Focused again, but no longer that frame's selected window.
-        (setf (alist-get 'f2 states) t)
-        (setf (alist-get 'f2 selected) 'other)
-        (should-not (claude-code--attended-p buf))
+        (should-not (claude-code--on-screen-p buf))
         ;; Displayed in no window at all.
+        (setf (alist-get 'f2 states) t)
         (setq windows '())
-        (should-not (claude-code--attended-p buf))))))
+        (should-not (claude-code--on-screen-p buf))))))
 
 (ert-deftest claude-code-test-notify-hands-over-a-session ()
   "A notification reaches the handler as the session it came from, plus the body.
@@ -1298,7 +1309,7 @@ status the instance has now rather than a cached one."
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf)))
-                  ((symbol-function 'claude-code--attended-p) #'ignore))
+                  ((symbol-function 'claude-code--on-screen-p) #'ignore))
           (claude-code--notify id "Claude is waiting for your input"))
         (should (= (length seen) 1))
         (pcase-let ((`(,session . ,body) (car seen)))
@@ -1321,12 +1332,12 @@ status the instance has now rather than a cached one."
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
-          ;; The user is looking at the instance already.
-          (cl-letf (((symbol-function 'claude-code--attended-p)
+          ;; The user can see the instance already.
+          (cl-letf (((symbol-function 'claude-code--on-screen-p)
                      (lambda (_buffer) t)))
             (claude-code--notify id "Claude is waiting for your input"))
           (should (= announced 0))
-          (cl-letf (((symbol-function 'claude-code--attended-p) #'ignore))
+          (cl-letf (((symbol-function 'claude-code--on-screen-p) #'ignore))
             ;; An id that has left the registry, e.g. the instance just exited.
             (claude-code--notify "gone" "Claude is waiting for your input")
             (should (= announced 0))

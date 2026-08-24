@@ -774,29 +774,34 @@ notifications dismissed alongside it.")
 A cons of (WATCH . TIMER), where WATCH is nil when Emacs already held focus
 and no raise had to be waited for.")
 
+(defun claude-code--frame-focused-p (frame)
+  "Non-nil when FRAME is on screen and holds input focus.
+An `unknown' focus state is not focus.  Visibility is asked for separately
+because a minimized frame keeps whatever `last-focus-update' it was left with."
+  (and (frame-visible-p frame) (eq (frame-focus-state frame) t)))
+
 (defun claude-code--focused-p ()
   "Non-nil when any frame has input focus.
 `frame-focus-state' answers for a single frame and several can report focus
 at once, so deciding whether Emacs holds focus means scanning them all."
-  (seq-some (lambda (frame) (eq (frame-focus-state frame) t)) (frame-list)))
+  (seq-some #'claude-code--frame-focused-p (frame-list)))
 
-(defun claude-code--attended-p (buffer)
-  "Non-nil when the user is looking at BUFFER right now.
-True when BUFFER is the selected window of any focused frame, which is what
-keeps an instance already on screen from announcing itself."
+(defun claude-code--on-screen-p (buffer)
+  "Non-nil when BUFFER is displayed on a frame holding input focus.
+An instance the user can see needs no announcement, whether or not its window
+is the one being typed in.  Every window showing it is tested, since the same
+instance can sit on a focused frame and an unfocused one at once."
   (seq-some (lambda (window)
-              (let ((frame (window-frame window)))
-                (and (eq window (frame-selected-window frame))
-                     (eq (frame-focus-state frame) t))))
+              (claude-code--frame-focused-p (window-frame window)))
             (get-buffer-window-list buffer nil t)))
 
 (defun claude-code--notify (id body)
   "Announce instance ID's message BODY via `claude-code-notify-function'.
-Silent for an instance that has left the registry, and for one whose buffer
-the user is already attending."
+Silent for an instance that has left the registry, and for one the user can
+already see."
   (let ((buffer (and claude-code-notify-function
                      (claude-code--managed-buffer id))))
-    (when (and buffer (not (claude-code--attended-p buffer)))
+    (when (and buffer (not (claude-code--on-screen-p buffer)))
       (funcall claude-code-notify-function
                (claude-code--session-by-id id buffer)
                body))))
