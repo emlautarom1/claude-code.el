@@ -1908,8 +1908,8 @@ The view binds neither, so motion is `tabulated-list-mode-map's `next-line' and
       (claude-code-sessions-refresh)
       (should (equal (tabulated-list-get-id) id)))))
 
-(ert-deftest claude-code-test-view-pins-default-directory ()
-  "Opening the view pins `default-directory' to the project root, and it sticks."
+(ert-deftest claude-code-test-view-pins-its-directories ()
+  "Opening the view points both directory variables at the root, and it sticks."
   (claude-code-tests--with-fixtures
     (let ((root "/home/test/proj")
           (buf nil))
@@ -1925,7 +1925,14 @@ The view binds neither, so motion is `tabulated-list-mode-map's `next-line' and
               (should (equal claude-code--project (claude-code--normalize-root root)))
               (should (equal default-directory
                              (file-name-as-directory
-                              (claude-code--normalize-root root))))))
+                              (claude-code--normalize-root root))))
+              (should (local-variable-p 'list-buffers-directory))
+              (should (equal list-buffers-directory
+                             (file-name-as-directory
+                              (claude-code--normalize-root root))))
+              ;; Unabbreviated, or `ibuffer's filename filters miss the view.
+              (should (equal list-buffers-directory
+                             (expand-file-name list-buffers-directory)))))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest claude-code-test-view-commands-are-view-scoped ()

@@ -1403,6 +1403,9 @@ The project's existing view is reused when it has one."
         (claude-code-sessions-mode))
       (setq claude-code--project root)
       (setq default-directory (file-name-as-directory root))
+      ;; The view visits no file: `ibuffer' and completion annotators read the
+      ;; root off here.  Unabbreviated, or ibuffer's filename filters miss it.
+      (setq list-buffers-directory default-directory)
       (claude-code-sessions-refresh))
     (pop-to-buffer buffer)))
 
