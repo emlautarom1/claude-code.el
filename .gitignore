@@ -8,5 +8,9 @@ dist/
 *.log
 .DS_Store
 
+# Written into the checkout by `package-vc-install-from-checkout'.
+claude-code-autoloads.el
+claude-code-pkg.el
+
 # Machine-local Claude Code settings (permissions, sandbox); not shared.
 .claude/settings.local.json
