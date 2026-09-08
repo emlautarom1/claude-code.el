@@ -226,7 +226,7 @@ the developer exports."
     (let* ((ts (claude-code--project-transcripts "/home/test/proj"))
            (by-id (lambda (id)
                     (seq-find (lambda (d) (equal (plist-get d :id) id)) ts))))
-      (should (= (length ts) 4))
+      (should (= (length ts) 5))
       (let ((s1 (funcall by-id "11111111-1111-4111-8111-111111111111")))
         ;; With no custom title, the LAST ai-title wins over earlier ones.
         (should (equal (plist-get s1 :title) "Understand the project layout"))
@@ -245,17 +245,135 @@ the developer exports."
         ;; A user custom title takes precedence over Claude's ai-title.
         (should (equal (plist-get s3 :title) "Renamed worktree")))
       (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
-        ;; A worktree named "my.feat" leaves only the lossy directory token:
-        ;; the dot flattens to a hyphen and is never decoded back.
-        (should (equal (plist-get s5 :worktree) "my-feat"))))))
+        ;; The directory token flattens the dot in "my.feat" and is never
+        ;; decoded back; the binding carries the name Claude was given.
+        (should (equal (plist-get s5 :worktree) "my-feat"))
+        (should (equal (plist-get s5 :worktree-binding)
+                       '(:name "my.feat"
+                         :path "/home/test/proj/.claude/worktrees/my.feat"
+                         :bound t)))))))
+
+(ert-deftest claude-code-test-worktree-binding ()
+  "A transcript's worktree binding survives the session leaving the worktree.
+Claude clears the binding to null when a session leaves -- which is what a
+clean exit does, even when the user keeps the worktree -- so the newest
+`worktree-state' line answers whether the session is still there, and the
+newest one that carries a binding answers which worktree it was."
+  (claude-code-tests--with-fixtures
+    (let ((binding (lambda (id dir)
+                     (plist-get (claude-code--transcript-fields
+                                 (expand-file-name
+                                  (concat id ".jsonl")
+                                  (expand-file-name
+                                   (concat "projects/" dir)
+                                   claude-code-tests--fixtures)))
+                                :worktree-binding))))
+      ;; Still in its worktree.
+      (should (equal (funcall binding "33333333-3333-4333-8333-333333333333"
+                              "-home-test-proj--claude-worktrees-feat")
+                     '(:name "feat"
+                       :path "/home/test/proj/.claude/worktrees/feat"
+                       :bound t)))
+      ;; Left it: the transcript has moved back under the parent project and
+      ;; the binding reads as cleared, but it still names the worktree.
+      (should (equal (funcall binding "44444444-4444-4444-8444-444444444444"
+                              "-home-test-proj")
+                     '(:name "left"
+                       :path "/home/test/proj/.claude/worktrees/left"
+                       :bound nil)))
+      ;; Never had one.
+      (should-not (funcall binding "11111111-1111-4111-8111-111111111111"
+                           "-home-test-proj")))))
+
+(ert-deftest claude-code-test-worktree-binding-needs-the-directory ()
+  "A binding names a worktree only while the worktree is there to go back to.
+Claude\='s word is enough for a session it still holds; for one that left, the
+name outlives the directory, so the label follows the directory."
+  (let* ((root (file-truename (make-temp-file "cc-root" t)))
+         (dir (expand-file-name ".claude/worktrees/feat" root))
+         (live (list :name "feat" :path dir :bound nil))
+         (gone (list :name "feat" :path (expand-file-name "nope" root)
+                     :bound nil))
+         (bound (list :name "feat" :path dir :bound t)))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (should (equal (claude-code--binding-worktree live) "feat"))
+          (should-not (claude-code--binding-worktree gone))
+          (should-not (claude-code--binding-worktree nil))
+          ;; The label stands for a bound session with no directory at all,
+          ;; which is Claude's to clear on the next resume, not ours to guess.
+          (should (equal (claude-code--binding-worktree
+                          (list :name "feat" :path nil :bound t))
+                         "feat"))
+          ;; A binding Claude still holds needs no flag -- it re-enters the
+          ;; worktree itself -- and one whose worktree is gone must not get
+          ;; one, since `--worktree' would build a fresh checkout.
+          (should (equal (claude-code--resume-worktree root live) "feat"))
+          (should-not (claude-code--resume-worktree root bound))
+          (should-not (claude-code--resume-worktree root gone))
+          (should-not (claude-code--resume-worktree root nil)))
+      (delete-directory root t))))
+
+(ert-deftest claude-code-test-resume-worktree-must-round-trip ()
+  "The flag is withheld unless the name resolves back to the recorded worktree.
+`--worktree=NAME\=' always means ROOT/.claude/worktrees/NAME, while Claude
+records only a base name, so a worktree kept anywhere else -- one made with
+`git worktree add\=' and entered, or placed by a `WorktreeCreate\=' hook -- would
+have the flag build a fresh checkout beside the work rather than return to it."
+  (let* ((root (file-truename (make-temp-file "cc-root" t)))
+         (inside (expand-file-name ".claude/worktrees/feat" root))
+         (outside (expand-file-name "elsewhere/feat" root)))
+    (unwind-protect
+        (progn
+          (make-directory inside t)
+          (make-directory outside t)
+          (should (equal (claude-code--resume-worktree
+                          root (list :name "feat" :path inside :bound nil))
+                         "feat"))
+          ;; Same name, same repository, a directory that exists -- and still
+          ;; no flag, because the flag would not land there.
+          (should-not (claude-code--resume-worktree
+                       root (list :name "feat" :path outside :bound nil)))
+          ;; A symlinked spelling of the same directory still round-trips.
+          (should (equal (claude-code--resume-worktree
+                          (file-name-as-directory root)
+                          (list :name "feat"
+                                :path (concat root "/./.claude/worktrees/feat")
+                                :bound nil))
+                         "feat")))
+      (delete-directory root t))))
+
+(ert-deftest claude-code-test-worktree-binding-drops-non-strings ()
+  "A binding field that is not a string is dropped rather than passed on.
+JSON null arrives as a symbol, and one reaching `file-directory-p\=' or the CLI
+would cost the whole view rather than the one session."
+  (claude-code-tests--with-transcript file
+      '("{\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":\"feat\",\"worktreePath\":null},\"sessionId\":\"x\"}"
+        "{\"type\":\"worktree-state\",\"worktreeSession\":null,\"sessionId\":\"x\"}")
+      1800000000
+    (let ((binding (plist-get (claude-code--transcript-fields file)
+                              :worktree-binding)))
+      (should (equal binding '(:name "feat" :path nil :bound nil)))
+      ;; The cleared binding has no directory to check, so neither the label
+      ;; nor the flag can be had -- and neither signals.
+      (should-not (claude-code--binding-worktree binding))
+      (should-not (claude-code--resume-worktree "/r" binding))))
+  ;; A name that is not a string leaves no binding at all.
+  (claude-code-tests--with-transcript file
+      '("{\"type\":\"worktree-state\",\"worktreeSession\":{\"worktreeName\":null,\"worktreePath\":\"/w\"},\"sessionId\":\"x\"}")
+      1800000000
+    (should-not (plist-get (claude-code--transcript-fields file)
+                           :worktree-binding))))
 
 (ert-deftest claude-code-test-worktree-dir-belongs-to-two-roots ()
   "A worktree's transcript directory is listed by the worktree root too.
 Encoding the worktree path yields exactly the parent's encoded directory plus
 the worktree prefix, so one directory is the parent project's worktree
 directory and the worktree project's own.  Both roots therefore list the same
-transcript, and from the worktree root it carries no worktree token: there it
-is the main tree."
+transcript.  From the worktree root the descriptor carries no worktree token,
+since the token marks a directory nested under the root that named it; the
+session is still labelled with its worktree, which comes from the binding."
   (should (equal (claude-code--encode-cwd
                   "/home/test/proj/.claude/worktrees/feat")
                  (concat (claude-code--encode-cwd "/home/test/proj")
@@ -356,7 +474,7 @@ put that literal in its way; the parsed top-level key is what decides."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (let ((ss (claude-code-project-sessions "/home/test/proj")))
-        (should (= (length ss) 4))
+        (should (= (length ss) 5))
         (should-not (seq-some #'claude-code-session-alive-p ss))
         (let ((s1 (claude-code-tests--find-session
                    ss "11111111-1111-4111-8111-111111111111")))
@@ -377,15 +495,27 @@ put that literal in its way; the parsed top-level key is what decides."
                          ss "33333333-3333-4333-8333-333333333333"))
                        "feat"))
         ;; A genuinely dead worktree (no sessions/*.json) still labels with its
-        ;; own worktree, not the parent project.
+        ;; own worktree, not the parent project -- and the binding names it as
+        ;; the user wrote it, where the directory token flattened the dot.
         (let ((solo (claude-code-tests--find-session
                      ss "55555555-5555-4555-8555-555555555555")))
-          (should (equal (claude-code-session-worktree solo) "my-feat")))))))
+          (should (equal (claude-code-session-worktree solo) "my.feat")))
+        ;; A session whose worktree was removed on the way out is labelled with
+        ;; no worktree: it belongs to the parent tree now, and that is where a
+        ;; resume of it lands.  The binding rides along regardless, since that
+        ;; is what the resume path reads instead of going back to disk.
+        (let ((left (claude-code-tests--find-session
+                     ss "44444444-4444-4444-8444-444444444444")))
+          (should-not (claude-code-session-worktree left))
+          (should (equal (claude-code-session-worktree-binding left)
+                         '(:name "left"
+                           :path "/home/test/proj/.claude/worktrees/left"
+                           :bound nil))))))))
 
 (ert-deftest claude-code-test-sessions-worktree-before-transcript ()
   "A named spawn labels its worktree before Claude creates the directory.
-The registry stands in with the token the name will produce; an auto-named
-request carries no name, so it stays blank."
+The registry stands in with the name that was asked for; an auto-named request
+carries no name, so it stays blank."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer buf
       (let ((named "66666666-6666-4666-8666-666666666666")
@@ -398,7 +528,7 @@ request carries no name, so it stays blank."
           (let ((ss (claude-code-project-sessions "/home/test/proj")))
             (should (equal (claude-code-session-worktree
                             (claude-code-tests--find-session ss named))
-                           "my-feat"))
+                           "my.feat"))
             (should-not (claude-code-session-worktree
                          (claude-code-tests--find-session ss auto)))))))))
 
@@ -413,7 +543,7 @@ request carries no name, so it stays blank."
                    (lambda (b) (eq b buf))))
           (let* ((ss (claude-code-project-sessions "/home/test/proj"))
                  (s1 (claude-code-tests--find-session ss id)))
-            (should (= (length ss) 4))
+            (should (= (length ss) 5))
             (should (claude-code-session-alive-p s1))
             (should (eq (claude-code-session-buffer s1) buf))
             (should (= (claude-code-session-pid s1) 4242))
@@ -680,12 +810,19 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
                  '("--session-id" "ID"))))
 
 (ert-deftest claude-code-test-build-args-resume ()
-  "Resume returns only \"--resume=ID\" and ignores new-session arguments."
+  "Resume takes \"--resume=ID\" and a worktree, and ignores everything else."
   (should (equal (claude-code--build-args :resume "ID") '("--resume=ID")))
   (should (equal (claude-code--build-args :resume "ID" :prompt "x" :model "opus"
                                           :effort "high" :name "review")
                  '("--resume=ID")))
   (should (equal (claude-code--build-args :resume "ID" :session-id "ID")
+                 '("--resume=ID")))
+  ;; A named worktree leads, as the CLI's own parting recipe writes it.
+  (should (equal (claude-code--build-args :resume "ID" :worktree "my.feat")
+                 '("--worktree=my.feat" "--resume=ID")))
+  ;; Only a name means anything here: there is no auto-naming a worktree a
+  ;; resume is meant to return to.
+  (should (equal (claude-code--build-args :resume "ID" :worktree t)
                  '("--resume=ID"))))
 
 (ert-deftest claude-code-test-build-args-mcp ()
@@ -1019,6 +1156,50 @@ makes it external."
             (claude-code-resume "/home/test/proj"
                                 "22222222-2222-4222-8222-222222222222"))
           (should (= (length execs) 1)))))))
+
+(ert-deftest claude-code-test-resume-returns-to-the-worktree ()
+  "Resuming a session that left a worktree behind names it with `--worktree'.
+Claude drops the binding on a clean exit and moves the transcript back under
+the parent project, so the resume is launched from the parent root and has to
+carry the worktree itself.  Once that worktree is gone the flag must go too:
+`--worktree' would build a fresh checkout rather than resume in none."
+  (let* ((root (file-truename (make-temp-file "cc-root" t)))
+         (id "88888888-8888-4888-8888-888888888888")
+         (config (make-temp-file "cc-config" t))
+         (worktree (expand-file-name ".claude/worktrees/left" root))
+         (project (expand-file-name (concat "projects/"
+                                            (claude-code--encode-cwd root))
+                                    config))
+         (claude-code-config-dir config))
+    (unwind-protect
+        (progn
+          (make-directory worktree t)
+          (make-directory project t)
+          (with-temp-file (expand-file-name (concat id ".jsonl") project)
+            (insert (format "{\"type\":\"worktree-state\",\"worktreeSession\":\
+{\"worktreePath\":\"%s\",\"worktreeName\":\"left\"},\"sessionId\":\"%s\"}\n"
+                            worktree id))
+            (insert (format "{\"type\":\"worktree-state\",\"worktreeSession\":\
+null,\"sessionId\":\"%s\"}\n" id)))
+          (claude-code-tests--with-registry
+            (let ((execs '()))
+              (claude-code-tests--recording-launch execs
+                (clrhash claude-code--transcript-cache)
+                (claude-code-resume root id)
+                (should (equal (nth 1 (car execs))
+                               (list "--worktree=left" (concat "--resume=" id)
+                                     "--mcp-config" "{}")))
+                ;; The worktree the session named is gone: resume plainly.
+                (delete-directory worktree t)
+                (clrhash claude-code--transcript-cache)
+                (clrhash claude-code--managed)
+                (setq execs '())
+                (claude-code-resume root id)
+                (should (equal (nth 1 (car execs))
+                               (list (concat "--resume=" id)
+                                     "--mcp-config" "{}")))))))
+      (delete-directory root t)
+      (delete-directory config t))))
 
 (ert-deftest claude-code-test-kill ()
   "Killing an alive session drops its registry entry and buffer, and reports it.
@@ -1710,19 +1891,21 @@ never hands one to an operation that would only refuse it."
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
   "RET displays alive rows through `claude-code--show', resuming otherwise.
-A dead row prompts first; an external row reaches `claude-code-resume'
-without a prompt, so the model's guard is the only refusal
+A dead row prompts first; an external row reaches the resume path without a
+prompt, so the model's guard is the only refusal
 \(`claude-code-test-resume-refuses-external')."
-  (let ((alive (claude-code-session--create :id "a" :alive-p t))
-        (external (claude-code-session--create :id "e" :external-p t))
-        (dead (claude-code-session--create :id "d"))
-        (at-point nil) (answer nil) (calls '()))
+  (let* ((binding '(:name "feat" :path "/r/.claude/worktrees/feat" :bound nil))
+         (alive (claude-code-session--create :id "a" :alive-p t))
+         (external (claude-code-session--create :id "e" :external-p t))
+         (dead (claude-code-session--create :id "d" :worktree-binding binding))
+         (at-point nil) (answer nil) (calls '()))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point))
               ((symbol-function 'claude-code--buffer)
                (lambda (_s) 'terminal))
-              ((symbol-function 'claude-code-resume)
-               (lambda (root id) (push (list 'resume root id) calls) 'terminal))
+              ((symbol-function 'claude-code--resume)
+               (lambda (root id b)
+                 (push (list 'resume root id b) calls) 'terminal))
               ((symbol-function 'claude-code--show)
                (lambda (b &rest _) (push (list 'show b) calls)))
               ((symbol-function 'claude-code--refresh-views)
@@ -1745,12 +1928,15 @@ without a prompt, so the model's guard is the only refusal
         (setq at-point external calls nil)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((resume "/r" "e") (refresh) (show terminal))))
+                       '((resume "/r" "e" nil) (refresh) (show terminal))))
         ;; A dead row asks first: yes resumes, refreshes and displays...
         (setq at-point dead calls nil answer t)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((ask) (resume "/r" "d") (refresh) (show terminal))))
+                       ;; The binding comes off the struct the view already
+                       ;; built, so a resume costs no second read of disk.
+                       (list '(ask) (list 'resume "/r" "d" binding)
+                             '(refresh) '(show terminal))))
         ;; ...no stops at the prompt.
         (setq calls nil answer nil)
         (claude-code-sessions-visit)
@@ -1789,13 +1975,13 @@ The liveness dispatch is shared with RET
                 ;; The Dead group starts folded: its header shows but no rows do.
                 (should (member "dead" claude-code--collapsed))
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (4)" text))
+                  (should (string-match-p "Dead (5)" text))
                   (should-not (string-match-p "11111111" text)))
                 ;; Expanding it reveals every dead row.
                 (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
                 (claude-code-sessions-refresh)
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (4)" text))
+                  (should (string-match-p "Dead (5)" text))
                   (should (string-match-p "11111111" text))
                   ;; The worktree session is listed under the parent project.
                   (should (string-match-p "feat" text)))
@@ -1803,7 +1989,7 @@ The liveness dispatch is shared with RET
                 (push "dead" claude-code--collapsed)
                 (claude-code-sessions-refresh)
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (4)" text))
+                  (should (string-match-p "Dead (5)" text))
                   (should-not (string-match-p "11111111" text))))))
         (kill-buffer buf)))))
 
@@ -2440,22 +2626,22 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
     (setq claude-code--collapsed nil)
     (claude-code-sessions-refresh)
     (claude-code--goto-group "dead")
-    (should (string-match-p "▾ Dead (3)$" (thing-at-point 'line t)))
-    ;; `m' advances, so this marks two of the three dead rows.
+    (should (string-match-p "▾ Dead (4)$" (thing-at-point 'line t)))
+    ;; `m' advances, so this marks two of the four dead rows.
     (forward-line 1)
     (claude-code-sessions-mark)
     (claude-code-sessions-mark)
     (claude-code--goto-group "dead")
     ;; Their tags are on screen, so the header adds nothing.
-    (should (string-match-p "▾ Dead (3)$" (thing-at-point 'line t)))
+    (should (string-match-p "▾ Dead (4)$" (thing-at-point 'line t)))
     (claude-code-sessions-toggle-group)
     (should (member "dead" claude-code--collapsed))
     (should (equal 2 (length claude-code--marks)))
     (should (null (claude-code-tests--tagged-ids)))
-    (should (string-match-p "▸ Dead (3, 2 marked)$" (thing-at-point 'line t)))
+    (should (string-match-p "▸ Dead (4, 2 marked)$" (thing-at-point 'line t)))
     ;; Unfolding hands the rows back their tags.
     (claude-code-sessions-toggle-group)
-    (should (string-match-p "▾ Dead (3)$" (thing-at-point 'line t)))
+    (should (string-match-p "▾ Dead (4)$" (thing-at-point 'line t)))
     (should (equal 2 (length (claude-code-tests--tagged-ids))))))
 
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()

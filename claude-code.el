@@ -84,11 +84,6 @@ session data instead."
   (replace-regexp-in-string
    "[/.]" "-" (directory-file-name (expand-file-name path))))
 
-(defun claude-code--worktree-token (name)
-  "Return the transcript-directory token a worktree named NAME produces.
-The same lossy flattening `claude-code--encode-cwd' applies to paths."
-  (replace-regexp-in-string "[/.]" "-" name))
-
 (defun claude-code--projects-dir ()
   "Return the directory holding every project's transcript directory."
   (expand-file-name "projects" claude-code-config-dir))
@@ -148,8 +143,29 @@ Returns nil when no such line exists."
         (when obj (setq result (gethash field obj)))))
     result))
 
+(defun claude-code--read-worktree-binding ()
+  "Return the worktree binding recorded in the transcript in the current buffer.
+A plist (:name NAME :path PATH :bound FLAG), nil for a session that never ran
+in a worktree.  The newest `worktree-state' line says whether the session is
+still in its worktree; the newest one carrying a binding names it, verbatim
+where the directory token is flattened.  See docs/storage-model.md.
+A field that is not a string is dropped rather than trusted: JSON null arrives
+as a symbol, and one of those reaching `file-directory-p' or the CLI would cost
+the whole view rather than this one session."
+  (when-let* ((latest (claude-code--json-line-field "\"worktree-state\""
+                                                    "worktreeSession"))
+              (named (claude-code--json-line-field "\"worktreeName\""
+                                                   "worktreeSession"))
+              ((hash-table-p named)))
+    (let ((name (gethash "worktreeName" named))
+          (path (gethash "worktreePath" named)))
+      (when (stringp name)
+        (list :name name
+              :path (and (stringp path) path)
+              :bound (hash-table-p latest))))))
+
 (defun claude-code--read-transcript-fields (file)
-  "Read the title, last-prompt and last-active fields from FILE.
+  "Read the title, last-prompt, last-active and worktree fields from FILE.
 :last-active is nil when FILE has no timestamped line."
   (with-temp-buffer
     (insert-file-contents file)
@@ -158,13 +174,16 @@ Returns nil when no such line exists."
               (claude-code--json-line-field "\"ai-title\"" "aiTitle"))
           :last-prompt
           (claude-code--json-line-field "\"last-prompt\"" "lastPrompt")
+          :worktree-binding
+          (claude-code--read-worktree-binding)
           :last-active
           (let ((ts (claude-code--json-line-field "\"timestamp\"" "timestamp")))
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
 (defun claude-code--transcript-fields (file)
-  "Return FILE's :id, :title, :last-prompt and :last-active, cached by mtime.
-The mtime stands in for :last-active when FILE has no timestamped line."
+  "Return FILE's :id, :title, :last-prompt, :worktree-binding and :last-active.
+Cached by mtime.  The mtime stands in for :last-active when FILE has no
+timestamped line."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
@@ -183,13 +202,15 @@ The mtime stands in for :last-active when FILE has no timestamped line."
 
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
-Each descriptor is a plist with keys :id, :title, :last-prompt, :last-active,
-:transcript (absolute file) and :worktree -- the worktree's encoded directory
-token, nil for a main-tree transcript.  Ids are unique across the result: a
-session's transcript lives in exactly one encoded directory.  Both worktree
-membership and the token come from the \"--claude-worktrees-\" directory
-prefix; the encoding is lossy, so the token is a display label, never decoded
-back into a name or path (see docs/storage-model.md)."
+Each descriptor is a plist with keys :id, :title, :last-prompt,
+:worktree-binding, :last-active, :transcript (absolute file) and :worktree --
+the worktree's encoded directory token, nil for a main-tree transcript.  Ids
+are unique across the result: a session's transcript lives in exactly one
+encoded directory.  Membership and the token both come from the
+\"--claude-worktrees-\" directory prefix; the encoding is lossy, so the token
+decides only which project lists the transcript and is never decoded back into
+a name or path.  The worktree a session runs in is :worktree-binding's
+business (see docs/storage-model.md)."
   (let* ((projects (claude-code--projects-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
@@ -224,18 +245,20 @@ WAITING-FOR set while waiting.  EXTERNAL-P flags a session whose process is
 running outside Emacs, so it must not be resumed or deleted.  TITLE and
 LAST-PROMPT come from the transcript and, via
 `claude-code--session-display-name', are the session's only display-name
-sources; WORKTREE is the encoded token of the session's worktree, nil for a
-main-tree one; TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
+sources; WORKTREE names the session's worktree, nil for a main-tree one, and
+WORKTREE-BINDING is the storage adapter's record behind it, which the resume
+path reads (see `claude-code--resume-worktree').
+TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
 session's last genuine activity, taken from the newest timestamped transcript
 line."
-  id status waiting-for alive-p pid buffer worktree
+  id status waiting-for alive-p pid buffer worktree worktree-binding
   title last-prompt transcript external-p last-active)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
 Keys: :buffer (the Ghostel buffer), :origin (project root the instance
 was launched from, normalised with `claude-code--normalize-root') and
-:worktree (the worktree's transcript-directory token, nil for none).")
+:worktree (the name of the worktree it was asked for, nil for none).")
 
 (defun claude-code--session-display-name (session)
   "Return SESSION's display name.
@@ -301,12 +324,47 @@ running it at all.  This is the single classifier the view builds on."
         ((claude-code-session-external-p session) 'external)
         (t 'dead)))
 
+(defun claude-code--binding-worktree (binding)
+  "Return the worktree BINDING names, or nil when there is none to name.
+A session Claude still holds in its worktree is named on Claude's word alone.
+One that left is named only while the directory survives: the name outlives a
+worktree removed on exit, but the session it held belongs to the parent tree
+now, which is where a resume lands it."
+  (when (or (plist-get binding :bound)
+            (when-let* ((path (plist-get binding :path)))
+              (file-directory-p path)))
+    (plist-get binding :name)))
+
+(defun claude-code--resume-worktree (root binding)
+  "Return the worktree a resume of BINDING under ROOT must pass, or nil.
+A session Claude still considers bound needs nothing: it re-enters its worktree
+by itself.  One whose worktree is gone needs nothing either, since the flag
+builds a checkout rather than resuming in none.  What is left is the session
+that left a worktree still on disk -- see docs/storage-model.md.
+The name must also round-trip: `--worktree=NAME' resolves to
+ROOT/.claude/worktrees/NAME, and Claude records only the worktree's base name.
+For a worktree kept anywhere else -- a `git worktree add' checkout Claude was
+asked to enter, or one a `WorktreeCreate' hook placed elsewhere -- that flag
+would build a fresh checkout beside the work instead of returning to it."
+  (when-let* (((not (plist-get binding :bound)))
+              (name (claude-code--binding-worktree binding))
+              (round-trip (expand-file-name
+                           (concat ".claude/worktrees/" name) root))
+              ((file-equal-p round-trip (plist-get binding :path))))
+    name))
+
 (defun claude-code--transcript-session-args (tr &optional reg)
   "Return `claude-code-session--create' arguments derived from descriptor TR.
 TR is a `claude-code--project-transcripts' descriptor, nil for an instance with
 no transcript yet.  REG, when given, is the managed-registry plist whose
-:worktree token stands in while TR carries none."
-  (list :worktree (or (plist-get tr :worktree) (plist-get reg :worktree))
+worktree name stands in while TR carries none.  The binding names the worktree
+where it has one; the directory token stands in for a transcript written before
+Claude recorded bindings, where the flattened name is all there is."
+  (list :worktree-binding (plist-get tr :worktree-binding)
+        :worktree (or (claude-code--binding-worktree
+                       (plist-get tr :worktree-binding))
+                      (plist-get tr :worktree)
+                      (plist-get reg :worktree))
         :title (plist-get tr :title)
         :last-prompt (plist-get tr :last-prompt)
         :transcript (plist-get tr :transcript)
@@ -316,7 +374,7 @@ no transcript yet.  REG, when given, is the managed-registry plist whose
   "Return the alive `claude-code-session' for managed instance ID in BUFFER.
 LIVE is a pre-parsed `claude-code--live-status-table' supplying the instance's
 native status, and TR its `claude-code--project-transcripts' descriptor.  TR's
-worktree token is authoritative when TR exists, including when it is nil; the
+worktree is authoritative when TR exists, including when it is nil; the
 registry stands in only for a session with no transcript yet."
   (let ((info (claude-code--live-info id live)))
     (apply #'claude-code-session--create
@@ -328,16 +386,18 @@ registry stands in only for a session with no transcript yet."
            (claude-code--transcript-session-args
             tr (unless tr (gethash id claude-code--managed))))))
 
+(defun claude-code--transcript-for (root id)
+  "Return the transcript descriptor for session ID under ROOT, or nil."
+  (seq-find (lambda (tr) (equal (plist-get tr :id) id))
+            (and root (claude-code--project-transcripts root))))
+
 (defun claude-code--session-by-id (id buffer)
   "Return the alive `claude-code-session' for managed instance ID in BUFFER.
 Finds the instance's transcript descriptor under the root it was launched
 from, so the struct carries the session's name as well as its live status."
-  (let* ((root (plist-get (gethash id claude-code--managed) :origin))
-         (descriptor (seq-find (lambda (tr) (equal (plist-get tr :id) id))
-                               (and root
-                                    (claude-code--project-transcripts root)))))
+  (let ((root (plist-get (gethash id claude-code--managed) :origin)))
     (claude-code--alive-session id buffer (claude-code--live-status-table)
-                                descriptor)))
+                                (claude-code--transcript-for root id))))
 
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
@@ -447,8 +507,10 @@ from, and is nil for an unknown id."
     (&key session-id resume prompt name worktree model effort mcp-args)
   "Build the argument list for the `claude' CLI.
 
-When RESUME is non-nil it is a session id to resume, and it is returned as
-\"--resume=ID\" ignoring all new-session arguments.
+When RESUME is non-nil it is a session id to resume, and the result is
+\"--resume=ID\" -- preceded by \"--worktree=NAME\" when WORKTREE is a
+string, as `claude-code--resume-worktree' decides.  Every other new-session
+argument is ignored.
 
 Otherwise a new session is described:
 SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
@@ -465,7 +527,10 @@ MCP-ARGS is a list of extra CLI arguments (the MCP wiring built by
 `claude-code--mcp-cli-args') placed with the other options, before the
 terminator; this function keeps no MCP knowledge of its own."
   (if resume
-      (cons (concat "--resume=" resume) mcp-args)
+      (append (when (stringp worktree)
+                (list (concat "--worktree=" worktree)))
+              (list (concat "--resume=" resume))
+              mcp-args)
     (append (when session-id (list "--session-id" session-id))
             (when name (list (concat "--name=" name)))
             (when worktree
@@ -556,8 +621,9 @@ the last entry."
 
 (defun claude-code--register (id buffer origin worktree)
   "Record instance ID hosted in BUFFER, launched from ORIGIN, with WORKTREE.
-Stored under :worktree is the transcript-directory token of a named worktree
-request, nil otherwise.  Registering a live BUFFER also wires up the entry's
+Stored under :worktree is the name of a named worktree request, nil otherwise
+-- an auto-named one has no name to show until Claude writes the transcript
+that carries it.  Registering a live BUFFER also wires up the entry's
 removal: BUFFER is made to die with its process, so its kill is the one event
 that retires the entry.  Must run after `ghostel-exec', whose `ghostel-mode'
 switch would wipe the buffer-local flag."
@@ -565,8 +631,7 @@ switch would wipe the buffer-local flag."
     (setq-local ghostel-kill-buffer-on-exit t)
     (add-hook 'kill-buffer-hook #'claude-code--on-buffer-kill nil t))
   (puthash id (list :buffer buffer :origin origin
-                    :worktree (and (stringp worktree)
-                                   (claude-code--worktree-token worktree)))
+                    :worktree (and (stringp worktree) worktree))
            claude-code--managed))
 
 (defun claude-code--buffer (session)
@@ -613,7 +678,8 @@ Ghostel binds `process-environment' around the hook."
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
 origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
-rather than start it; the `:worktree' request is also recorded in the registry.
+rather than start it, which `:worktree' may accompany; the `:worktree' request
+is also recorded in the registry.
 The instance is launched on `claude-code-renderer' when it names one."
   (require 'ghostel)
   (require 'claude-code-mcp)
@@ -663,17 +729,35 @@ name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
                                   :prompt prompt :name name :worktree worktree
                                   :model model :effort effort))))
 
-;;;###autoload
-(defun claude-code-resume (project-root id)
-  "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
-When Emacs already manages a live instance for ID, return that instance's
-buffer rather than starting a second `claude' for the same session.  Refuses
-a session a `claude' outside Emacs is running."
+(defun claude-code--resume (root id binding)
+  "Resume session ID under ROOT with worktree BINDING; return its buffer.
+The one resume path: `claude-code-resume' reads BINDING off disk for a caller
+holding nothing but an id, while a caller holding a `claude-code-session' hands
+over the one it already has.  A binding that went stale between the two costs
+nothing, because what makes it a `--worktree\=' argument -- the worktree still
+being a directory -- is decided here and now.  Behaves as `claude-code-resume\='
+documents."
   (cond
    ((claude-code--managed-buffer id))
    ((claude-code--external-p id)
     (user-error "Session %s is running outside Emacs" id))
-   (t (claude-code--launch id project-root :resume id))))
+   (t (claude-code--launch
+       id root :resume id
+       :worktree (claude-code--resume-worktree
+                  (claude-code--normalize-root root) binding)))))
+
+;;;###autoload
+(defun claude-code-resume (project-root id)
+  "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
+The instance is launched from PROJECT-ROOT and lands wherever the session was
+working, `claude-code--resume-worktree' naming the worktree Claude has
+forgotten.  When Emacs already manages a live instance for ID, return that
+instance's buffer rather than starting a second `claude' for the same session.
+Refuses a session a `claude' outside Emacs is running."
+  (let ((root (claude-code--normalize-root project-root)))
+    (claude-code--resume
+     project-root id
+     (plist-get (claude-code--transcript-for root id) :worktree-binding))))
 
 (defun claude-code-kill (session)
   "Kill the running instance of SESSION and its buffer.
@@ -1177,8 +1261,10 @@ A dead session is resumed after confirmation."
      ((eq liveness 'alive) (funcall display (claude-code--buffer session)))
      ((or (eq liveness 'external)
           (y-or-n-p "Session is dead.  Resume it? "))
-      (let ((buffer (claude-code-resume claude-code--project
-                                        (claude-code-session-id session))))
+      (let ((buffer (claude-code--resume
+                     claude-code--project
+                     (claude-code-session-id session)
+                     (claude-code-session-worktree-binding session))))
         (claude-code--refresh-views)
         (funcall display buffer))))))
 
