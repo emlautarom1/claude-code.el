@@ -4,6 +4,8 @@ Terms used throughout `claude-code.el` and its documentation. They are chosen to
 
 - **Session** — a single Claude Code conversation, identified by a UUID (`sessionId`). A session's history lives in a transcript on disk and outlives any process. Its *liveness* is one of three states — *alive*, *external*, or *dead* (defined below).
 
+- **Interactive session** — a session a person drove at least once, from a terminal or any other Claude surface, as opposed to one a program drove start to finish: an agent in a fan-out, or a `claude -p` one-shot. The [entrypoint stamp](storage-model.md#the-entrypoint-stamp) tells them apart, and the view lists only these.
+
 - **Transcript** — the append-only `.jsonl` file recording a session's messages, stored under `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`.
 
 - **Instance** (a.k.a. *claude instance*) — a running `claude` process working on a session. In this package every instance is hosted in a [Ghostel](https://github.com/dakra/ghostel) terminal buffer.

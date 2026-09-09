@@ -1,6 +1,6 @@
 # Storage model
 
-> ⚠️ **These are Claude Code internals and are version-volatile.** Everything here describes undocumented on-disk formats under the [config dir](glossary.md) that Anthropic may change between releases (verified against CLI **v2.1.201**, the worktree binding against **v2.1.261**). In the code, **all** of this knowledge is confined to the *Storage adapter* section of `claude-code.el` (`claude-code--encode-cwd`, `claude-code--live-status-table`, `claude-code--project-transcripts` and their helpers). The rest of the package works only with `claude-code-session` structs. When Claude's layout changes, fix that one section.
+> ⚠️ **These are Claude Code internals and are version-volatile.** Everything here describes undocumented on-disk formats under the [config dir](glossary.md) that Anthropic may change between releases (verified against CLI **v2.1.201**, the worktree binding and the entrypoint stamp against **v2.1.261**). In the code, **all** of this knowledge is confined to the *Storage adapter* section of `claude-code.el` (`claude-code--encode-cwd`, `claude-code--live-status-table`, `claude-code--project-transcripts` and their helpers). The rest of the package works only with `claude-code-session` structs. When Claude's layout changes, fix that one section.
 
 For the background-agent / FleetView subsystem (a separate concern this package does not manage), see [`claude-code-internals.md`](claude-code-internals.md).
 
@@ -28,18 +28,48 @@ Liveness is a plain per-PID `process-attributes` existence check; the `procStart
 
 ## Transcripts — `projects/<encoded-cwd>/<sessionId>.jsonl`
 
-Append-only JSONL, one JSON object per line. This package reads **four** fields, all cached by file modification time in `claude-code--transcript-cache`. Each is extracted by scanning **backward** from the end of the file (the values of interest sit near the tail):
+Append-only JSONL, one JSON object per line. This package reads **five** fields, all cached by file modification time in `claude-code--transcript-cache`. All but the [entrypoint](#the-entrypoint-stamp) are extracted by scanning **backward** from the end of the file (the values of interest sit near the tail):
 
 - **Title** — a session's display title, resolved from two possible lines:
   - a user-set `{"type":"custom-title","customTitle":…}` line, which **takes precedence** when present, otherwise
   - the last `{"type":"ai-title","aiTitle":…}` line — Claude rewrites its generated title as the conversation evolves, so the *last* one wins.
 
   Both `/rename` and `claude --name=NAME` write a `custom-title`; the spawn flag writes it as the transcript's very first line, before any `ai-title` exists.
+- **Entrypoint** — the `entrypoint` stamp deciding whether the session is listed at all. See [The entrypoint stamp](#the-entrypoint-stamp).
 - **Last prompt** — the `{"type":"last-prompt","lastPrompt":…}` line (a preview of the opening prompt).
 - **Worktree binding** — the `{"type":"worktree-state","worktreeSession":…}` line, read as `(:name :path :bound)` by `claude-code--read-worktree-binding`. See [Worktrees](#worktrees).
 - **Last-active time** — the `timestamp` (ISO-8601 UTC, e.g. `2026-06-10T13:23:27.697Z`, parsed with `date-to-time`) of the **newest line that carries one**. It drives the view's *Active* column and default most-recent-first sort, and is surfaced on every session (alive, external, or dead — a dead session's transcript still exists on disk). The file's mtime is **not** used for this: only genuine conversation lines (`user`, `assistant`, `attachment`, `system`, `queue-operation`, `pr-link`, `file-history-delta`) carry a top-level `timestamp`; the CLI also appends *untimestamped* metadata lines (`last-prompt`, `mode`, `permission-mode`, `agent-name`, `ai-title`, `worktree-state`, …) to dead transcripts long after the conversation ends — via the resume/session picker, mode toggles, and the background-agents daemon — which bumps the mtime by minutes to days without representing real activity. Scanning for the last real `timestamp` ignores those writes. Two traps the backward scan must avoid: `file-history-snapshot` metadata lines have no top-level `timestamp` but *embed* one in a nested value, so the scan parses each candidate line and validates the top-level key rather than trusting the `"timestamp"` substring that led it there; and the rare transcript with **no** timestamped line at all (tiny orphaned agent stubs) falls back to the file mtime.
 
 Each scan picks its candidate lines with a **literal** `search-backward`, never a regexp: a regexp cannot use Boyer-Moore, and the search that finds nothing is the one that has to touch every byte. Under 1% of real transcripts carry a `custom-title` line, so that scan reaches the front of the file almost every time — on the largest one here (4.5 MB) the literal takes 0.9 ms against the equivalent regexp's 18 ms. That leaves the whole read at 8.7 ms, of which 7.3 ms is `insert-file-contents`; a median 230 KB transcript reads in 0.7 ms. A shell `tac | grep` pipeline was no faster and adds per-file subprocess overhead, so the in-process read + mtime cache is used.
+
+### The entrypoint stamp
+
+Every conversation line carries a top-level `entrypoint` naming the surface the process that wrote it belongs to. The vocabulary is wide and Anthropic keeps adding to it; v2.1.261's full table is
+
+```
+cli  mcp  bench  local-agent  local_agent  sdk-cli  sdk-ts  sdk-py
+claude-vscode  claude-desktop  claude-desktop-3p  claude-security
+claude-coworker  claude-coworker-terminal  claude-code-github-action
+ssh-remote  remote  remote_baku  remote_cowork  remote_trigger
+remote_cowork_trigger  remote_desktop  remote_mobile
+claude_in_slack  claude-in-slack  claude-in-teams
+```
+
+and the CLI's own test for *a program is driving this* accepts exactly three of them:
+
+```js
+function TP(){let e=a.CLAUDE_CODE_ENTRYPOINT;return e==="sdk-ts"||e==="sdk-py"||e==="sdk-cli"}
+```
+
+`claude-code--program-entrypoints` is that set, and `claude-code--interactive-transcript-p` reports every transcript outside it as a person's. Naming the three rather than whitelisting `cli` is the point: most of the rest are a human at an IDE, a desktop, a phone or a chat client, and a `cli` whitelist would silently drop all of them along with whatever ships next. It is deliberately not a tight fit — `bench`, `mcp` and `local-agent` have no person behind them either, and the CLI groups `local-agent` with the SDK stamps elsewhere — but the residue is a handful of rows, where the whitelist's mistake is a session the user cannot find.
+
+Two consequences worth stating plainly. `sdk-cli` marks *any* non-interactive run, so a `claude -p` the user typed themselves is filtered along with the fan-out's agents. And an **agent fan-out** — each agent a top-level session with its own transcript, 25+ of them from one `/code-review` — accumulates forever: Claude never deletes those transcripts and, once filtered, neither can this package.
+
+The stamp is **per invocation, not per session**: each process stamps the lines *it* appends, so one transcript can carry several values. A `claude -p` session the user later resumed interactively reads `sdk-cli` at both ends with a run of `cli` in the middle. Hence the rule — a session is the user's if **any** stamp is outside the SDK set — and hence why reading only the first stamp, or only the last, would lose that session. A transcript with no stamp at all (one predating the field) is kept: absence is not evidence, and the failure worth avoiding is dropping a real session.
+
+The scan runs **forward**, unlike every other field's — the stamp sits near the head, in practice within the first eight lines — and it parses each candidate line rather than trusting the literal that found it, because a nested `"entrypoint"` spells that literal exactly and only the top-level key may decide. A transcript the filter accepts stops at its first stamp; one it rejects has to reach the end, which is why the whole corpus here costs 35 ms against the 289 ms `insert-file-contents` spends on the same files. Every candidate is parsed, with no shortcut for a value that merely *reads* as a program's: such a shortcut is worth about 15 ms of that total — 5% of the read it rides along with — and pays for it by not seeing a top-level stamp that follows a nested one on the same line, which is exactly the case that hides a session a person drove.
+
+The stamp settles only the agent that gets a session of its own. The other kind — a `Task` sidechain inside one session — writes `projects/<encoded-cwd>/<sessionId>/subagents/agent-<hash>.jsonl`, a **subdirectory** of the project's transcript directory, with `"isSidechain":true` on every line. Sidechains outnumber real sessions here by roughly one to one. `claude-code--project-transcripts` matches `.jsonl` at one directory level, so they are already out of reach and need no stamp; making that listing recursive would put every one of them in the view.
 
 ## The cwd encoding (lossy — never invert)
 

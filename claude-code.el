@@ -124,6 +124,14 @@ a caller resolving many ids parse sessions/ once."
 Transcripts are append-only, so an unchanged modification time means
 the extracted fields are still valid.")
 
+(defun claude-code--json-line-at-point ()
+  "Return the line point is on parsed as JSON, or nil when it does not parse.
+Moves point to the start of the line, so a scan can step off it either way."
+  (goto-char (line-beginning-position))
+  (ignore-errors
+    (json-parse-string
+     (buffer-substring-no-properties (point) (line-end-position)))))
+
 (defun claude-code--json-line-field (literal field)
   "Return FIELD from the newest line in the current buffer containing LITERAL.
 Scans backward from the end and returns FIELD from the first such line that
@@ -135,13 +143,29 @@ Returns nil when no such line exists."
   (goto-char (point-max))
   (let (result)
     (while (and (not result) (search-backward literal nil t))
-      (goto-char (line-beginning-position))
-      (let ((obj (ignore-errors
-                   (json-parse-string
-                    (buffer-substring-no-properties
-                     (point) (line-end-position))))))
-        (when obj (setq result (gethash field obj)))))
+      (when-let* ((obj (claude-code--json-line-at-point)))
+        (setq result (gethash field obj))))
     result))
+
+(defconst claude-code--program-entrypoints '("sdk-cli" "sdk-py" "sdk-ts")
+  "The `entrypoint' stamps that mean no person was driving a session.
+These three are what the CLI itself tests for.  Naming them, rather than
+listing the stamps a person leaves, is what keeps a surface Anthropic adds
+later on the listed side.  See docs/storage-model.md.")
+
+(defun claude-code--interactive-transcript-p ()
+  "Return non-nil unless a program drove every invocation in the current buffer.
+Point is moved.  See docs/storage-model.md for the stamp this reads."
+  (goto-char (point-min))
+  (let (stamped person)
+    (while (and (not person) (search-forward "\"entrypoint\"" nil t))
+      (when-let* ((obj (claude-code--json-line-at-point))
+                  (entrypoint (gethash "entrypoint" obj)))
+        (setq stamped t)
+        (unless (member entrypoint claude-code--program-entrypoints)
+          (setq person t)))
+      (forward-line 1))
+    (or person (not stamped))))
 
 (defun claude-code--read-worktree-binding ()
   "Return the worktree binding recorded in the transcript in the current buffer.
@@ -165,11 +189,13 @@ the whole view rather than this one session."
               :bound (hash-table-p latest))))))
 
 (defun claude-code--read-transcript-fields (file)
-  "Read the title, last-prompt, last-active and worktree fields from FILE.
+  "Read FILE's :interactive-p, title, last-prompt, last-active and worktree.
 :last-active is nil when FILE has no timestamped line."
   (with-temp-buffer
     (insert-file-contents file)
-    (list :title
+    (list :interactive-p
+          (claude-code--interactive-transcript-p)
+          :title
           (or (claude-code--json-line-field "\"custom-title\"" "customTitle")
               (claude-code--json-line-field "\"ai-title\"" "aiTitle"))
           :last-prompt
@@ -181,8 +207,9 @@ the whole view rather than this one session."
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
 (defun claude-code--transcript-fields (file)
-  "Return FILE's :id, :title, :last-prompt, :worktree-binding and :last-active.
-Cached by mtime.  The mtime stands in for :last-active when FILE has no
+  "Return FILE's transcript fields, cached by mtime.
+The keys are :id, :interactive-p, :title, :last-prompt, :worktree-binding and
+:last-active, the mtime standing in for the last of those when FILE has no
 timestamped line."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
@@ -202,10 +229,12 @@ timestamped line."
 
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
-Each descriptor is a plist with keys :id, :title, :last-prompt,
+Each descriptor is a plist with keys :id, :interactive-p, :title, :last-prompt,
 :worktree-binding, :last-active, :transcript (absolute file) and :worktree --
-the worktree's encoded directory token, nil for a main-tree transcript.  Ids
-are unique across the result: a session's transcript lives in exactly one
+the worktree's encoded directory token, nil for a main-tree transcript.  Every
+transcript is described, including the ones `claude-code-project-sessions'
+declines to list, so that an id resolves whatever the view shows.  Ids are
+unique across the result: a session's transcript lives in exactly one
 encoded directory.  Membership and the token both come from the
 \"--claude-worktrees-\" directory prefix; the encoding is lossy, so the token
 decides only which project lists the transcript and is never decoded back into
@@ -406,21 +435,26 @@ external when a `claude' outside Emacs runs it, and dead when no process is.
 Aliveness is keyed by session id, never by PROJECT-ROOT, because one session can
 belong to two roots (see docs/storage-model.md).  The launch root recorded in
 `claude-code--managed' is consulted only to list PROJECT-ROOT's own instances
-that have no transcript yet."
+that have no transcript yet.
+A session a program drove is left out unless Emacs manages an instance for it
+\(`claude-code--interactive-transcript-p')."
   (let* ((root (claude-code--normalize-root project-root))
          (live (claude-code--live-status-table))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (dolist (tr (claude-code--project-transcripts root))
-      (let ((id (plist-get tr :id)))
-        (puthash id t seen)
-        (push (if-let* ((buffer (claude-code--managed-buffer id)))
-                  (claude-code--alive-session id buffer live tr)
-                (apply #'claude-code-session--create
-                       :id id :alive-p nil
-                       :external-p (claude-code--external-p id live)
-                       (claude-code--transcript-session-args tr)))
-              sessions)))
+      (let* ((id (plist-get tr :id))
+             (buffer (claude-code--managed-buffer id)))
+        ;; An instance Emacs manages is the user's whatever it is stamped with.
+        (when (or buffer (plist-get tr :interactive-p))
+          (puthash id t seen)
+          (push (if buffer
+                    (claude-code--alive-session id buffer live tr)
+                  (apply #'claude-code-session--create
+                         :id id :alive-p nil
+                         :external-p (claude-code--external-p id live)
+                         (claude-code--transcript-session-args tr)))
+                sessions))))
     (pcase-dolist (`(,id . ,buffer) (claude-code--live-managed root))
       (unless (gethash id seen)
         (push (claude-code--alive-session id buffer live) sessions)))

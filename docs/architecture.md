@@ -32,6 +32,8 @@ All knowledge of Claude's on-disk formats is quarantined in the *Storage adapter
 
 This realises the decision that **aliveness is Emacs-managed only**: a session is alive exactly when Emacs holds its terminal, which also guarantees send-text and interrupt always work on alive rows.
 
+Which transcripts become rows at all is decided here and only here: a session a program drove is not the user's ([interactive session](glossary.md)) unless Emacs manages an instance for it. The storage adapter goes on describing those transcripts, so an id still resolves to one — a filter that reached into `claude-code--transcript-for` would have `claude-code-resume` silently lose a session's worktree binding.
+
 The **id is the only durable name for a session**, which is what those states are decided by, and it has two consequences:
 
 - Liveness never depends on the root a query names, because one session can belong to two roots (see [storage model](storage-model.md#worktrees)). The registry's launch root answers *membership* alone, and only until Claude writes a transcript.

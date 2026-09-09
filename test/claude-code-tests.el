@@ -198,7 +198,7 @@ the developer exports."
   "Every sessions/ file is parsed and keyed by session id."
   (claude-code-tests--with-fixtures
     (let ((table (claude-code--live-status-table)))
-      (should (= (hash-table-count table) 4))
+      (should (= (hash-table-count table) 5))
       (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
         (should (equal (plist-get s1 :status) "busy"))
         ;; The parser exposes only :pid, :cwd, :status and :waiting-for.
@@ -226,7 +226,9 @@ the developer exports."
     (let* ((ts (claude-code--project-transcripts "/home/test/proj"))
            (by-id (lambda (id)
                     (seq-find (lambda (d) (equal (plist-get d :id) id)) ts))))
-      (should (= (length ts) 5))
+      ;; Every transcript is described, a program's included -- the model is
+      ;; what decides which of them the user is shown.
+      (should (= (length ts) 7))
       (let ((s1 (funcall by-id "11111111-1111-4111-8111-111111111111")))
         ;; With no custom title, the LAST ai-title wins over earlier ones.
         (should (equal (plist-get s1 :title) "Understand the project layout"))
@@ -445,6 +447,118 @@ put that literal in its way; the parsed top-level key is what decides."
     (should (equal (plist-get (claude-code--transcript-fields file) :title)
                    "real"))))
 
+(defun claude-code-tests--stamped-line (entrypoint content)
+  "Return a transcript `user\=' line stamped ENTRYPOINT and carrying CONTENT.
+ENTRYPOINT nil writes no stamp; a non-string one is inserted verbatim, which is
+how a JSON `null\=' is spelled."
+  (format "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"%s\"}%s,\"timestamp\":\"2026-06-10T13:20:00.000Z\"}"
+          content
+          (pcase entrypoint
+            ('nil "")
+            ((pred stringp) (format ",\"entrypoint\":\"%s\"" entrypoint))
+            (raw (format ",\"entrypoint\":%s" raw)))))
+
+(ert-deftest claude-code-test-transcript-interactive-p ()
+  "A session is listed unless a program drove every invocation of it.
+Claude stamps each line with the `entrypoint\=' of the process that wrote it, per
+invocation rather than per session, so the rule names the three stamps a
+program writes and treats every other one -- terminal, IDE, desktop, remote --
+as a person."
+  (let ((interactive-p
+         (lambda (&rest lines)
+           (claude-code-tests--with-transcript file lines 1800000000
+             (plist-get (claude-code--transcript-fields file)
+                        :interactive-p)))))
+    ;; Each of the three program stamps rules a session out on its own.
+    (dolist (stamp '("sdk-py" "sdk-cli" "sdk-ts"))
+      (should-not (funcall interactive-p
+                           (claude-code-tests--stamped-line stamp "go")
+                           (claude-code-tests--stamped-line stamp "and again"))))
+    ;; Every other surface has a person behind it, including the ones that are
+    ;; not a terminal at all -- naming the programs is what keeps them listed.
+    (dolist (stamp '("cli" "claude-vscode" "claude-desktop" "ssh-remote"
+                     "remote_mobile" "claude-in-teams" "a-stamp-added-later"))
+      (should (funcall interactive-p
+                       (claude-code-tests--stamped-line stamp "hello"))))
+    ;; The stamp is per invocation: one human-driven line anywhere redeems a
+    ;; session a program started, wherever in the transcript it falls.
+    (should (funcall interactive-p
+                     (claude-code-tests--stamped-line "sdk-cli" "say ok")
+                     (claude-code-tests--stamped-line "cli" "now tell me why")
+                     (claude-code-tests--stamped-line "sdk-cli" "again")))
+    ;; No stamp at all -- a transcript predating the field -- is listed, and so
+    ;; is one whose stamp is JSON null: that arrives as a symbol, matches no
+    ;; program name, and so reads as a person's rather than hiding a session.
+    (should (funcall interactive-p (claude-code-tests--stamped-line nil "hi")))
+    (should (funcall interactive-p (claude-code-tests--stamped-line 'null "hi")))
+    ;; The scan finds its lines by a literal, and a nested `entrypoint' spells
+    ;; that literal exactly; only the parsed top-level key may decide.  Without
+    ;; the parse the first case reads as a person's and the second as a
+    ;; program's, which is backwards in both.
+    (should-not (funcall interactive-p
+                         "{\"type\":\"x\",\"meta\":{\"entrypoint\":\"cli\"}}"
+                         (claude-code-tests--stamped-line "sdk-py" "go")))
+    (should (funcall interactive-p
+                     "{\"type\":\"x\",\"meta\":{\"entrypoint\":\"sdk-py\"}}"))
+    ;; Both stamps on one line, the nested one first: reaching the top-level
+    ;; key means reading past a nested match rather than moving to the next
+    ;; line, and getting this wrong hides a session a person drove.
+    (should (funcall interactive-p
+                     (claude-code-tests--stamped-line "sdk-py" "go")
+                     (concat "{\"type\":\"user\",\"meta\":{\"entrypoint\":\"sdk-py\"},"
+                             "\"entrypoint\":\"cli\"}")))))
+
+(ert-deftest claude-code-test-sessions-omit-a-programs-session ()
+  "A session a program drove is dropped by the model, not by the adapter."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (let ((agent "88888888-8888-4888-8888-888888888888")
+            (resumed "99999999-9999-4999-8999-999999999999"))
+        (let ((ids (mapcar #'claude-code-session-id
+                           (claude-code-project-sessions "/home/test/proj"))))
+          (should-not (member agent ids))
+          ;; A one-shot the user resumed interactively is theirs.
+          (should (member resumed ids)))
+        ;; A running one is left out too, which is the point: a fan-out puts
+        ;; two dozen live `claude' processes under the project at once, and an
+        ;; External group listing them is the same noise as a Dead one.
+        (claude-code-tests--with-live-pids '(1005)
+          (should-not (member agent
+                              (mapcar #'claude-code-session-id
+                                      (claude-code-project-sessions
+                                       "/home/test/proj")))))
+        ;; The descriptor is still there for `claude-code-resume' to read the
+        ;; worktree binding out of.
+        (should (claude-code--transcript-for "/home/test/proj" agent))))))
+
+(ert-deftest claude-code-test-sessions-keep-a-managed-instance ()
+  "An instance Emacs manages is listed whatever its transcript is stamped with.
+This is what an Emacs that inherited `CLAUDE_CODE_ENTRYPOINT\=' from a program
+rests on: every session it spawns carries that stamp."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer buf
+      (let ((agent "88888888-8888-4888-8888-888888888888"))
+        (claude-code--register agent buf "/home/test/proj" nil)
+        (cl-letf (((symbol-function 'claude-code--session-process)
+                   (lambda (b) (eq b buf))))
+          (let ((s (claude-code-tests--find-session
+                    (claude-code-project-sessions "/home/test/proj") agent)))
+            (should s)
+            (should (claude-code-session-alive-p s))
+            ;; With its transcript, so the row is named rather than falling
+            ;; back to the bare id the registry alone could offer.
+            (should (equal (claude-code--session-display-name s)
+                           "Security review fan-out"))))))))
+
+(ert-deftest claude-code-test-sidechains-are-not-sessions ()
+  "A `Task\=' subagent writes under <sessionId>/subagents/ and is never a session.
+The listing matches one directory level, so those transcripts are out of reach
+without filtering; making it recursive would put every subagent in the view."
+  (claude-code-tests--with-fixtures
+    (let ((ids (mapcar (lambda (d) (plist-get d :id))
+                       (claude-code--project-transcripts "/home/test/proj"))))
+      (should-not (member "agent-a1b2c3d4e5f60718" ids)))))
+
 (ert-deftest claude-code-test-transcript-fields-custom-title-wins ()
   "A `custom-title' outranks an `ai-title', whichever came last."
   (claude-code-tests--with-transcript file
@@ -474,7 +588,7 @@ put that literal in its way; the parsed top-level key is what decides."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (let ((ss (claude-code-project-sessions "/home/test/proj")))
-        (should (= (length ss) 5))
+        (should (= (length ss) 6))
         (should-not (seq-some #'claude-code-session-alive-p ss))
         (let ((s1 (claude-code-tests--find-session
                    ss "11111111-1111-4111-8111-111111111111")))
@@ -543,7 +657,7 @@ carries no name, so it stays blank."
                    (lambda (b) (eq b buf))))
           (let* ((ss (claude-code-project-sessions "/home/test/proj"))
                  (s1 (claude-code-tests--find-session ss id)))
-            (should (= (length ss) 5))
+            (should (= (length ss) 6))
             (should (claude-code-session-alive-p s1))
             (should (eq (claude-code-session-buffer s1) buf))
             (should (= (claude-code-session-pid s1) 4242))
@@ -1975,13 +2089,13 @@ The liveness dispatch is shared with RET
                 ;; The Dead group starts folded: its header shows but no rows do.
                 (should (member "dead" claude-code--collapsed))
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (5)" text))
+                  (should (string-match-p "Dead (6)" text))
                   (should-not (string-match-p "11111111" text)))
                 ;; Expanding it reveals every dead row.
                 (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
                 (claude-code-sessions-refresh)
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (5)" text))
+                  (should (string-match-p "Dead (6)" text))
                   (should (string-match-p "11111111" text))
                   ;; The worktree session is listed under the parent project.
                   (should (string-match-p "feat" text)))
@@ -1989,7 +2103,7 @@ The liveness dispatch is shared with RET
                 (push "dead" claude-code--collapsed)
                 (claude-code-sessions-refresh)
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (5)" text))
+                  (should (string-match-p "Dead (6)" text))
                   (should-not (string-match-p "11111111" text))))))
         (kill-buffer buf)))))
 
@@ -2626,22 +2740,22 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
     (setq claude-code--collapsed nil)
     (claude-code-sessions-refresh)
     (claude-code--goto-group "dead")
-    (should (string-match-p "▾ Dead (4)$" (thing-at-point 'line t)))
-    ;; `m' advances, so this marks two of the four dead rows.
+    (should (string-match-p "▾ Dead (5)$" (thing-at-point 'line t)))
+    ;; `m' advances, so this marks two of the five dead rows.
     (forward-line 1)
     (claude-code-sessions-mark)
     (claude-code-sessions-mark)
     (claude-code--goto-group "dead")
     ;; Their tags are on screen, so the header adds nothing.
-    (should (string-match-p "▾ Dead (4)$" (thing-at-point 'line t)))
+    (should (string-match-p "▾ Dead (5)$" (thing-at-point 'line t)))
     (claude-code-sessions-toggle-group)
     (should (member "dead" claude-code--collapsed))
     (should (equal 2 (length claude-code--marks)))
     (should (null (claude-code-tests--tagged-ids)))
-    (should (string-match-p "▸ Dead (4, 2 marked)$" (thing-at-point 'line t)))
+    (should (string-match-p "▸ Dead (5, 2 marked)$" (thing-at-point 'line t)))
     ;; Unfolding hands the rows back their tags.
     (claude-code-sessions-toggle-group)
-    (should (string-match-p "▾ Dead (4)$" (thing-at-point 'line t)))
+    (should (string-match-p "▾ Dead (5)$" (thing-at-point 'line t)))
     (should (equal 2 (length (claude-code-tests--tagged-ids))))))
 
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()
