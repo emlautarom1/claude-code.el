@@ -2,8 +2,6 @@
 
 > ⚠️ **These are Claude Code internals and are version-volatile.** Everything here describes undocumented on-disk formats under the [config dir](glossary.md) that Anthropic may change between releases (verified against CLI **v2.1.265**). In the code, **all** of this knowledge is confined to the *Storage adapter* section of `claude-code.el` (`claude-code--encode-cwd`, `claude-code--live-status-table`, `claude-code--project-transcripts` and their helpers). The rest of the package works only with `claude-code-session` structs. When Claude's layout changes, fix that one section.
 
-For the background-agent / FleetView subsystem (a separate concern this package does not manage), see [`claude-code-internals.md`](claude-code-internals.md).
-
 ## Config directory
 
 `~/.claude`, or `$CLAUDE_CONFIG_DIR` when set. Resolved once into `claude-code-config-dir`.
@@ -27,6 +25,14 @@ Claude writes one JSON file per running process, named by OS PID. The fields thi
 A session's display name comes entirely from the transcript (see [Transcripts](#transcripts--projectsencoded-cwdsessionidjsonl) and `claude-code--session-display-name`); a `/rename` is reflected there through its `custom-title`. Claude writes a `name` here too, qualified by `nameSource`: `derived` marks the directory-derived placeholder (`{"name":"proj-f8","nameSource":"derived"}`), while `auto`, `user`, `peer`, `hook` and `collision` mark real ones. Reading it would still be wrong, because this file exists only while the process does — it names live sessions and nothing else, and a view has to name dead ones from the same source as live ones. That source is the transcript.
 
 Liveness is a plain per-PID `process-attributes` existence check. Claude records two guards against a reused PID — `procStart` (start-time jiffies) and `pidDomain` (`linux:<machine-id>:<pid-namespace>`, which also keeps PIDs from separate containers apart) — and this package consults **neither**. A stale `sessions/<pid>.json` left by a crash whose PID was reused could therefore mis-flag a dead session as external, accepted as a simplicity trade-off since PID reuse is vanishingly unlikely (`pid_max` defaults to 4194304).
+
+### Not every process here is a terminal session
+
+`kind` names what the process is: `interactive`, `bg` for a background agent, and `daemon` / `daemon-worker` for Claude's background-agent supervisor and the workers it owns. A pre-warmed spare carries `spare: true` and no `jobId`. The table takes them all, since it keys on `sessionId` and reads only the fields above.
+
+This is not the inert detail it looks like. A `claude --bg` session stamps its transcript `entrypoint: "cli"`, exactly as a terminal session does, so [the entrypoint filter](#the-entrypoint-stamp) cannot tell the two apart and a project's view **lists background agents alongside the user's own sessions** — [external](glossary.md) while the worker runs, dead once it stops. That is the right answer for a session the user dispatched and may want to read or resume, and it costs no knowledge of the supervisor to reach: a live process with a matching transcript is all *external* means.
+
+Deletion is the one asymmetry. `claude-code-delete` removes the transcript and nothing else, while Claude keeps a background agent's own state under `jobs/<first 8 of sessionId>/` — so deleting one from Emacs leaves a row in `claude agents` whose conversation is gone. Removing that state is `claude rm`'s business, not this package's.
 
 ## Transcripts — `projects/<encoded-cwd>/<sessionId>.jsonl`
 

@@ -109,7 +109,6 @@ Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.
 - [`docs/storage-model.md`](docs/storage-model.md) — the `~/.claude` layout this package reads (Claude internals; version-volatile).
 - [`docs/architecture.md`](docs/architecture.md) — layers and design decisions.
 - [`docs/mcp-tools.md`](docs/mcp-tools.md) — the tools the MCP server advertises to spawned sessions.
-- [`docs/claude-code-internals.md`](docs/claude-code-internals.md) — Claude's background-agent/FleetView subsystem (reference; not managed by this package).
 
 ## Development
 
