@@ -1471,14 +1471,12 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
                    (list (or (transient-scope) (claude-code--project-root))
                          (transient-args transient-current-command))
                  (list (claude-code--project-root))))
-  (let* ((prompt (read-string "Initial prompt (empty for none): "))
-         (instance (claude-code-spawn
-                    root
-                    :prompt (unless (string-empty-p prompt) prompt)
-                    :name (transient-arg-value "--name=" args)
-                    :worktree (and (member "--worktree" args) t)
-                    :model (transient-arg-value "--model=" args)
-                    :effort (transient-arg-value "--effort=" args))))
+  (let ((instance (claude-code-spawn
+                   root
+                   :name (transient-arg-value "--name=" args)
+                   :worktree (and (member "--worktree" args) t)
+                   :model (transient-arg-value "--model=" args)
+                   :effort (transient-arg-value "--effort=" args))))
     (claude-code--refresh-views)
     (claude-code--show (cdr instance))))
 

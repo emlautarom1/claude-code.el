@@ -2398,7 +2398,6 @@ other buffer asks `project.el', which prompts when the buffer has no project."
                (lambda (root &rest kw) (setq spawn-args (cons root kw))))
               ((symbol-function 'claude-code--refresh-views) #'ignore)
               ((symbol-function 'claude-code--show) #'ignore)
-              ((symbol-function 'read-string) (lambda (&rest _) ""))
               ;; Stubbed at the real arity, which the transient built into
               ;; Emacs 30 caps at zero.
               ((symbol-function 'transient-scope) (lambda () "/scoped"))
@@ -2414,14 +2413,13 @@ other buffer asks `project.el', which prompts when the buffer has no project."
         (let ((transient-current-command nil))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/r" :prompt nil :name nil :worktree nil :model nil
-                         :effort nil)))
+                       '("/r" :name nil :worktree nil :model nil :effort nil)))
         ;; With a menu live the root comes from its scope, not from whichever
         ;; buffer the suffix happens to run in.
         (let ((transient-current-command 'claude-code-spawn-menu))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/scoped" :prompt nil :name "a long name" :worktree t
+                       '("/scoped" :name "a long name" :worktree t
                          :model "opus" :effort "xhigh")))))))
 
 (defmacro claude-code-tests--driving-spawn-menu (spawns &rest body)
@@ -2466,12 +2464,12 @@ is stubbed here."
   (claude-code-tests--driving-spawn-menu spawns
     (with-temp-buffer
       (claude-code-spawn-menu)
-      ;; `-n' reads a name, `-w' toggles the worktree switch, `c' creates the
-      ;; session, and RET answers the initial-prompt read with the empty string.
-      (execute-kbd-macro (kbd "- n r e v i e w RET - w c RET")))
+      ;; `-n' reads a name, `-w' toggles the worktree switch and `c' creates
+      ;; the session.
+      (execute-kbd-macro (kbd "- n r e v i e w RET - w c")))
     (should (equal (car spawns)
                    (list (claude-code--normalize-root "/home/test/proj")
-                         :prompt nil :name "review" :worktree t
+                         :name "review" :worktree t
                          :model nil :effort nil)))))
 
 (ert-deftest claude-code-test-spawn-menu-forgets-the-name ()
@@ -2486,10 +2484,10 @@ model here -- carries no name into them."
       ;; `transient-set' is called rather than keyed: which key runs it is
       ;; transient's business, and the menu stays up either way.
       (call-interactively #'transient-set)
-      (execute-kbd-macro (kbd "c RET")))
+      (execute-kbd-macro (kbd "c")))
     (with-temp-buffer
       (claude-code-spawn-menu)
-      (execute-kbd-macro (kbd "c RET")))
+      (execute-kbd-macro (kbd "c")))
     (should (equal (mapcar (lambda (spawn)
                              (list (plist-get (cdr spawn) :name)
                                    (plist-get (cdr spawn) :model)))
@@ -2531,7 +2529,6 @@ the acting view's root would leave a view of the same session stale."
                   ;; Both the spawn and the resume RET drives display through
                   ;; the one policy.
                   ((symbol-function 'claude-code--show) #'ignore)
-                  ((symbol-function 'read-string) (lambda (&rest _) ""))
                   ((symbol-function 'y-or-n-p) (lambda (_) t))
                   ((symbol-function 'yes-or-no-p) (lambda (_) t)))
           (pcase-dolist (`(,buffer . ,project)
@@ -2577,7 +2574,6 @@ same policy is `claude-code-test-sessions-visit-dispatch'."
         (cl-letf (((symbol-function 'claude-code-spawn)
                    (lambda (&rest _) (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code--refresh-views) #'ignore)
-                  ((symbol-function 'read-string) (lambda (&rest _) ""))
                   ((symbol-function 'claude-code--show)
                    (lambda (b &rest _) (push b shown))))
           (with-temp-buffer (claude-code--spawn-session "/r"))
