@@ -263,7 +263,9 @@ the developer exports."
       (let ((s2 (funcall by-id "22222222-2222-4222-8222-222222222222")))
         ;; A custom title supplies the title even with no ai-title line.
         (should (equal (plist-get s2 :title) "My renamed session"))
-        (should (equal (plist-get s2 :last-prompt) "another task here")))
+        (should (equal (plist-get s2 :last-prompt) "another task here"))
+        (should (string-prefix-p "Goal was extending the consult keybindings"
+                                 (plist-get s2 :recap))))
       (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
         (should (equal (plist-get s3 :worktree) "feat"))
         ;; A user custom title takes precedence over Claude's ai-title.
@@ -467,6 +469,49 @@ put that literal in its way; the parsed top-level key is what decides."
         "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"custom-title\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}")
       1800000000
     (should (equal (plist-get (claude-code--transcript-fields file) :title)
+                   "real"))))
+
+(ert-deftest claude-code-test-transcript-fields-recap ()
+  "`:recap' is the newest `away_summary', stripped of the CLI's `/config' note.
+Claude writes one every time the user comes back to a session, so a long
+conversation carries several and only the last one describes where it stands."
+  (let ((recap (lambda (&rest lines)
+                 (claude-code-tests--with-transcript file lines 1800000000
+                   (plist-get (claude-code--transcript-fields file) :recap)))))
+    ;; A session Claude never recapped has none.
+    (should-not (funcall recap "{\"type\":\"ai-title\",\"aiTitle\":\"t\"}"))
+    ;; The newest wins, and the trailing `/config' note is not part of it.
+    (should (equal (funcall recap
+                            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Older recap. (disable recaps in /config)\"}"
+                            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Newest recap.\"}")
+                   "Newest recap."))
+    (should (equal (funcall recap
+                            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"Goal was X. (disable recaps in /config)\"}")
+                   "Goal was X."))
+    ;; A recap that is nothing but the note reads as no recap, not as "".
+    (should-not (funcall recap
+                         "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\" (disable recaps in /config)\"}"))
+    ;; A field that is not a string is dropped rather than trusted: JSON null
+    ;; arrives as a symbol, and one of those reaching `string-remove-suffix'
+    ;; would signal and take the whole view down with it.
+    (should-not (funcall recap
+                         "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":null}"))
+    (should-not (funcall recap
+                         "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"\"}"))
+    ;; `content' is the one field name other line types also carry at the top
+    ;; level, so the scan settles a match on `subtype' as well.  Both of these
+    ;; sit newer than the recap and hold text of their own to mistake for one.
+    (should (equal (funcall recap
+                            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"real\"}"
+                            "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"content\":\"queued prompt\",\"meta\":{\"away_summary\":true}}"
+                            "{\"type\":\"system\",\"subtype\":\"local_command\",\"content\":\"<local-command-stdout>away_summary</local-command-stdout>\"}")
+                   "real"))
+    ;; The conversation's own text never reaches that check: JSON escapes the
+    ;; quotes in a quoted token, so the literal the scan searches for is not
+    ;; what ends up on the line.
+    (should (equal (funcall recap
+                            "{\"type\":\"system\",\"subtype\":\"away_summary\",\"content\":\"real\"}"
+                            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"away_summary\"},\"timestamp\":\"2026-06-10T13:23:27.697Z\"}")
                    "real"))))
 
 (defun claude-code-tests--stamped-line (entrypoint content)
@@ -2243,6 +2288,30 @@ since the last refresh still draws as alive."
                   (should (string-match-p "Dead (6)" text))
                   (should-not (string-match-p "11111111" text))))))
         (kill-buffer buf)))))
+
+(ert-deftest claude-code-test-view-eldoc-recap ()
+  "The view answers ElDoc with the recap of the session under point."
+  ;; Pinning 1002 makes session 22222222 -- the one carrying a recap -- external
+  ;; rather than dead, so the answer plainly does not turn on liveness.
+  (claude-code-tests--in-fixture-view '(1002)
+    (should (memq #'claude-code--eldoc-recap
+                  (buffer-local-value 'eldoc-documentation-functions
+                                      (current-buffer))))
+    (should (eldoc--supported-p))
+    (setq claude-code--collapsed nil)
+    (claude-code-sessions-refresh)
+    (should (claude-code-tests--goto-session
+             "22222222-2222-4222-8222-222222222222"))
+    (should (string-prefix-p "Goal was extending the consult keybindings"
+                             (claude-code--eldoc-recap)))
+    ;; The recap stops at the text: the CLI's `/config' note is not shown.
+    (should-not (string-match-p "/config" (claude-code--eldoc-recap)))
+    (should (claude-code-tests--goto-session
+             "11111111-1111-4111-8111-111111111111"))
+    (should-not (claude-code--eldoc-recap))
+    (goto-char (point-min))
+    (should (claude-code--group-at-point))
+    (should-not (claude-code--eldoc-recap))))
 
 (ert-deftest claude-code-test-view-rooted-at-a-worktree ()
   "A view rooted at a worktree shows the running session as running.

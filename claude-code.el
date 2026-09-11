@@ -25,8 +25,10 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'eldoc)
 (require 'seq)
 (require 'project)
+(require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)
 
@@ -134,18 +136,21 @@ Moves point to the start of the line, so a scan can step off it either way."
     (json-parse-string
      (buffer-substring-no-properties (point) (line-end-position)))))
 
-(defun claude-code--json-line-field (literal field)
+(defun claude-code--json-line-field (literal field &optional predicate)
   "Return FIELD from the newest line in the current buffer containing LITERAL.
 Scans backward from the end and returns FIELD from the first such line that
 parses as JSON with a non-nil FIELD, skipping the ones that lack it -- a line
 carrying LITERAL inside a message, or as a nested key rather than a top-level
 one.  LITERAL need only be loose enough to catch every line that sets FIELD,
-since the parsed top-level FIELD is what confirms a match.  Point is moved.
+since the parsed top-level FIELD is what confirms a match.  PREDICATE, called
+with the parsed line, is that confirmation where FIELD alone is not enough
+because other line types carry a key by the same name.  Point is moved.
 Returns nil when no such line exists."
   (goto-char (point-max))
   (let (result)
     (while (and (not result) (search-backward literal nil t))
-      (when-let* ((obj (claude-code--json-line-at-point)))
+      (when-let* ((obj (claude-code--json-line-at-point))
+                  ((or (null predicate) (funcall predicate obj))))
         (setq result (gethash field obj))))
     result))
 
@@ -190,8 +195,26 @@ the whole view rather than this one session."
               :path (and (stringp path) path)
               :bound (hash-table-p latest))))))
 
+(defconst claude-code--recap-chrome " (disable recaps in /config)"
+  "Trailing text the CLI appends to a process's first few recaps.
+It points at a Claude `/config' toggle, so it is chrome the moment the recap
+leaves the CLI's own screen.  See docs/storage-model.md.")
+
+(defun claude-code--read-recap ()
+  "Return the newest recap in the transcript in the current buffer, or nil.
+Point is moved.  See docs/storage-model.md for the line this reads and for why
+`content' alone does not identify it."
+  (when-let* ((recap (claude-code--json-line-field
+                      "\"away_summary\"" "content"
+                      (lambda (obj) (equal (gethash "subtype" obj)
+                                           "away_summary"))))
+              ((stringp recap))
+              (text (string-remove-suffix claude-code--recap-chrome recap))
+              ((not (string-empty-p text))))
+    text))
+
 (defun claude-code--read-transcript-fields (file)
-  "Read FILE's :interactive-p, title, last-prompt, last-active and worktree.
+  "Read FILE's transcript fields from disk.
 :last-active is nil when FILE has no timestamped line."
   (with-temp-buffer
     (insert-file-contents file)
@@ -202,6 +225,8 @@ the whole view rather than this one session."
               (claude-code--json-line-field "\"ai-title\"" "aiTitle"))
           :last-prompt
           (claude-code--json-line-field "\"last-prompt\"" "lastPrompt")
+          :recap
+          (claude-code--read-recap)
           :worktree-binding
           (claude-code--read-worktree-binding)
           :last-active
@@ -210,9 +235,9 @@ the whole view rather than this one session."
 
 (defun claude-code--transcript-fields (file)
   "Return FILE's transcript fields, cached by mtime.
-The keys are :id, :interactive-p, :title, :last-prompt, :worktree-binding and
-:last-active, the mtime standing in for the last of those when FILE has no
-timestamped line."
+The keys are :id, :interactive-p, :title, :last-prompt, :recap,
+:worktree-binding and :last-active, the mtime standing in for the last of those
+when FILE has no timestamped line."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
@@ -232,16 +257,16 @@ timestamped line."
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :interactive-p, :title, :last-prompt,
-:worktree-binding, :last-active, :transcript (absolute file) and :worktree --
-the worktree's encoded directory token, nil for a main-tree transcript.  Every
-transcript is described, including the ones `claude-code-project-sessions'
-declines to list, so that an id resolves whatever the view shows.  Ids are
-unique across the result: a session's transcript lives in exactly one
-encoded directory.  Membership and the token both come from the
-\"--claude-worktrees-\" directory prefix; the encoding is lossy, so the token
-decides only which project lists the transcript and is never decoded back into
-a name or path.  The worktree a session runs in is :worktree-binding's
-business (see docs/storage-model.md)."
+:recap, :worktree-binding, :last-active, :transcript (absolute file) and
+:worktree -- the worktree's encoded directory token, nil for a main-tree
+transcript.  Every transcript is described, including the ones
+`claude-code-project-sessions' declines to list, so that an id resolves
+whatever the view shows.  Ids are unique across the result: a session's
+transcript lives in exactly one encoded directory.  Membership and the token
+both come from the \"--claude-worktrees-\" directory prefix; the encoding is
+lossy, so the token decides only which project lists the transcript and is
+never decoded back into a name or path.  The worktree a session runs in is
+:worktree-binding's business (see docs/storage-model.md)."
   (let* ((projects (claude-code--projects-dir))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
@@ -278,12 +303,14 @@ LAST-PROMPT come from the transcript and, via
 `claude-code--session-display-name', are the session's only display-name
 sources; WORKTREE names the session's worktree, nil for a main-tree one, and
 WORKTREE-BINDING is the storage adapter's record behind it, which the resume
-path reads (see `claude-code--resume-worktree').
+path reads (see `claude-code--resume-worktree').  RECAP is Claude's own
+one-paragraph account of where the session stood, nil for a session that has
+none.
 TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
 session's last genuine activity, taken from the newest timestamped transcript
 line."
   id status waiting-for alive-p pid buffer worktree worktree-binding
-  title last-prompt transcript external-p last-active)
+  title last-prompt recap transcript external-p last-active)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
@@ -398,6 +425,7 @@ Claude recorded bindings, where the flattened name is all there is."
                       (plist-get reg :worktree))
         :title (plist-get tr :title)
         :last-prompt (plist-get tr :last-prompt)
+        :recap (plist-get tr :recap)
         :transcript (plist-get tr :transcript)
         :last-active (plist-get tr :last-active)))
 
@@ -1192,6 +1220,13 @@ cannot outlive its row and come back armed."
   (when-let* ((id (tabulated-list-get-id)))
     (gethash id claude-code--session-table)))
 
+(defun claude-code--eldoc-recap (&rest _)
+  "Return the recap of the session on the current line, or nil.
+The view's `eldoc-documentation-functions' member.  The recap is a cached
+transcript field, so this answers synchronously by returning the string."
+  (when-let* ((session (claude-code--session-at-point)))
+    (claude-code-session-recap session)))
+
 (defun claude-code--group-at-point ()
   "Return the key of the group the current line belongs to, or nil.
 Point may be on the group header or on one of the group's rows."
@@ -1490,6 +1525,7 @@ however the batch ends."
   ;; Not a function: `C-u -1 S' sorts this value directly.
   (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
+  (add-hook 'eldoc-documentation-functions #'claude-code--eldoc-recap nil t)
   (tabulated-list-init-header))
 
 ;;;;; Entry points

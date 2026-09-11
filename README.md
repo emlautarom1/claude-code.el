@@ -9,6 +9,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Per-project sessions view** (`M-x claude-code-sessions`) — a `tabulated-list-mode` buffer listing every [interactive session](docs/glossary.md) of the current `project.el` project, alive and dead.
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree.
+- **Session recaps in the echo area** — Claude writes a short account of where a session stood each time you come back to it after a break. Move point onto a row and the view hands that session's latest recap to ElDoc, the way `emacs-lisp-mode` documents the variable under point; `M-x eldoc-doc-buffer` shows the full text. Sessions Claude never recapped simply show nothing.
 - **External sessions** — one of your `claude` processes running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, create a new one (with a display name, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
 - **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.

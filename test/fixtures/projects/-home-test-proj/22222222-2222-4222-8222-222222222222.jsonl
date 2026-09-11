@@ -1,4 +1,5 @@
 {"type":"mode","mode":"normal","sessionId":"22222222-2222-4222-8222-222222222222"}
 {"parentUuid":null,"type":"user","message":{"role":"user","content":"another"},"sessionId":"22222222-2222-4222-8222-222222222222","cwd":"/home/test/proj"}
 {"type":"last-prompt","lastPrompt":"another task here","leafUuid":"aaaaaaaa-798e-4855-900c-9834bcf43bfc","sessionId":"22222222-2222-4222-8222-222222222222"}
+{"parentUuid":"aaaaaaaa-798e-4855-900c-9834bcf43bfc","isSidechain":false,"type":"system","subtype":"away_summary","content":"Goal was extending the consult keybindings without conflicts. I applied the proposed bindings to init.el and verified them live; the lower-value ones were skipped. Next: say whether to add the skipped ones. (disable recaps in /config)","timestamp":"2026-06-10T13:21:00.000Z","uuid":"aaaaaaaa-0000-4000-8000-00000000000a","isMeta":false,"userType":"external","entrypoint":"cli","cwd":"/home/test/proj","sessionId":"22222222-2222-4222-8222-222222222222","version":"2.1.265","gitBranch":"main"}
 {"type":"custom-title","customTitle":"My renamed session","sessionId":"22222222-2222-4222-8222-222222222222"}

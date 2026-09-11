@@ -8,6 +8,8 @@ Terms used throughout `claude-code.el` and its documentation. They are chosen to
 
 - **Transcript** — the append-only `.jsonl` file recording a session's messages, stored under `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`.
 
+- **Recap** — Claude's own short account of where a session stood, written into the transcript each time the user returns to it after a break. A session carries one only if Claude wrote one; the newest is the session's recap (see [storage model](storage-model.md#transcripts--projectsencoded-cwdsessionidjsonl)).
+
 - **Instance** (a.k.a. *claude instance*) — a running `claude` process working on a session. In this package every instance is hosted in a [Ghostel](https://github.com/dakra/ghostel) terminal buffer.
 
 - **Instance buffer** — the Ghostel terminal buffer that hosts a running instance, named `*claude: <title>*` (Ghostel tracks the terminal title Claude sets; the status-indicator glyph Claude prefixes to that title is stripped, and before the first title the buffer is seeded as `*claude: <project>*`). This is the buffer you switch to (`RET` on the row, or `o` for another window) to talk to a live session directly, as you would in any terminal. Its major mode is `claude-code-instance-mode` (see [the instance mode](architecture.md#the-instance-mode)).
