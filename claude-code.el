@@ -33,7 +33,8 @@
 ;; Ghostel is required lazily in the launch path (see `claude-code--launch').
 ;; Declaring its API here keeps the byte-compiler happy without the native
 ;; module being present, so the package compiles and tests in CI.
-(declare-function ghostel-exec "ghostel" (buffer program &optional args))
+(declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
+(declare-function ghostel-mode "ghostel" ())
 (declare-function ghostel-send-string "ghostel" (string))
 (declare-function ghostel-send-key "ghostel" (key-name &optional mods))
 (declare-function ghostel-paste-string "ghostel" (string))
@@ -43,6 +44,7 @@
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-buffer-name-function)
 (defvar ghostel-notification-function)
+(defvar ghostel-semi-char-mode-map)
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
@@ -581,9 +583,8 @@ terminator; this function keeps no MCP knowledge of its own."
   "Function that seeds the name of the buffer hosting a new instance.
 Called with the project root; must return a string.  This is only the
 pre-title seed: once the instance reports a terminal title, Ghostel renames
-the buffer via `claude-code--ghostel-buffer-name' (see
-`claude-code--install-buffer-name-tracking').  Name clashes are resolved by
-`generate-new-buffer'."
+the buffer via `claude-code--ghostel-buffer-name'.  Name clashes are resolved
+by `generate-new-buffer'."
   :type 'function)
 
 (defun claude-code--default-buffer-name (root)
@@ -605,13 +606,34 @@ when nothing but the indicator is left, like `ghostel-buffer-name-by-title'."
       (unless (string= "" clean)
         (format "*claude: %s*" clean)))))
 
-(defun claude-code--install-buffer-name-tracking (buffer)
-  "Make BUFFER track its Claude terminal title as \"*claude: TITLE*\".
-Installs `claude-code--ghostel-buffer-name' as a buffer-local
-`ghostel-buffer-name-function'.  Must run after `ghostel-exec', whose
-`ghostel-mode' switch would otherwise wipe the buffer-local binding."
-  (with-current-buffer buffer
-    (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name)))
+(defvar-keymap claude-code-instance-mode-map
+  ;; Declared with a parent so `define-derived-mode' does not adopt
+  ;; `ghostel-semi-char-mode-map' as one, leaking terminal bindings into copy
+  ;; and emacs mode.
+  :parent (make-sparse-keymap)
+  :doc "Keymap active in every buffer hosting a Claude instance.
+Bindings here outrank every enabled minor mode and Ghostel's own terminal
+bindings.  What Ghostel puts in `emulation-mode-map-alists' still wins: char
+mode's whole map, and the scroll and drag-and-drop intercepts in every mode.
+A parent of your own may replace the empty one.")
+
+(defvar-local claude-code--instance-keys nil
+  "Non-nil in buffers where `claude-code-instance-mode-map' is active.")
+
+(define-derived-mode claude-code-instance-mode ghostel-mode "Claude"
+  "Major mode for a Ghostel terminal hosting a Claude instance.
+Gives Claude's terminals a `display-buffer-alist' key and a keymap that no
+other Ghostel terminal answers to.
+
+\\{claude-code-instance-mode-map}"
+  :interactive nil
+  (use-local-map ghostel-semi-char-mode-map)
+  (setq-local claude-code--instance-keys t)
+  (setq-local minor-mode-overriding-map-alist
+              (cons (cons 'claude-code--instance-keys
+                          claude-code-instance-mode-map)
+                    minor-mode-overriding-map-alist))
+  (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name))
 
 (defun claude-code--new-uuid ()
   "Return a random RFC-4122 version-4 UUID string."
@@ -659,8 +681,7 @@ Stored under :worktree is the name of a named worktree request, nil otherwise
 -- an auto-named one has no name to show until Claude writes the transcript
 that carries it.  Registering a live BUFFER also wires up the entry's
 removal: BUFFER is made to die with its process, so its kill is the one event
-that retires the entry.  Must run after `ghostel-exec', whose `ghostel-mode'
-switch would wipe the buffer-local flag."
+that retires the entry."
   (with-current-buffer buffer
     (setq-local ghostel-kill-buffer-on-exit t)
     (add-hook 'kill-buffer-hook #'claude-code--on-buffer-kill nil t))
@@ -730,6 +751,9 @@ The instance is launched on `claude-code-renderer' when it names one."
                   (funcall claude-code-buffer-name-function root)))
          (renderer-hook
           (lambda () (claude-code--apply-renderer-env renderer-env))))
+    ;; Ahead of the spawn: Ghostel refuses a mode change once the terminal
+    ;; process is live.
+    (with-current-buffer buffer (claude-code-instance-mode))
     ;; The default value is the one Ghostel reads in the instance's own buffer.
     (when renderer-env
       (set-default 'ghostel-pre-spawn-hook
@@ -741,7 +765,6 @@ The instance is launched on `claude-code-renderer' when it names one."
         (set-default 'ghostel-pre-spawn-hook
                      (delq renderer-hook
                            (default-value 'ghostel-pre-spawn-hook)))))
-    (claude-code--install-buffer-name-tracking buffer)
     (claude-code--install-notifications id buffer)
     (claude-code--register id buffer root (plist-get opts :worktree))
     buffer))
@@ -1424,7 +1447,7 @@ however the batch ends."
   "u"   #'claude-code-sessions-unmark
   "G"   #'claude-code-sessions-cycle-grouping)
 
-(define-derived-mode claude-code-sessions-mode tabulated-list-mode "Claude"
+(define-derived-mode claude-code-sessions-mode tabulated-list-mode "Claude Sessions"
   "Major mode listing the Claude Code sessions of a project.
 
 \\{claude-code-sessions-mode-map}"

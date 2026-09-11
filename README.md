@@ -64,6 +64,14 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 
 An instance appears in the selected window. A window that cannot host it — a side window, or any window dedicated to its buffer — keeps what it has and the instance opens in another window; an instance already showing on the selected frame is shown there rather than a second time. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this.
 
+Instances are hosted in `claude-code-instance-mode`, a major mode deriving from `ghostel-mode`, so `(derived-mode . claude-code-instance-mode)` is the `display-buffer-alist` condition that matches Claude's terminals and no other. Bindings for them go in its keymap; they survive Ghostel's input-mode switches and outrank every enabled minor mode. Char mode is the exception — it sends every key to the terminal.
+
+```elisp
+(use-package claude-code
+  :bind (:map claude-code-instance-mode-map
+              ("C-c C-k" . claude-code-sessions)))
+```
+
 ## Programmatic API
 
 ```elisp

@@ -14,6 +14,28 @@
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-pre-spawn-hook nil)
 
+;; `claude-code-instance-mode' derives from `ghostel-mode' and installs
+;; `ghostel-semi-char-mode-map', so entering it needs both to exist.  An
+;; integration test may `require' Ghostel later in the same Emacs, and Ghostel
+;; defines each of these with a form that leaves an already-bound name alone --
+;; so a stand-in is only safe where the real definition can still take effect
+;; over it.  `ghostel-mode' is safe because `defun' overwrites.
+;; `ghostel-semi-char-mode-map' is safe because Ghostel fills its map in place
+;; (`ghostel--rebuild-semi-char-keymap' ends in a `setcdr'), which reaches this
+;; object and gives it the real bindings and the `ghostel-mode-map' parent that
+;; carries the `C-c' prefix.  Nothing else may be stubbed here on those terms:
+;; a stub `ghostel-mode-map' in particular would stay empty and strand that
+;; prefix, which is why the stand-in below is a plain function -- a
+;; `define-derived-mode' would define one.
+(unless (featurep 'ghostel)
+  (defvar ghostel-semi-char-mode-map (make-sparse-keymap))
+  (defun ghostel-mode ()
+    "Stand-in for Ghostel's major mode, reproducing what it owes its caller."
+    (kill-all-local-variables)
+    (setq major-mode 'ghostel-mode)
+    (setq mode-name "Ghostel")
+    (use-local-map ghostel-semi-char-mode-map)))
+
 (defvar claude-code-tests--fixtures
   (expand-file-name
    "fixtures" (file-name-directory (or load-file-name buffer-file-name)))
@@ -995,13 +1017,59 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
   (should (null (claude-code--ghostel-buffer-name "")))
   (should (null (claude-code--ghostel-buffer-name nil))))
 
-(ert-deftest claude-code-test-install-buffer-name-tracking ()
-  "Instrumenting a buffer makes Ghostel name it via the Claude title tracker."
+(ert-deftest claude-code-test-instance-mode ()
+  "The instance mode is a Ghostel terminal that names itself after the title."
   (with-temp-buffer
-    (claude-code--install-buffer-name-tracking (current-buffer))
+    (claude-code-instance-mode)
+    (should (derived-mode-p 'ghostel-mode))
     (should (local-variable-p 'ghostel-buffer-name-function))
     (should (eq ghostel-buffer-name-function
                 #'claude-code--ghostel-buffer-name))))
+
+(ert-deftest claude-code-test-instance-mode-leaves-ghostel-the-local-map ()
+  "The mode's own bindings sit above Ghostel's map rather than replacing it.
+A binding is checked by what it resolves to, not by the shape of the alist
+carrying it: a gate left nil would leave that shape intact and every binding
+dead."
+  (with-temp-buffer
+    (claude-code-instance-mode)
+    (should (eq (current-local-map) ghostel-semi-char-mode-map))
+    (should claude-code--instance-keys)
+    (should (local-variable-p 'minor-mode-overriding-map-alist))
+    (should (eq (alist-get 'claude-code--instance-keys
+                           minor-mode-overriding-map-alist)
+                claude-code-instance-mode-map))
+    (keymap-set claude-code-instance-mode-map "C-c M-z" #'ignore)
+    (unwind-protect
+        (should (eq (key-binding (kbd "C-c M-z")) #'ignore))
+      (keymap-unset claude-code-instance-mode-map "C-c M-z" t))))
+
+(ert-deftest claude-code-test-instance-mode-map-keeps-its-parent ()
+  "Entering the mode leaves the map's parent to whoever set it."
+  (let ((original (keymap-parent claude-code-instance-mode-map))
+        (mine (make-sparse-keymap)))
+    (should original)
+    (unwind-protect
+        (progn
+          (set-keymap-parent claude-code-instance-mode-map mine)
+          (with-temp-buffer (claude-code-instance-mode))
+          (should (eq (keymap-parent claude-code-instance-mode-map) mine)))
+      (set-keymap-parent claude-code-instance-mode-map original))))
+
+(ert-deftest claude-code-test-mode-lighters ()
+  "The two modes name themselves apart in the mode line."
+  (should (equal (with-temp-buffer (claude-code-instance-mode) mode-name)
+                 "Claude"))
+  (should (equal (with-temp-buffer (claude-code-sessions-mode) mode-name)
+                 "Claude Sessions")))
+
+(ert-deftest claude-code-test-instance-mode-is-not-a-command ()
+  "The mode is not offered to `M-x': there is no buffer it is right to enter.
+Its parent turns a buffer over to a terminal that is not there -- clearing the
+local variables, disabling undo, and making it read-only -- with nothing to
+undo any of it."
+  (should (fboundp 'claude-code-instance-mode))
+  (should-not (commandp 'claude-code-instance-mode)))
 
 (ert-deftest claude-code-test-buffer-kill-unregisters ()
   "An instance's buffer dying removes its registry entry."
@@ -1097,10 +1165,27 @@ its process exits, so no kill is ever coming."
           (should (zerop (hash-table-count claude-code--managed)))
           (should (= fired 1)))))))
 
+(ert-deftest claude-code-test-launch-enters-the-mode-before-the-spawn ()
+  "The buffer is in `claude-code-instance-mode' by the time Ghostel spawns.
+Ghostel refuses a mode change once the terminal process is live, so a launch
+that left it until afterwards could not switch at all."
+  (claude-code-tests--with-registry
+    (let ((execs '())
+          (at-exec nil))
+      (claude-code-tests--recording-launch execs
+        (let ((recorded (symbol-function 'ghostel-exec)))
+          (cl-letf (((symbol-function 'ghostel-exec)
+                     (lambda (buffer &rest args)
+                       (setq at-exec (buffer-local-value 'major-mode buffer))
+                       (apply recorded buffer args))))
+            (claude-code-spawn "/r")
+            (should (eq at-exec 'claude-code-instance-mode))))))))
+
 (ert-deftest claude-code-test-launch-shared-by-spawn-and-resume ()
   "Spawn and resume host their instance through one launch path.
 Both reach `ghostel-exec' with the MCP arguments threaded in, register the
-instance, and install title tracking; only the CLI argument list differs."
+instance, and put the buffer in `claude-code-instance-mode'; only the CLI
+argument list differs."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (let ((execs '())
@@ -1144,6 +1229,8 @@ instance, and install title tracking; only the CLI argument list differs."
                   (let ((buffer (plist-get (gethash id claude-code--managed)
                                            :buffer)))
                     (should (memq buffer buffers))
+                    (should (eq (buffer-local-value 'major-mode buffer)
+                                'claude-code-instance-mode))
                     (should (eq (buffer-local-value 'ghostel-buffer-name-function
                                                     buffer)
                                 #'claude-code--ghostel-buffer-name))
@@ -3012,9 +3099,27 @@ The name is given as several words to show that it reaches the CLI whole."
             (setq id (car instance))
             (setq buffer (cdr instance)))
           (should (string-match-p claude-code-tests--uuid-re id))
-          ;; The title tracker survives `ghostel-exec's `ghostel-mode' switch.
+          ;; Ghostel spawned into the mode it was handed, leaving the title
+          ;; tracker the mode installed in place.
+          (should (eq (buffer-local-value 'major-mode buffer)
+                      'claude-code-instance-mode))
           (should (eq (buffer-local-value 'ghostel-buffer-name-function buffer)
                       #'claude-code--ghostel-buffer-name))
+          ;; A binding in the mode's map outlives Ghostel's input-mode
+          ;; switches, each of which installs a local map of its own, and
+          ;; char mode still outranks it.
+          (keymap-set claude-code-instance-mode-map "C-c M-z" #'ignore)
+          (unwind-protect
+              (with-current-buffer buffer
+                (should (eq (key-binding (kbd "C-c M-z")) #'ignore))
+                (ghostel-char-mode)
+                (should-not (eq (key-binding (kbd "C-c M-z")) #'ignore))
+                (ghostel-semi-char-mode)
+                (should (eq (key-binding (kbd "C-c M-z")) #'ignore))
+                ;; Ghostel's own semi-char bindings are still reachable.
+                (should (eq (key-binding (kbd "C-c C-j"))
+                            #'ghostel-semi-char-mode)))
+            (keymap-unset claude-code-instance-mode-map "C-c M-z" t))
           (setq pid (buffer-local-value 'ghostel--pid buffer))
           (should (claude-code--pid-live-p pid))
           ;; Ghostel ran the pre-spawn hook: the entry the `inline' renderer
