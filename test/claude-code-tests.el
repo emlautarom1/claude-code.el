@@ -2162,6 +2162,56 @@ The liveness dispatch is shared with RET
         (claude-code-sessions-visit-other-window)
         (should (eq shown 'terminal))))))
 
+(ert-deftest claude-code-test-sessions-point-commands-refuse-before-prompting ()
+  "`r', `s' and `i' refuse a row they cannot drive before reading any input.
+The gate is the live process, not the row's `alive-p': a session that ended
+since the last refresh still draws as alive."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((gone (generate-new-buffer " *cc-gone*"))
+          (at-point nil) (answer nil) (driven '()))
+      ;; The stale row names a buffer whose instance is already gone -- what an
+      ;; unrefreshed view holds after a `/exit'.
+      (kill-buffer gone)
+      (cl-letf (((symbol-function 'claude-code--session-at-point)
+                 (lambda () at-point))
+                ((symbol-function 'claude-code--session-process)
+                 (lambda (b) (and (eq b buf) 'proc)))
+                ((symbol-function 'read-string)
+                 (lambda (&rest _) (or answer (ert-fail "Prompted before the guard"))))
+                ((symbol-function 'claude-code-send-text)
+                 (lambda (s text &optional _submit)
+                   (push (list 'send (claude-code-session-id s) text) driven)))
+                ((symbol-function 'claude-code-interrupt)
+                 (lambda (s) (push (list 'interrupt (claude-code-session-id s)) driven))))
+        (claude-code-tests--in-view
+          (pcase-dolist (`(,row ,message)
+                         (list
+                          (list nil "No session on this line")
+                          (list (claude-code-session--create
+                                 :id "x" :alive-p t :buffer gone)
+                                "Session x has exited; press g to refresh")
+                          (list (claude-code-session--create :id "e" :external-p t)
+                                "Session e is running outside Emacs")
+                          (list (claude-code-session--create :id "d")
+                                "Session d is not alive; press RET to resume it")))
+            (setq at-point row)
+            (dolist (cmd '(claude-code-sessions-rename
+                           claude-code-sessions-send
+                           claude-code-sessions-interrupt))
+              (should (equal (should-error (funcall cmd) :type 'user-error)
+                             (list 'user-error message)))))
+          ;; Nothing reached an operation.
+          (should-not driven)
+          ;; A row Emacs is still running prompts and acts.
+          (setq at-point (claude-code-session--create :id "a" :alive-p t :buffer buf)
+                answer "hi")
+          (claude-code-sessions-rename)
+          (claude-code-sessions-send)
+          (claude-code-sessions-interrupt)
+          (should (equal (reverse driven)
+                         '((send "a" "/rename hi") (send "a" "hi")
+                           (interrupt "a")))))))))
+
 (ert-deftest claude-code-test-view-renders-and-collapses ()
   "The view prints group headers, folds Dead by default, and toggles rows."
   (claude-code-tests--with-fixtures

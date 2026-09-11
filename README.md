@@ -45,22 +45,22 @@ For `use-package` users:
 
 Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to create an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. Keys in the sessions view:
 
-| Key       | Action                                                       |
-| --------- | ------------------------------------------------------------ |
-| `RET`     | focus an alive session / resume a dead one / toggle a group  |
-| `o`       | like `RET`, but visit the session in another window          |
-| `TAB`     | collapse or expand the group at point                        |
-| `c`       | open the create menu (name/worktree/model/effort)            |
-| `n` / `p` | move down / up a line (rows and group headers alike)         |
-| `k`       | kill the marked instances, or the one at point               |
-| `d`       | delete the marked dead sessions, or the one at point         |
-| `r`       | rename the session at point                                  |
-| `i`       | interrupt (SIGINT) the session at point                      |
-| `s`       | send a line of text to the session at point                  |
-| `m` / `u` | mark / unmark the session at point                           |
-| `G`       | cycle grouping (status ↔ liveness)                           |
-| `g`       | refresh                                                      |
-| `?`       | describe the mode, listing every keybinding                  |
+| Key       | Action                                                      |
+|-----------|-------------------------------------------------------------|
+| `RET`     | focus an alive session / resume a dead one / toggle a group |
+| `o`       | like `RET`, but visit the session in another window         |
+| `TAB`     | collapse or expand the group at point                       |
+| `c`       | open the create menu (name/worktree/model/effort)           |
+| `n` / `p` | move down / up a line (rows and group headers alike)        |
+| `k`       | kill the marked instances, or the one at point              |
+| `d`       | delete the marked dead sessions, or the one at point        |
+| `r`       | rename the running session at point                         |
+| `i`       | interrupt (SIGINT) the running session at point             |
+| `s`       | send a line of text to the running session at point         |
+| `m` / `u` | mark / unmark the session at point                          |
+| `G`       | cycle grouping (status ↔ liveness)                          |
+| `g`       | refresh                                                     |
+| `?`       | describe the mode, listing every keybinding                 |
 
 An instance appears in the selected window. A window that cannot host it — a side window, or any window dedicated to its buffer — keeps what it has and the instance opens in another window; an instance already showing on the selected frame is shown there rather than a second time. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this.
 

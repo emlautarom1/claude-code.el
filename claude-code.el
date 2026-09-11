@@ -1241,6 +1241,22 @@ its model operation accepts."
                     targets)
       targets)))
 
+(defun claude-code--instance-at-point ()
+  "Return the alive session on the current line, or signal a `user-error'.
+Aliveness is tested through the live process, not the row's `alive-p': no redraw
+follows an instance's exit, so a session that ended since the last refresh still
+draws as alive.  The error names that row's remedy."
+  (let* ((session (or (claude-code--session-at-point)
+                      (user-error "No session on this line")))
+         (id (claude-code-session-id session)))
+    (cond
+     ((claude-code--session-process (claude-code-session-buffer session)) session)
+     ((claude-code-session-external-p session)
+      (user-error "Session %s is running outside Emacs" id))
+     ((claude-code-session-alive-p session)
+      (user-error "Session %s has exited; press g to refresh" id))
+     (t (user-error "Session %s is not alive; press RET to resume it" id)))))
+
 ;;;;; Commands
 
 (defun claude-code--show (buffer)
@@ -1401,25 +1417,24 @@ however the batch ends."
                      (string-join (nreverse refused) "; "))))))))
 
 (defun claude-code-sessions-rename ()
-  "Rename the session at point."
+  "Rename the alive session at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (when-let* ((s (claude-code--session-at-point)))
-    (claude-code-rename s (read-string "New name: "))))
+  (let ((session (claude-code--instance-at-point)))
+    (claude-code-rename session (read-string "New name: "))))
 
 (defun claude-code-sessions-interrupt ()
-  "Interrupt (SIGINT) the session at point."
+  "Interrupt (SIGINT) the alive session at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (when-let* ((s (claude-code--session-at-point)))
-    (claude-code-interrupt s)))
+  (claude-code-interrupt (claude-code--instance-at-point)))
 
 (defun claude-code-sessions-send ()
-  "Send a line of text to the session at point."
+  "Send a line of text to the alive session at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (when-let* ((s (claude-code--session-at-point)))
-    (claude-code-send-text s (read-string "Send: ") t)))
+  (let ((session (claude-code--instance-at-point)))
+    (claude-code-send-text session (read-string "Send: ") t)))
 
 (defun claude-code-sessions-cycle-grouping ()
   "Toggle grouping between status and alive/dead state."

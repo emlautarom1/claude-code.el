@@ -30,14 +30,14 @@ All knowledge of Claude's on-disk formats is quarantined in the *Storage adapter
 - **External** = a transcript for the project that is *not* an Emacs-managed instance but whose `sessions/*.json` PID is still alive — i.e. a `claude` running the session in some other terminal. It is flagged `external-p`, and it gets its own group in the view. It is deliberately **not** called "dead": a process is handling it. Resume and delete both refuse it **in the model**, so a headless caller cannot attach a second process to it either, and both check by **id** through `claude-code--external-p`, not only the flag on a struct.
 - **Dead** = every remaining transcript — no process, inside or outside Emacs, is running it. Only dead sessions can be resumed or deleted.
 
-This realises the decision that **aliveness is Emacs-managed only**: a session is alive exactly when Emacs holds its terminal, which also guarantees send-text and interrupt always work on alive rows.
+This realises the decision that **aliveness is Emacs-managed only**: a session is alive exactly when Emacs holds its terminal — the terminal send-text and interrupt write to.
 
 Which transcripts become rows at all is decided here and only here: a session a program drove is not the user's ([interactive session](glossary.md)) unless Emacs manages an instance for it. The storage adapter goes on describing those transcripts, so an id still resolves to one — a filter that reached into `claude-code--transcript-for` would have `claude-code-resume` silently lose a session's worktree binding.
 
 The **id is the only durable name for a session**, which is what those states are decided by, and it has two consequences:
 
 - Liveness never depends on the root a query names, because one session can belong to two roots (see [storage model](storage-model.md#worktrees)). The registry's launch root answers *membership* alone, and only until Claude writes a transcript.
-- A struct is only as fresh as the query that built it, so a resume or a relaunch between the query and the act must not let a stale row damage a live instance: `claude-code-delete` re-checks by id, and `claude-code-kill` acts on the buffer the struct names rather than on its id.
+- A struct is only as fresh as the query that built it, so a resume or a relaunch between the query and the act must not let a stale row damage a live instance: `claude-code-delete` re-checks by id, `claude-code-kill` acts on the buffer the struct names rather than on its id, and `claude-code--instance-at-point` re-tests the live process, so the commands that drive an instance (`claude-code-sessions-rename`, `-send`, `-interrupt`) refuse a row an unrefreshed view still calls alive **before** prompting for input.
 
 The struct holds the transcript's raw name sources (the `title` and the last prompt), and the *displayed* name is computed in exactly one place — `claude-code--session-display-name` — and is never cached, so it always reflects the transcript (including a `/rename`, and a name given at spawn — both land as a `custom-title`) and cannot drift.
 
