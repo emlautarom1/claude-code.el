@@ -249,13 +249,14 @@ the developer exports."
            (by-id (lambda (id)
                     (seq-find (lambda (d) (equal (plist-get d :id) id)) ts))))
       ;; Every transcript is described, a program's included -- the model is
-      ;; what decides which of them the user is shown.
-      (should (= (length ts) 7))
+      ;; what decides which of them the user is shown.  A worktree directory
+      ;; contributes its transcripts to the parent whatever they hold, which is
+      ;; what membership by directory prefix means.
+      (should (= (length ts) 8))
       (let ((s1 (funcall by-id "11111111-1111-4111-8111-111111111111")))
         ;; With no custom title, the LAST ai-title wins over earlier ones.
         (should (equal (plist-get s1 :title) "Understand the project layout"))
         (should (equal (plist-get s1 :last-prompt) "first prompt"))
-        (should (null (plist-get s1 :worktree)))
         ;; Last-active is the newest timestamped (assistant) line, even though an
         ;; untimestamped ai-title line follows it -- not the file mtime.
         (should (time-equal-p (plist-get s1 :last-active)
@@ -267,17 +268,20 @@ the developer exports."
         (should (string-prefix-p "Goal was extending the consult keybindings"
                                  (plist-get s2 :recap))))
       (let ((s3 (funcall by-id "33333333-3333-4333-8333-333333333333")))
-        (should (equal (plist-get s3 :worktree) "feat"))
         ;; A user custom title takes precedence over Claude's ai-title.
         (should (equal (plist-get s3 :title) "Renamed worktree")))
       (let ((s5 (funcall by-id "55555555-5555-4555-8555-555555555555")))
-        ;; The directory token flattens the dot in "my.feat" and is never
-        ;; decoded back; the binding carries the name Claude was given.
-        (should (equal (plist-get s5 :worktree) "my-feat"))
+        ;; The directory token flattened the dot in "my.feat"; the binding is
+        ;; what carries the name Claude was given, and the only thing that does.
         (should (equal (plist-get s5 :worktree-binding)
                        '(:name "my.feat"
                          :path "/home/test/proj/.claude/worktrees/my.feat"
-                         :bound t)))))))
+                         :bound t))))
+      ;; A session started from inside a worktree directory, with no worktree
+      ;; of its own: Claude bound it to none, so nothing here names one.
+      (let ((sa (funcall by-id "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")))
+        (should (equal (plist-get sa :title) "Started inside the worktree"))
+        (should (null (plist-get sa :worktree-binding)))))))
 
 (ert-deftest claude-code-test-worktree-binding ()
   "A transcript's worktree binding survives the session leaving the worktree.
@@ -397,9 +401,9 @@ would cost the whole view rather than the one session."
 Encoding the worktree path yields exactly the parent's encoded directory plus
 the worktree prefix, so one directory is the parent project's worktree
 directory and the worktree project's own.  Both roots therefore list the same
-transcript.  From the worktree root the descriptor carries no worktree token,
-since the token marks a directory nested under the root that named it; the
-session is still labelled with its worktree, which comes from the binding."
+transcript -- which is why nothing may key a session on the root it was asked
+about, and why `claude-code--current-project' hands a worktree buffer the
+parent: only the parent lists the sessions Claude has refiled."
   (should (equal (claude-code--encode-cwd
                   "/home/test/proj/.claude/worktrees/feat")
                  (concat (claude-code--encode-cwd "/home/test/proj")
@@ -409,8 +413,49 @@ session is still labelled with its worktree, which comes from the binding."
                "/home/test/proj/.claude/worktrees/feat")))
       (should (= (length ts) 1))
       (should (equal (plist-get (car ts) :id)
-                     "33333333-3333-4333-8333-333333333333"))
-      (should (null (plist-get (car ts) :worktree))))))
+                     "33333333-3333-4333-8333-333333333333")))))
+
+(ert-deftest claude-code-test-worktree-parent ()
+  "A checkout `--worktree=NAME' built resolves to the project it was built from.
+The reconstruction is the test, so a path that merely looks the part resolves
+to nothing."
+  (should (equal (claude-code--worktree-parent
+                  "/home/me/proj/.claude/worktrees/feat")
+                 '("/home/me/proj" . "feat")))
+  ;; The name comes back as the user wrote it: these are real path components,
+  ;; not the lossy transcript-directory encoding.  The CLI flattens a `/' to
+  ;; `+' rather than nesting, so three directories is the whole depth.
+  (should (equal (claude-code--worktree-parent
+                  "/home/me/proj/.claude/worktrees/my.feat")
+                 '("/home/me/proj" . "my.feat")))
+  (should (equal (claude-code--worktree-parent
+                  "/home/me/proj/.claude/worktrees/team+feat")
+                 '("/home/me/proj" . "team+feat")))
+  (should-not (claude-code--worktree-parent "/home/me/proj/.claude/worktrees"))
+  (should-not (claude-code--worktree-parent
+               "/home/me/proj/.claude/worktrees/feat/nested"))
+  (should-not (claude-code--worktree-parent "/home/me/proj/.claude"))
+  (should-not (claude-code--worktree-parent "/home/me/proj"))
+  ;; A worktree kept somewhere else is a project in its own right: it files its
+  ;; transcripts under itself, so no parent's view would list them.
+  (should-not (claude-code--worktree-parent "/home/me/checkouts/feat"))
+  ;; Walking off the top of the filesystem answers nothing rather than erroring.
+  (should-not (claude-code--worktree-parent "/home"))
+  (should-not (claude-code--worktree-parent "/")))
+
+(ert-deftest claude-code-test-worktree-names ()
+  "The names offered for a worktree are the directories Claude keeps under root."
+  (let ((root (file-truename (make-temp-file "cc-root" t))))
+    (unwind-protect
+        (progn
+          (should-not (claude-code--worktree-names root))
+          (make-directory (claude-code--worktree-path root "feat") t)
+          (make-directory (claude-code--worktree-path root "my.feat") t)
+          ;; A file among them is not a checkout.
+          (with-temp-file (claude-code--worktree-path root "stray") (insert "x"))
+          (should (equal (sort (claude-code--worktree-names root) #'string<)
+                         '("feat" "my.feat"))))
+      (delete-directory root t))))
 
 (defmacro claude-code-tests--with-transcript (var lines mtime &rest body)
   "Bind VAR to a temp .jsonl holding LINES with file mtime MTIME, run BODY.
@@ -655,7 +700,7 @@ without filtering; making it recursive would put every subagent in the view."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (let ((ss (claude-code-project-sessions "/home/test/proj")))
-        (should (= (length ss) 6))
+        (should (= (length ss) 7))
         (should-not (seq-some #'claude-code-session-alive-p ss))
         (let ((s1 (claude-code-tests--find-session
                    ss "11111111-1111-4111-8111-111111111111")))
@@ -691,7 +736,14 @@ without filtering; making it recursive would put every subagent in the view."
           (should (equal (claude-code-session-worktree-binding left)
                          '(:name "left"
                            :path "/home/test/proj/.claude/worktrees/left"
-                           :bound nil))))))))
+                           :bound nil))))
+        ;; Started from inside a worktree directory: the directory is what puts
+        ;; it in this listing, and the missing binding is what leaves it blank.
+        (let ((inside (claude-code-tests--find-session
+                       ss "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")))
+          (should inside)
+          (should-not (claude-code-session-worktree inside))
+          (should-not (claude-code-session-worktree-binding inside)))))))
 
 (ert-deftest claude-code-test-sessions-worktree-before-transcript ()
   "A named spawn labels its worktree before Claude creates the directory.
@@ -724,7 +776,7 @@ carries no name, so it stays blank."
                    (lambda (b) (eq b buf))))
           (let* ((ss (claude-code-project-sessions "/home/test/proj"))
                  (s1 (claude-code-tests--find-session ss id)))
-            (should (= (length ss) 6))
+            (should (= (length ss) 7))
             (should (claude-code-session-alive-p s1))
             (should (eq (claude-code-session-buffer s1) buf))
             (should (= (claude-code-session-pid s1) 4242))
@@ -2271,13 +2323,13 @@ since the last refresh still draws as alive."
                 ;; The Dead group starts folded: its header shows but no rows do.
                 (should (member "dead" claude-code--collapsed))
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (6)" text))
+                  (should (string-match-p "Dead (7)" text))
                   (should-not (string-match-p "11111111" text)))
                 ;; Expanding it reveals every dead row.
                 (setq claude-code--collapsed (delete "dead" claude-code--collapsed))
                 (claude-code-sessions-refresh)
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (6)" text))
+                  (should (string-match-p "Dead (7)" text))
                   (should (string-match-p "11111111" text))
                   ;; The worktree session is listed under the parent project.
                   (should (string-match-p "feat" text)))
@@ -2285,7 +2337,7 @@ since the last refresh still draws as alive."
                 (push "dead" claude-code--collapsed)
                 (claude-code-sessions-refresh)
                 (let ((text (buffer-substring-no-properties (point-min) (point-max))))
-                  (should (string-match-p "Dead (6)" text))
+                  (should (string-match-p "Dead (7)" text))
                   (should-not (string-match-p "11111111" text))))))
         (kill-buffer buf)))))
 
@@ -2315,9 +2367,10 @@ since the last refresh still draws as alive."
 
 (ert-deftest claude-code-test-view-rooted-at-a-worktree ()
   "A view rooted at a worktree shows the running session as running.
-Opening the view from a file inside the worktree scopes it to the worktree,
-which `project.el' treats as its own project.  The row must land in its status
-group, so `d' has no target there and `k' does."
+The model answers for whatever root it is handed -- `claude-code-sessions'
+hands it the parent (`claude-code--current-project'), but nothing in the model
+depends on that, since a session belongs to both roots.  The row must land in
+its status group, so `d' has no target there and `k' does."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer buf
       (let ((id "33333333-3333-4333-8333-333333333333")
@@ -2571,6 +2624,28 @@ Adopting one would put the listing where the user's data was."
                        (claude-code--normalize-root "/home/test/picked")))
         (should maybe-prompt)))))
 
+(ert-deftest claude-code-test-current-project-resolves-a-worktree ()
+  "A buffer inside a worktree acts on the parent, naming the worktree it sits in.
+`project.el' calls the worktree a project of its own; a sessions view is already
+scoped and is never redirected."
+  (cl-letf (((symbol-function 'project-current) (lambda (&rest _) 'proj)))
+    (cl-letf (((symbol-function 'project-root)
+               (lambda (_p) "/home/test/proj/.claude/worktrees/my.feat")))
+      (with-temp-buffer
+        (should (equal (claude-code--current-project)
+                       (cons (claude-code--normalize-root "/home/test/proj")
+                             "my.feat")))))
+    (cl-letf (((symbol-function 'project-root) (lambda (_p) "/home/test/proj")))
+      (with-temp-buffer
+        (should (equal (claude-code--current-project)
+                       (cons (claude-code--normalize-root "/home/test/proj")
+                             nil)))))
+    ;; A view names its project, worktree or not, and is taken at its word.
+    (claude-code-tests--in-view
+      (setq-local claude-code--project "/home/test/proj/.claude/worktrees/feat")
+      (should (equal (claude-code--current-project)
+                     '("/home/test/proj/.claude/worktrees/feat" . nil))))))
+
 (ert-deftest claude-code-test-spawn-menu-resolves-project-up-front ()
   "The menu resolves the project into its scope and opens no view to do it.
 A sessions view names its own project without consulting `project.el'; any
@@ -2670,13 +2745,119 @@ is stubbed here."
   (claude-code-tests--driving-spawn-menu spawns
     (with-temp-buffer
       (claude-code-spawn-menu)
-      ;; `-n' reads a name, `-w' toggles the worktree switch and `c' creates
-      ;; the session.
-      (execute-kbd-macro (kbd "- n r e v i e w RET - w c")))
+      ;; `-n' reads a name, `-w' reads a worktree -- answered with the
+      ;; candidate that leaves the naming to Claude -- and `c' creates the
+      ;; session.
+      (execute-kbd-macro (kbd "- n r e v i e w RET - w ( a u t o ) RET c")))
     (should (equal (car spawns)
                    (list (claude-code--normalize-root "/home/test/proj")
                          :name "review" :worktree t
                          :model nil :effort nil)))))
+
+(ert-deftest claude-code-test-spawn-menu-worktree-by-name ()
+  "The one worktree key takes a name, and a second press withdraws the request.
+Driven through the real menu, since which argument an answer reaches the CLI as
+is what `claude-code--worktree-infix' decides."
+  (claude-code-tests--driving-spawn-menu spawns
+    (with-temp-buffer
+      (claude-code-spawn-menu)
+      (execute-kbd-macro (kbd "- w f e a t RET c")))
+    (with-temp-buffer
+      (claude-code-spawn-menu)
+      (execute-kbd-macro (kbd "- w f e a t RET - w c")))
+    (should (equal (mapcar (lambda (spawn) (plist-get (cdr spawn) :worktree))
+                           (reverse spawns))
+                   '("feat" nil)))))
+
+(ert-deftest claude-code-test-spawn-menu-completes-over-the-scope ()
+  "The worktree reader offers the scoped project's checkouts, not the buffer's.
+The menu works for a project the current buffer knows nothing about, so its
+scope -- not `default-directory' -- has to be what the candidates come from."
+  (let ((root (file-truename (make-temp-file "cc-root" t)))
+        (asked nil))
+    (unwind-protect
+        (progn
+          (make-directory (claude-code--worktree-path root "feat") t)
+          (cl-letf (((symbol-function 'transient-scope) (lambda (&rest _) root))
+                    ((symbol-function 'completing-read)
+                     (lambda (_prompt candidates &rest _)
+                       (setq asked candidates)
+                       "feat")))
+            (with-temp-buffer
+              (should (equal (claude-code--read-worktree "w: " nil nil) "feat"))))
+          (should (equal asked (list claude-code--worktree-auto "feat")))
+          ;; The label is answered as the empty string, which is the unnamed
+          ;; request; a real worktree could not be called that.
+          (cl-letf (((symbol-function 'transient-scope) (lambda (&rest _) root))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _) claude-code--worktree-auto)))
+            (should (equal (claude-code--read-worktree "w: " nil nil) ""))))
+      (delete-directory root t))))
+
+(ert-deftest claude-code-test-spawn-menu-seeds-the-worktree-it-opened-in ()
+  "The menu opened from inside a worktree scopes to the parent and asks for it.
+The seeded request is what keeps the session in that worktree rather than
+beside it, and it outranks -- without displacing -- the options the user
+pinned."
+  (claude-code-tests--driving-spawn-menu spawns
+    (let ((prefix (get 'claude-code-spawn-menu 'transient--prefix)))
+      (oset prefix value '("--model=opus")))
+    (cl-letf (((symbol-function 'project-root)
+               (lambda (_project) "/home/test/proj/.claude/worktrees/my.feat")))
+      (with-temp-buffer
+        (claude-code-spawn-menu)
+        (execute-kbd-macro (kbd "c"))))
+    (should (equal (car spawns)
+                   (list (claude-code--normalize-root "/home/test/proj")
+                         :name nil :worktree "my.feat"
+                         :model "opus" :effort nil)))))
+
+(ert-deftest claude-code-test-spawn-menu-forgets-the-worktree ()
+  "A worktree is spent on the session it spawns, and a seeded one is refusable.
+The infix is `:unsavable', so `transient-set' cannot pin a worktree onto later
+spawns -- which would put every project's sessions in a checkout named after
+one of them.  A seeded request is an ordinary infix value, so the first press
+withdraws it."
+  (claude-code-tests--driving-spawn-menu spawns
+    (cl-letf (((symbol-function 'project-root)
+               (lambda (_project) "/home/test/proj/.claude/worktrees/my.feat")))
+      (with-temp-buffer
+        (claude-code-spawn-menu)
+        (execute-kbd-macro (kbd "- m o p u s RET"))
+        (call-interactively #'transient-set)
+        (execute-kbd-macro (kbd "- w c"))))
+    ;; Back in the parent, with only the pinned model to inherit.
+    (with-temp-buffer
+      (claude-code-spawn-menu)
+      (execute-kbd-macro (kbd "c")))
+    (should (equal (mapcar (lambda (spawn)
+                             (list (plist-get (cdr spawn) :worktree)
+                                   (plist-get (cdr spawn) :model)))
+                           (reverse spawns))
+                   '((nil "opus") (nil "opus"))))))
+
+(ert-deftest claude-code-test-worktree-infix-round-trip ()
+  "The worktree infix emits both spellings and reads both back.
+A class that emitted an argument it could not parse again would lose the
+request the moment the menu redrew from its own value."
+  (let ((obj (claude-code--worktree-infix :argument "--worktree=")))
+    (oset obj value nil)
+    (should-not (transient-infix-value obj))
+    (oset obj value "")
+    (should (equal (transient-infix-value obj) "--worktree"))
+    (oset obj value "my.feat")
+    (should (equal (transient-infix-value obj) "--worktree=my.feat")))
+  (pcase-dolist (`(,args ,value)
+                 '((nil nil)
+                   (("--model=opus") nil)
+                   (("--worktree") "")
+                   (("--model=opus" "--worktree=my.feat") "my.feat")))
+    (let ((prefix (transient-prefix :command 'claude-code-spawn-menu))
+          (obj (claude-code--worktree-infix :argument "--worktree=")))
+      (oset prefix value args)
+      (let ((transient--prefix prefix))
+        (transient-init-value obj))
+      (should (equal (oref obj value) value)))))
 
 (ert-deftest claude-code-test-spawn-menu-forgets-the-name ()
   "A name is spent on the session it spawns; a later menu never reoffers it.
@@ -2942,22 +3123,22 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
     (setq claude-code--collapsed nil)
     (claude-code-sessions-refresh)
     (claude-code--goto-group "dead")
-    (should (string-match-p "▾ Dead (5)$" (thing-at-point 'line t)))
-    ;; `m' advances, so this marks two of the five dead rows.
+    (should (string-match-p "▾ Dead (6)$" (thing-at-point 'line t)))
+    ;; `m' advances, so this marks two of the six dead rows.
     (forward-line 1)
     (claude-code-sessions-mark)
     (claude-code-sessions-mark)
     (claude-code--goto-group "dead")
     ;; Their tags are on screen, so the header adds nothing.
-    (should (string-match-p "▾ Dead (5)$" (thing-at-point 'line t)))
+    (should (string-match-p "▾ Dead (6)$" (thing-at-point 'line t)))
     (claude-code-sessions-toggle-group)
     (should (member "dead" claude-code--collapsed))
     (should (equal 2 (length claude-code--marks)))
     (should (null (claude-code-tests--tagged-ids)))
-    (should (string-match-p "▸ Dead (5, 2 marked)$" (thing-at-point 'line t)))
+    (should (string-match-p "▸ Dead (6, 2 marked)$" (thing-at-point 'line t)))
     ;; Unfolding hands the rows back their tags.
     (claude-code-sessions-toggle-group)
-    (should (string-match-p "▾ Dead (5)$" (thing-at-point 'line t)))
+    (should (string-match-p "▾ Dead (6)$" (thing-at-point 'line t)))
     (should (equal 2 (length (claude-code-tests--tagged-ids))))))
 
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()

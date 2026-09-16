@@ -92,6 +92,40 @@ session data instead."
   "Return the directory holding every project's transcript directory."
   (expand-file-name "projects" claude-code-config-dir))
 
+(defconst claude-code--worktrees-dir ".claude/worktrees"
+  "Where a `--worktree=NAME' checkout lands, relative to the project root.
+Claude puts one nowhere else, which is what lets a name round-trip.")
+
+(defun claude-code--worktree-path (root name)
+  "Return the checkout `--worktree=NAME' builds under ROOT."
+  (expand-file-name (concat claude-code--worktrees-dir "/" name) root))
+
+(defun claude-code--worktree-names (root)
+  "Return the names of the worktrees Claude keeps under ROOT.
+Naming one of these runs a session in it rather than building another."
+  (let ((dir (expand-file-name claude-code--worktrees-dir root)))
+    (when (file-directory-p dir)
+      (seq-filter (lambda (name)
+                    (file-directory-p (expand-file-name name dir)))
+                  (directory-files dir nil directory-files-no-dot-files-regexp t)))))
+
+(defun claude-code--worktree-parent (root)
+  "Return (PARENT . NAME) when ROOT is a worktree Claude built, else nil.
+ROOT is a normalised project root.  Rather than match a pattern, this drops
+three directories and asks `claude-code--worktree-path' to rebuild ROOT from
+what is left: a path `--worktree=NAME' could not have built fails to rebuild.
+Three is the whole depth, and the components are real, so NAME comes back as
+the user wrote it (see docs/storage-model.md).  A checkout kept anywhere else
+files its transcripts under itself, making it a project in its own right."
+  (and-let* ((name (file-name-nondirectory root))
+             ((not (string-empty-p name)))
+             (up1 (file-name-parent-directory root))
+             (up2 (file-name-parent-directory up1))
+             (up3 (file-name-parent-directory up2))
+             (parent (directory-file-name up3))
+             ((equal (claude-code--worktree-path parent name) root)))
+    (cons parent name)))
+
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
 The table is keyed by session id; each value is a plist with keys
@@ -257,15 +291,15 @@ when FILE has no timestamped line."
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :interactive-p, :title, :last-prompt,
-:recap, :worktree-binding, :last-active, :transcript (absolute file) and
-:worktree -- the worktree's encoded directory token, nil for a main-tree
-transcript.  Every transcript is described, including the ones
-`claude-code-project-sessions' declines to list, so that an id resolves
-whatever the view shows.  Ids are unique across the result: a session's
-transcript lives in exactly one encoded directory.  Membership and the token
-both come from the \"--claude-worktrees-\" directory prefix; the encoding is
-lossy, so the token decides only which project lists the transcript and is
-never decoded back into a name or path.  The worktree a session runs in is
+:recap, :worktree-binding, :last-active and :transcript (absolute file).  Every
+transcript is described, including the ones `claude-code-project-sessions'
+declines to list, so that an id resolves whatever the view shows.  Ids are
+unique across the result: a session's transcript lives in exactly one encoded
+directory.
+A transcript belongs to CWD when it sits in CWD's own encoded directory or in
+one prefixed \"--claude-worktrees-\".  That prefix decides membership and
+nothing else: the encoding is lossy, so what follows it is never read as a name
+and never leaves this function.  The worktree a session runs in is
 :worktree-binding's business (see docs/storage-model.md)."
   (let* ((projects (claude-code--projects-dir))
          (base (claude-code--encode-cwd cwd))
@@ -273,15 +307,13 @@ never decoded back into a name or path.  The worktree a session runs in is
          (result '()))
     (when (file-directory-p projects)
       (dolist (name (directory-files projects nil nil t))
-        (let ((worktree (and (string-prefix-p wt-prefix name)
-                             (substring name (length wt-prefix)))))
-          (when (or (equal name base) worktree)
-            (let ((dir (expand-file-name name projects)))
-              (when (file-directory-p dir)
-                (dolist (file (directory-files dir t "\\.jsonl\\'"))
-                  (push (append (claude-code--transcript-fields file)
-                                (list :transcript file :worktree worktree))
-                        result))))))))
+        (when (or (equal name base) (string-prefix-p wt-prefix name))
+          (let ((dir (expand-file-name name projects)))
+            (when (file-directory-p dir)
+              (dolist (file (directory-files dir t "\\.jsonl\\'"))
+                (push (append (claude-code--transcript-fields file)
+                              (list :transcript file))
+                      result)))))))
     (nreverse result)))
 
 
@@ -406,8 +438,7 @@ asked to enter, or one a `WorktreeCreate' hook placed elsewhere -- that flag
 would build a fresh checkout beside the work instead of returning to it."
   (when-let* (((not (plist-get binding :bound)))
               (name (claude-code--binding-worktree binding))
-              (round-trip (expand-file-name
-                           (concat ".claude/worktrees/" name) root))
+              (round-trip (claude-code--worktree-path root name))
               ((file-equal-p round-trip (plist-get binding :path))))
     name))
 
@@ -415,13 +446,13 @@ would build a fresh checkout beside the work instead of returning to it."
   "Return `claude-code-session--create' arguments derived from descriptor TR.
 TR is a `claude-code--project-transcripts' descriptor, nil for an instance with
 no transcript yet.  REG, when given, is the managed-registry plist whose
-worktree name stands in while TR carries none.  The binding names the worktree
-where it has one; the directory token stands in for a transcript written before
-Claude recorded bindings, where the flattened name is all there is."
+worktree name stands in while TR carries none.  The binding is the only thing
+that names a worktree: a session it does not name is one a resume lands in the
+main tree, and labelling it anyway would promise a checkout the resume cannot
+reach."
   (list :worktree-binding (plist-get tr :worktree-binding)
         :worktree (or (claude-code--binding-worktree
                        (plist-get tr :worktree-binding))
-                      (plist-get tr :worktree)
                       (plist-get reg :worktree))
         :title (plist-get tr :title)
         :last-prompt (plist-get tr :last-prompt)
@@ -1530,12 +1561,36 @@ however the batch ends."
 
 ;;;;; Entry points
 
-(defun claude-code--project-root ()
-  "Return the project root the current buffer's commands should act on.
+(defun claude-code--current-project ()
+  "Return (ROOT . WORKTREE) for the current buffer.
+ROOT is the project root the buffer's commands act on, WORKTREE the name of the
+Claude worktree the buffer sits in, nil for a buffer sitting in none.
+A worktree resolves to its parent, which is the only root that lists the whole
+tree (see docs/storage-model.md); WORKTREE is what the create menu asks for
+instead, so a session created from inside a worktree is created in it.
 A sessions view names its own project; every other buffer resolves the one it
 belongs to, prompting for a project when it belongs to none."
-  (or claude-code--project
-      (claude-code--normalize-root (project-root (project-current t)))))
+  (if claude-code--project
+      (cons claude-code--project nil)
+    (let ((root (claude-code--normalize-root (project-root (project-current t)))))
+      (or (claude-code--worktree-parent root) (cons root nil)))))
+
+(defun claude-code--project-root ()
+  "Return the project root the current buffer's commands should act on."
+  (car (claude-code--current-project)))
+
+(defun claude-code--args-worktree (args)
+  "Return the worktree ARGS ask for: a name, t for an unnamed one, or nil.
+`transient-arg-value' knows only the named spelling, so both are read here.
+An empty name reads as the unnamed request, which is what the empty infix value
+means and the only reading the CLI would not reject."
+  (cond ((member "--worktree" args) t)
+        ((seq-some (lambda (arg)
+                     (and (stringp arg)
+                          (string-prefix-p "--worktree=" arg)
+                          (let ((name (substring arg (length "--worktree="))))
+                            (if (string-empty-p name) t name))))
+                   args))))
 
 (defun claude-code--spawn-session (root &optional args)
   "Create a session for ROOT with the options in ARGS and display it.
@@ -1548,7 +1603,7 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
   (let ((instance (claude-code-spawn
                    root
                    :name (transient-arg-value "--name=" args)
-                   :worktree (and (member "--worktree" args) t)
+                   :worktree (claude-code--args-worktree args)
                    :model (transient-arg-value "--model=" args)
                    :effort (transient-arg-value "--effort=" args))))
     (claude-code--refresh-views)
@@ -1557,21 +1612,89 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
 ;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.
 (put 'claude-code--spawn-session 'completion-predicate #'transient--suffix-only)
 
+(defconst claude-code--worktree-auto "(auto)"
+  "The completion candidate standing for a worktree Claude names itself.
+`claude-code--read-worktree' drops it from the checkouts it offers alongside,
+so answering it is never also a way of naming one.")
+
+(defclass claude-code--worktree-infix (transient-option) ()
+  "A worktree request: none, one Claude names, or one the user names.
+`--worktree' and `--worktree=NAME' differ by more than their value, so the
+stock `transient-option' mapping -- argument and value concatenated -- reaches
+only the second.  The empty value is the request Claude names.")
+
+(cl-defmethod transient-infix-value ((obj claude-code--worktree-infix))
+  "Return the `--worktree' argument OBJ asks for, or nil for none."
+  (and-let* ((value (oref obj value)))
+    (if (equal value "") "--worktree" (concat "--worktree=" value))))
+
+(cl-defmethod transient-init-value ((obj claude-code--worktree-infix))
+  "Read OBJ's value back out of the prefix's, whichever argument spells it."
+  (oset obj value
+        (pcase (claude-code--args-worktree (oref transient--prefix value))
+          ('t "")
+          (name name))))
+
+(cl-defmethod transient-format-value ((obj claude-code--worktree-infix))
+  "Label OBJ's unnamed request, which has no value of its own to show."
+  (if (equal (oref obj value) "")
+      (concat (propertize "--worktree" 'face (transient-argument-face obj))
+              (propertize (concat " " claude-code--worktree-auto)
+                          'face (transient-value-face obj)))
+    (cl-call-next-method)))
+
+(defun claude-code--read-worktree (prompt initial-input history)
+  "Read a worktree name with PROMPT, INITIAL-INPUT and HISTORY.
+Completes over the project's existing checkouts -- naming one runs the session
+in it rather than building another -- and takes any other name as typed.
+`claude-code--worktree-auto', or an empty answer, returns the empty string."
+  (let* ((root (transient-scope 'claude-code-spawn-menu))
+         (choice (completing-read
+                  prompt
+                  (cons claude-code--worktree-auto
+                        (remove claude-code--worktree-auto
+                                (and root (claude-code--worktree-names root))))
+                  nil nil initial-input history)))
+    (if (equal choice claude-code--worktree-auto) "" choice)))
+
+(defun claude-code--seed-worktree (obj worktree)
+  "Add a request for WORKTREE to the value menu OBJ opens with.
+The prefix's `:init-value', which is what outranks a pinned value -- `:value'
+names the `default-value' slot, and a pinned value beats a default.  Unbinding
+the slot hands OBJ back to `transient-init-value' to resolve its own value,
+so the request joins that rather than standing in for it."
+  (slot-makeunbound obj 'init-value)
+  (transient-init-value obj)
+  (oset obj value (cons (concat "--worktree=" worktree) (oref obj value))))
+
 ;;;###autoload
 (transient-define-prefix claude-code-spawn-menu ()
   "Create a new session for a project, with options."
   ["Arguments"
    ;; A name belongs to one session, so it is `:unsavable': that keeps it out
-   ;; of the value `transient-set' would pin on every later spawn.
+   ;; of the value `transient-set' would pin on every later spawn.  So does a
+   ;; worktree, which is seeded per invocation from where the menu was opened.
    ("-n" "Name" "--name=" :unsavable t)
-   ("-w" "Worktree" "--worktree")
+   ("-w" "Worktree" "--worktree="
+    :class claude-code--worktree-infix
+    :reader claude-code--read-worktree
+    ;; Without this the empty value -- the request Claude names -- is read as
+    ;; no request at all.
+    :allow-empty t
+    :unsavable t)
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
    ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))]
   ["Create"
    ("c" "New session" claude-code--spawn-session)]
   (interactive)
-  (transient-setup 'claude-code-spawn-menu nil nil
-                   :scope (claude-code--project-root)))
+  (pcase-let ((`(,root . ,worktree) (claude-code--current-project)))
+    ;; Nothing is seeded outside a worktree, so the menu opens on its own value
+    ;; the way every other prefix does.
+    (apply #'transient-setup 'claude-code-spawn-menu nil nil
+           :scope root
+           (and worktree
+                (list :init-value
+                      (lambda (obj) (claude-code--seed-worktree obj worktree)))))))
 
 ;;;###autoload
 (defun claude-code-sessions ()

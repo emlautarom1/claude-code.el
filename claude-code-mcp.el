@@ -246,8 +246,8 @@ instance is launched from the directory of the session that asked for it."
  :description
  "Spawn another Claude Code instance in the user's Emacs and return its session
 id.  It runs in the calling session's own directory -- or, when asked for a
-worktree, in a fresh worktree of it, which carries none of the caller's
-uncommitted work.  The instance takes no window of its own: the user reaches it
+worktree, in a worktree of it, which carries none of the caller's uncommitted
+work.  The instance takes no window of its own: the user reaches it
 through the Emacs sessions view.  An id means the instance was launched, not
 that it survived startup."
  :args (list (list :name "prompt" :type 'string :optional t
@@ -264,9 +264,11 @@ that it survived startup."
                    "Reasoning effort level: low, medium, high, xhigh or max.")
              (list :name "worktree" :type 'string :optional t
                    :description
-                   "Name of a new git worktree to run the instance in.  Letters,
-digits, hyphens and underscores are safe; a name git refuses kills the instance
-at startup."))
+                   "Name of the git worktree to run the instance in.  A name
+that already exists runs the instance in that worktree, which may carry an
+earlier session's commits; any other name builds a fresh one.  Use letters,
+digits, dots, hyphens and underscores only -- a name the CLI rejects kills the
+instance at startup."))
  :handler #'claude-code--mcp-tool-spawn)
 
 

@@ -44,7 +44,7 @@ For `use-package` users:
 
 ## Usage
 
-Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to create an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. Keys in the sessions view:
+Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-spawn-menu` from any buffer to create an instance with options and display it. Both act on the current project — the view's own project when invoked from a sessions view — and prompt for one when the buffer belongs to none. A buffer inside a git worktree acts on the parent project, which is the only one listing every session of the tree; the create menu asks for that worktree by name instead. Keys in the sessions view:
 
 | Key       | Action                                                      |
 |-----------|-------------------------------------------------------------|
@@ -85,8 +85,8 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 (claude-code-spawn root :name "release audit")
 
 ;; Spawn in a git worktree.
-(claude-code-spawn root :worktree t)          ; auto-named
-(claude-code-spawn root :worktree "feature")  ; named
+(claude-code-spawn root :worktree t)          ; a fresh one Claude names
+(claude-code-spawn root :worktree "feature")  ; that one, built or entered
 
 ;; Query the model.
 (claude-code-project-sessions root)   ; => list of `claude-code-session' structs

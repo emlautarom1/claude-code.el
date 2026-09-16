@@ -146,7 +146,7 @@ All JSON crosses the wire through the C built-ins `json-serialize`/`json-parse-s
 1. **Custom `tabulated-list-mode`**, not literal `ibuffer.el` (which is tied to buffer objects and cannot represent dead sessions).
 2. **MCP integration ships as an HTTP server** — every spawned instance connects back to one Emacs [MCP server](#mcp-server) over loopback HTTP (Streamable-HTTP transport via the `web-server` package). It is kept in its own file (`claude-code-mcp.el`) and loaded lazily from the spawn path.
 3. **Alive = Emacs-managed only**; all dead sessions are read from disk.
-4. **Worktree sessions appear under their parent project**, named in the *Worktree* column and resumed back into their worktree.
+4. **Worktree sessions appear under their parent project**, and the entry points offer no other: a buffer inside a worktree resolves to the parent root, and the create menu asks for the worktree by name. The model still answers for either root — it must, since a session belongs to both. Only Claude's own binding names a worktree, so the *Worktree* column and the resume agree: a blank column is a session that will resume in the parent tree.
 5. **Native Claude vocabulary** (`busy`/`idle`/`waiting`) is surfaced verbatim.
 6. **Storage internals are quarantined** in the storage-adapter section.
 7. **Emacs forces no renderer**; `claude-code-renderer` is the override over the user's `tui` setting (see [the renderer](#the-renderer)).
