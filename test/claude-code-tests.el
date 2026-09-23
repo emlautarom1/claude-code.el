@@ -63,10 +63,12 @@ Instances a test registers are therefore invisible to every other test."
 
 (defmacro claude-code-tests--with-managed-buffer (var &rest body)
   "Run BODY with VAR bound to a fresh buffer and an empty managed registry.
-The buffer is killed afterwards even when BODY already killed it."
+The buffer carries `ghostel--pid' 4242, as a Ghostel terminal would.  It is
+killed afterwards even when BODY already killed it."
   (declare (indent 1))
   `(claude-code-tests--with-registry
      (let ((,var (generate-new-buffer " *cc-test*")))
+       (with-current-buffer ,var (setq-local ghostel--pid 4242))
        (unwind-protect (progn ,@body)
          (when (buffer-live-p ,var) (kill-buffer ,var))))))
 
@@ -650,7 +652,6 @@ rests on: every session it spawns carries that stamp."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer buf
       (let ((agent "88888888-8888-4888-8888-888888888888"))
-        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register agent buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
@@ -754,7 +755,6 @@ carries no name, so it stays blank."
     (claude-code-tests--with-managed-buffer buf
       (let ((named "66666666-6666-4666-8666-666666666666")
             (auto "77777777-7777-4777-8777-777777777777"))
-        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register named buf "/home/test/proj" "my.feat")
         (claude-code--register auto buf "/home/test/proj" t)
         (cl-letf (((symbol-function 'claude-code--live-managed)
@@ -771,7 +771,6 @@ carries no name, so it stays blank."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer buf
       (let ((id "11111111-1111-4111-8111-111111111111"))
-        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
@@ -806,7 +805,6 @@ live here, so only the registry can be making it alive."
       (claude-code-tests--with-fixtures
         (claude-code-tests--with-managed-buffer buf
           (claude-code-tests--with-live-pids '()
-            (with-current-buffer buf (setq-local ghostel--pid 4242))
             (claude-code--register id buf (car case) nil)
             (cl-letf (((symbol-function 'claude-code--session-process)
                        (lambda (b) (eq b buf))))
@@ -1785,7 +1783,6 @@ status the instance has now rather than a cached one."
              (seen '())
              (claude-code-notify-function
               (lambda (session body) (push (cons session body) seen))))
-        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf)))
@@ -1808,7 +1805,6 @@ status the instance has now rather than a cached one."
       (let* ((id "11111111-1111-4111-8111-111111111111")
              (announced 0)
              (claude-code-notify-function (lambda (&rest _) (cl-incf announced))))
-        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
@@ -2372,7 +2368,6 @@ its status group, so `d' has no target there and `k' does."
     (claude-code-tests--with-managed-buffer buf
       (let ((id "33333333-3333-4333-8333-333333333333")
             (view (generate-new-buffer " *cc-view-test*")))
-        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register id buf "/home/test/proj" nil)
         (unwind-protect
             (cl-letf (((symbol-function 'claude-code--session-process)
