@@ -650,6 +650,7 @@ rests on: every session it spawns carries that stamp."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer buf
       (let ((agent "88888888-8888-4888-8888-888888888888"))
+        (with-current-buffer buf (setq-local ghostel--pid 4242))
         (claude-code--register agent buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
@@ -2188,19 +2189,17 @@ never hands one to an operation that would only refuse it."
       (should (equal (funcall ids 'dead) '("d"))))))
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
-  "RET displays alive rows through `claude-code--show', resuming otherwise.
-A dead row prompts first; an external row reaches the resume path without a
-prompt, so the model's guard is the only refusal
+  "RET displays what `claude-code--resume' returns, whatever the row's liveness.
+An external row is refused by the model alone
 \(`claude-code-test-resume-refuses-external')."
   (let* ((binding '(:name "feat" :path "/r/.claude/worktrees/feat" :bound nil))
-         (alive (claude-code-session--create :id "a" :alive-p t))
+         (alive (claude-code-session--create :id "a" :alive-p t :buffer 'terminal))
+         (stale (claude-code-session--create :id "s" :alive-p t :buffer 'exited))
          (external (claude-code-session--create :id "e" :external-p t))
          (dead (claude-code-session--create :id "d" :worktree-binding binding))
-         (at-point nil) (answer nil) (calls '()))
+         (at-point nil) (calls '()))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point))
-              ((symbol-function 'claude-code--buffer)
-               (lambda (_s) 'terminal))
               ((symbol-function 'claude-code--resume)
                (lambda (root id b)
                  (push (list 'resume root id b) calls) 'terminal))
@@ -2209,47 +2208,45 @@ prompt, so the model's guard is the only refusal
               ((symbol-function 'claude-code--refresh-views)
                (lambda () (push '(refresh) calls)))
               ((symbol-function 'claude-code-sessions-toggle-group)
-               (lambda () (push '(toggle) calls)))
-              ((symbol-function 'y-or-n-p)
-               (lambda (_) (push '(ask) calls) answer)))
+               (lambda () (push '(toggle) calls))))
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
         ;; A group header (no session at point) toggles.
         (claude-code-sessions-visit)
         (should (equal calls '((toggle))))
-        ;; An alive row is displayed without a prompt.
+        ;; An alive row gets its own buffer back, so nothing needs a redraw.
         (setq at-point alive calls nil)
         (claude-code-sessions-visit)
-        (should (equal calls '((show terminal))))
-        ;; An external row goes to the model unprompted, and the returned
-        ;; buffer is displayed after the redraw.
-        (setq at-point external calls nil)
+        (should (equal (reverse calls)
+                       '((resume "/r" "a" nil) (show terminal))))
+        ;; A row still drawn alive whose instance has since exited or moved
+        ;; displays what the model returns, and the views catch up.
+        (setq at-point stale calls nil)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
-                       '((resume "/r" "e" nil) (refresh) (show terminal))))
-        ;; A dead row asks first: yes resumes, refreshes and displays...
-        (setq at-point dead calls nil answer t)
+                       '((resume "/r" "s" nil) (refresh) (show terminal))))
+        ;; An external row goes to the model like any other.
+        (setq at-point external calls nil)
+        (claude-code-sessions-visit)
+        (should (equal (car (last calls)) '(resume "/r" "e" nil)))
+        ;; A dead row resumes, refreshes and displays.
+        (setq at-point dead calls nil)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
                        ;; The binding comes off the struct the view already
                        ;; built, so a resume costs no second read of disk.
-                       (list '(ask) (list 'resume "/r" "d" binding)
-                             '(refresh) '(show terminal))))
-        ;; ...no stops at the prompt.
-        (setq calls nil answer nil)
-        (claude-code-sessions-visit)
-        (should (equal calls '((ask))))))))
+                       (list (list 'resume "/r" "d" binding)
+                             '(refresh) '(show terminal))))))))
 
 (ert-deftest claude-code-test-sessions-visit-other-window ()
   "`o' shows the row's buffer in another window; a header line is refused.
-The liveness dispatch is shared with RET
-\(`claude-code-test-sessions-visit-dispatch')."
-  (let ((alive (claude-code-session--create :id "a" :alive-p t))
+The dispatch is shared with RET \(`claude-code-test-sessions-visit-dispatch')."
+  (let ((alive (claude-code-session--create :id "a" :alive-p t :buffer 'terminal))
         (at-point nil) (shown nil))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point))
-              ((symbol-function 'claude-code--buffer)
-               (lambda (_s) 'terminal))
+              ((symbol-function 'claude-code--resume)
+               (lambda (&rest _) 'terminal))
               ((symbol-function 'switch-to-buffer-other-window)
                (lambda (b) (setq shown b))))
       (claude-code-tests--in-view
@@ -2910,13 +2907,12 @@ the acting view's root would leave a view of the same session stale."
                      (push (buffer-name) ever-redrawn)))
                   ((symbol-function 'claude-code-spawn)
                    (lambda (&rest _) (cons "spawned-id" instance)))
-                  ((symbol-function 'claude-code-resume) (lambda (&rest _) instance))
+                  ((symbol-function 'claude-code--resume) (lambda (&rest _) instance))
                   ((symbol-function 'claude-code-kill) #'ignore)
                   ((symbol-function 'claude-code-delete) #'ignore)
                   ;; Both the spawn and the resume RET drives display through
                   ;; the one policy.
                   ((symbol-function 'claude-code--show) #'ignore)
-                  ((symbol-function 'y-or-n-p) (lambda (_) t))
                   ((symbol-function 'yes-or-no-p) (lambda (_) t)))
           (pcase-dolist (`(,buffer . ,project)
                          (list (cons acting root)

@@ -1393,23 +1393,18 @@ the group's header."
     (claude-code--redraw group)))
 
 (defun claude-code--visit-session (session display)
-  "Show SESSION's instance buffer through DISPLAY, resuming it first when dead.
-A dead session is resumed after confirmation."
-  (let ((liveness (claude-code--session-liveness session)))
-    (cond
-     ((eq liveness 'alive) (funcall display (claude-code--buffer session)))
-     ((or (eq liveness 'external)
-          (y-or-n-p "Session is dead.  Resume it? "))
-      (let ((buffer (claude-code--resume
-                     claude-code--project
-                     (claude-code-session-id session)
-                     (claude-code-session-worktree-binding session))))
-        (claude-code--refresh-views)
-        (funcall display buffer))))))
+  "Show SESSION's instance buffer through DISPLAY, resuming SESSION if it has none."
+  (let ((buffer (claude-code--resume
+                 claude-code--project
+                 (claude-code-session-id session)
+                 (claude-code-session-worktree-binding session))))
+    (unless (eq buffer (claude-code-session-buffer session))
+      (claude-code--refresh-views))
+    (funcall display buffer)))
 
 (defun claude-code-sessions-visit ()
   "Visit the session at point, preferring the selected window, or toggle a group.
-A dead session is resumed first, after confirmation."
+A dead session is resumed first."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (if-let* ((session (claude-code--session-at-point)))
@@ -1418,7 +1413,7 @@ A dead session is resumed first, after confirmation."
 
 (defun claude-code-sessions-visit-other-window ()
   "Visit the session at point in a window other than the selected one.
-A dead session is resumed first, after confirmation."
+A dead session is resumed first."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (claude-code--visit-session (or (claude-code--session-at-point)
