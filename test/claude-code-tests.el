@@ -222,7 +222,7 @@ the developer exports."
   "Every sessions/ file is parsed and keyed by session id."
   (claude-code-tests--with-fixtures
     (let ((table (claude-code--live-status-table)))
-      (should (= (hash-table-count table) 5))
+      (should (= (hash-table-count table) 6))
       (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
         (should (equal (plist-get s1 :status) "busy"))
         ;; The parser exposes only :pid, :cwd, :status and :waiting-for.
@@ -234,6 +234,11 @@ the developer exports."
       ;; A file without a status field yields nil, not an error.
       (let ((s4 (gethash "44444444-4444-4444-8444-444444444444" table)))
         (should (null (plist-get s4 :status))))
+      ;; Claude's `shell' (between turns, a background command running) is busy.
+      (should (equal (plist-get (gethash "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+                                         table)
+                                :status)
+                     "busy"))
       ;; `claude-code--live-info' is the per-id lookup over the same data:
       ;; a fresh parse without TABLE, the given TABLE as-is (no reparse).
       (let ((id "11111111-1111-4111-8111-111111111111"))

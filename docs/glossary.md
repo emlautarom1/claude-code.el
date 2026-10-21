@@ -19,7 +19,7 @@ Terms used throughout `claude-code.el` and its documentation. They are chosen to
 A session's *liveness* is one of three states — *alive*, *external*, or *dead*:
 
 - **Alive session** — a session with a live managed instance. Its **status** is Claude's native value:
-  - `busy` — actively working.
+  - `busy` — actively working, including between turns while a background shell command runs.
   - `idle` — finished; waiting for the next prompt.
   - `waiting` — blocked on the user (a question or tool-permission prompt); the `waitingFor` field says what for.
 

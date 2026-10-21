@@ -132,7 +132,8 @@ The table is keyed by session id; each value is a plist with keys
 :pid, :cwd, :status and :waiting-for.  This is pure parsing of
 the files Claude writes for every running instance; process liveness
 is decided by the caller.  A missing status field yields a nil :status
-rather than an error."
+rather than an error, and Claude's \"shell\" reads as \"busy\": the turn has
+ended but a background command runs, whose completion starts the next one."
   (let ((dir (expand-file-name "sessions" claude-code-config-dir))
         (table (make-hash-table :test 'equal)))
     (when (file-directory-p dir)
@@ -146,7 +147,9 @@ rather than an error."
               (puthash id
                        (list :pid (gethash "pid" obj)
                              :cwd (gethash "cwd" obj)
-                             :status (gethash "status" obj)
+                             :status (pcase (gethash "status" obj)
+                                       ("shell" "busy")
+                                       (status status))
                              :waiting-for (gethash "waitingFor" obj))
                        table))))))
     table))
