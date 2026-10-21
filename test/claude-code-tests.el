@@ -225,7 +225,9 @@ the developer exports."
       (should (= (hash-table-count table) 6))
       (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
         (should (equal (plist-get s1 :status) "busy"))
-        ;; The parser exposes only :pid, :cwd, :status and :waiting-for.
+        (should-not (plist-get s1 :shell-p))
+        ;; The parser exposes only :pid, :cwd, :status, :waiting-for and
+        ;; :shell-p.
         (should (null (plist-get s1 :name)))
         (should (= (plist-get s1 :pid) 1001)))
       (let ((s3 (gethash "33333333-3333-4333-8333-333333333333" table)))
@@ -234,11 +236,11 @@ the developer exports."
       ;; A file without a status field yields nil, not an error.
       (let ((s4 (gethash "44444444-4444-4444-8444-444444444444" table)))
         (should (null (plist-get s4 :status))))
-      ;; Claude's `shell' (between turns, a background command running) is busy.
-      (should (equal (plist-get (gethash "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-                                         table)
-                                :status)
-                     "busy"))
+      ;; Claude's `shell' (between turns, a background command running) is
+      ;; busy, and flagged as such.
+      (let ((s6 (gethash "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" table)))
+        (should (equal (plist-get s6 :status) "busy"))
+        (should (plist-get s6 :shell-p)))
       ;; `claude-code--live-info' is the per-id lookup over the same data:
       ;; a fresh parse without TABLE, the given TABLE as-is (no reparse).
       (let ((id "11111111-1111-4111-8111-111111111111"))
@@ -1324,8 +1326,8 @@ argument list differs."
             ;; the instance it hosts rather than its sibling.
             (should (= (length buffers) 2))
             (let ((routed '()))
-              (cl-letf (((symbol-function 'claude-code--notify)
-                         (lambda (id _body) (push id routed))))
+              (cl-letf (((symbol-function 'claude-code--on-status)
+                         (lambda (id &rest _) (push id routed))))
                 (dolist (id (list "given-id" spawned-id))
                   (let ((buffer (plist-get (gethash id claude-code--managed)
                                            :buffer)))
@@ -1335,9 +1337,9 @@ argument list differs."
                     (should (eq (buffer-local-value 'ghostel-buffer-name-function
                                                     buffer)
                                 #'claude-code--ghostel-buffer-name))
-                    (funcall (buffer-local-value 'ghostel-notification-function
-                                                 buffer)
-                             "Claude Code" "Claude is waiting for your input"))))
+                    (funcall (car (buffer-local-value
+                                   'ghostel-program-status-functions buffer))
+                             "" nil '(:state done)))))
               (should (equal (nreverse routed)
                              (list "given-id" spawned-id))))))))))
 
@@ -1704,20 +1706,226 @@ are bound per test, so a watcher never outlives the test that installed it."
        (claude-code-tests--capturing-timers ,log ,@body))))
 
 (ert-deftest claude-code-test-install-notifications ()
-  "An instance's buffer routes its terminal notifications to its own session.
-The handler is buffer-local, so terminals this package does not manage keep
-the user's global handler, and it carries the instance id rather than reading
-it back from whatever buffer happens to be current."
+  "An instance's buffer hands its status reports to its own session.
+Ghostel's announcement of them and its OSC 9/777 notifications are silenced
+buffer-locally, so terminals this package does not manage keep the user's
+handlers.  The status hook still runs its global entries -- the mode-line
+indicator among them -- and the instance's own carries the instance id rather
+than reading it back from whatever buffer happens to be current."
   (claude-code-tests--with-managed-buffer buf
     (let ((seen '()))
       (claude-code--install-notifications "id-1" buf)
-      (should (local-variable-p 'ghostel-notification-function buf))
-      (cl-letf (((symbol-function 'claude-code--notify)
-                 (lambda (id body) (push (list id body) seen))))
-        ;; Claude's title is a constant banner; only the body carries meaning.
-        (funcall (buffer-local-value 'ghostel-notification-function buf)
-                 "Claude Code" "Claude is waiting for your input"))
-      (should (equal seen '(("id-1" "Claude is waiting for your input")))))))
+      (with-current-buffer buf
+        (should (local-variable-p 'ghostel-notification-functions))
+        (should (null ghostel-notification-functions))
+        (should (local-variable-p 'ghostel-status-notify-states))
+        (should (null ghostel-status-notify-states))
+        (should (memq t ghostel-program-status-functions)))
+      (cl-letf (((symbol-function 'claude-code--on-status)
+                 (lambda (&rest args) (push args seen))))
+        (funcall (car (buffer-local-value 'ghostel-program-status-functions buf))
+                 "" '(:state working) '(:state done)))
+      (should (equal seen '(("id-1" "" (:state working) (:state done))))))))
+
+(defmacro claude-code-tests--reporting (buf log now &rest body)
+  "Run BODY in BUF as its status reports arrive, recording timers onto LOG.
+NOW is read as the time on every clock reading, so a test moves time by
+setting it.  BUF starts with no status record and no notification up."
+  (declare (indent 3))
+  `(with-current-buffer ,buf
+     (setq-local ghostel-program-status nil)
+     (cl-letf (((symbol-function 'float-time) (lambda (&rest _) ,now)))
+       (claude-code-tests--capturing-timers ,log ,@body))))
+
+(defun claude-code-tests--status (buf state &rest props)
+  "Report root STATE with PROPS to instance \"id-1\" in BUF, as Ghostel would.
+BUF's root record becomes the report -- a nil STATE removes it -- and
+`claude-code--on-status' is handed the record it replaced and the new one."
+  (with-current-buffer buf
+    (let ((old (cdr (assoc "" ghostel-program-status)))
+          (new (and state `(:state ,state ,@props))))
+      (setq ghostel-program-status (and new (list (cons "" new))))
+      (claude-code--on-status "id-1" "" old new))))
+
+(defun claude-code-tests--live-timers (log)
+  "Return the thunks LOG recorded as scheduled and never cancelled."
+  (let ((cancelled (claude-code-tests--cancelled log)))
+    (mapcar (lambda (entry) (nth 2 entry))
+            (seq-filter (lambda (entry)
+                          (and (eq (nth 0 entry) 'scheduled)
+                               (not (member (nth 3 entry) cancelled))))
+                        log))))
+
+(ert-deftest claude-code-test-on-status-announces-the-root-only ()
+  "Only the root record entering `done', `blocked' or `error' is announced.
+A child record is a subagent, whose state says nothing about whether the
+session needs the user; a report repeating the root's state asks nothing new.
+The announcement waits out `claude-code--notify-settle'."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (now 100.0))
+      (claude-code-tests--reporting buf log now
+        (claude-code--on-status "id-1" "a93609d08ab42add7" nil
+                                '(:state blocked :kind question))
+        (claude-code--on-status "id-1" "a93609d08ab42add7"
+                                '(:state blocked :kind question)
+                                '(:state done))
+        (claude-code-tests--status buf 'working)
+        (should (null (claude-code-tests--live-timers log)))
+        (claude-code-tests--status buf 'blocked :kind 'permission)
+        (claude-code-tests--status buf 'blocked :kind 'permission :msg "m")
+        (should (= (length (claude-code-tests--live-timers log)) 1))
+        (should (claude-code-tests--thunk-at log claude-code--notify-settle))))))
+
+(defmacro claude-code-tests--announcing (buf shell seen &rest body)
+  "Run BODY with BUF the managed instance \"id-1\", announcing onto SEEN.
+SHELL is read as whether Claude's sessions/ status reports a background
+shell command, so a test moves it by setting it.  Each announcement pushes
+its body."
+  (declare (indent 3))
+  `(cl-letf (((symbol-function 'claude-code--managed-buffer)
+              (lambda (id) (and (equal id "id-1") ,buf)))
+             ((symbol-function 'claude-code--live-info)
+              (lambda (&rest _) (list :shell-p ,shell)))
+             ((symbol-function 'claude-code--notify)
+              (lambda (_id body) (push body ,seen))))
+     ,@body))
+
+(defun claude-code-tests--settle (log)
+  "Fire the one announcement LOG holds pending."
+  (let ((pending (claude-code-tests--live-timers log)))
+    (should (= (length pending) 1))
+    (funcall (car pending))))
+
+(ert-deftest claude-code-test-announce-times-the-stretch-of-work ()
+  "A finished turn is announced with how long the instance worked for it.
+The stretch is timed from the root setting to work after resting to the
+moment `done' was reported, not to the end of the settling wait."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (seen '()) (now 1000.0) (shell nil))
+      (claude-code-tests--announcing buf shell seen
+        (claude-code-tests--reporting buf log now
+          (claude-code-tests--status buf 'working)
+          (setq now 1252.0)
+          (claude-code-tests--status buf 'done)
+          (setq now 1252.5)
+          (claude-code-tests--settle log)
+          (should (equal seen '("Finished after 4m 12s")))
+          (should-not claude-code--working-since))))))
+
+(ert-deftest claude-code-test-announce-waits-out-a-background-shell ()
+  "A `done' with a background shell command still running is no finished turn.
+Claude reports the turn done, but its sessions/ status reads `shell' until the
+command's completion has started and ended the next turn; only that `done'
+is announced, and the stretch it times includes the command."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (seen '()) (now 1000.0) (shell t))
+      (claude-code-tests--announcing buf shell seen
+        (claude-code-tests--reporting buf log now
+          (claude-code-tests--status buf 'working)
+          (setq now 1003.0)
+          (claude-code-tests--status buf 'done)
+          (claude-code-tests--settle log)
+          (should (null seen))
+          (should (= claude-code--working-since 1000.0))
+          ;; The command completes and starts the next turn by itself.
+          (setq now 1020.0 log '())
+          (claude-code-tests--status buf 'working)
+          (setq now 1021.0 shell nil)
+          (claude-code-tests--status buf 'done)
+          (claude-code-tests--settle log)
+          (should (equal seen '("Finished after 21s"))))))))
+
+(ert-deftest claude-code-test-announce-only-what-still-holds ()
+  "A state the root leaves during the settling wait is never announced.
+A permission prompt resolved without the user, or a `done' the user already
+acknowledged by typing, has nothing left to ask for, and a state left and
+re-entered inside the wait is announced once.  An instance gone from the
+registry by then announces nothing."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (seen '()) (now 1000.0) (shell nil))
+      (claude-code-tests--announcing buf shell seen
+        (claude-code-tests--reporting buf log now
+          (claude-code-tests--status buf 'blocked :kind 'permission)
+          (claude-code-tests--status buf 'working)
+          (claude-code-tests--status buf 'done)
+          (claude-code-tests--status buf nil)
+          (should (null (claude-code-tests--live-timers log)))
+          (claude-code-tests--status buf 'working)
+          (claude-code-tests--status buf 'done)
+          (claude-code-tests--status buf 'working)
+          (claude-code-tests--status buf 'done)
+          (claude-code-tests--settle log)
+          (should (equal seen '("Finished")))
+          (claude-code--announce "gone" 'done now)
+          (should (equal seen '("Finished"))))))))
+
+(ert-deftest claude-code-test-announce-shows-claude-s-message ()
+  "Claude's own message is the body whenever it sent one.
+A `blocked' report says what the instance waits on and keeps the stretch of
+work going; an `error' says what failed and ends it."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (seen '()) (now 1000.0) (shell nil))
+      (claude-code-tests--announcing buf shell seen
+        (claude-code-tests--reporting buf log now
+          (claude-code-tests--status buf 'working)
+          (claude-code-tests--status buf 'blocked :kind 'permission
+                                     :msg "approve Write: /tmp/x")
+          (claude-code-tests--settle log)
+          (should (equal seen '("approve Write: /tmp/x")))
+          (should (= claude-code--working-since 1000.0))
+          (setq log '())
+          (claude-code-tests--status buf 'error :msg "There's an issue")
+          (claude-code-tests--settle log)
+          (should (equal (car seen) "There's an issue"))
+          (should-not claude-code--working-since))))))
+
+(ert-deftest claude-code-test-on-status-ends-the-stretch-at-rest ()
+  "An interrupt or an acknowledged record ends the stretch of work.
+Claude reports an interrupted turn `idle'; Ghostel drops a `done' the user
+acknowledged by typing, which reaches the hook as no record at all."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (now 1000.0))
+      (claude-code-tests--reporting buf log now
+        (dolist (rest '(idle nil))
+          (claude-code-tests--status buf 'working)
+          (should (= claude-code--working-since 1000.0))
+          (claude-code-tests--status buf rest)
+          (should-not claude-code--working-since))))))
+
+(ert-deftest claude-code-test-on-status-closes-what-it-announced ()
+  "A notification closes once the root leaves the state it announced.
+A permission the user granted in the terminal, or a `done' acknowledged there,
+leaves a banner that asks for nothing."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (now 1000.0) (closed '()))
+      (cl-letf (((symbol-function 'notifications-close-notification)
+                 (lambda (id &rest _) (push id closed))))
+        (claude-code-tests--reporting buf log now
+          (claude-code-tests--status buf 'blocked :kind 'permission)
+          (setq claude-code--posted (list 7))
+          ;; The prompt's message changes; the state it announced holds.
+          (claude-code-tests--status buf 'blocked :kind 'permission :msg "m")
+          (should (null closed))
+          (claude-code-tests--status buf 'working)
+          (should (equal closed '(7)))
+          (should (null claude-code--posted)))))))
+
+(ert-deftest claude-code-test-status-message ()
+  "A report Claude sent without a message is described by its state.
+A turn under a second, or one of unknown start, reads as finished, and a
+duration names no unit past its last non-zero one."
+  (should (equal (claude-code--status-message 'done 1000.0 1012.4)
+                 "Finished after 12s"))
+  (should (equal (claude-code--status-message 'done 1000.0 1060.0)
+                 "Finished after 1m"))
+  (should (equal (claude-code--status-message 'done 1000.0 4725.0)
+                 "Finished after 1h 2m 5s"))
+  (should (equal (claude-code--status-message 'done 1000.0 1000.4) "Finished"))
+  (should (equal (claude-code--status-message 'done nil 1000.0) "Finished"))
+  (should (equal (claude-code--status-message 'blocked 1000.0 1001.0)
+                 "Waiting for you"))
+  (should (equal (claude-code--status-message 'error 1000.0 1001.0)
+                 "Stopped on an error")))
 
 (ert-deftest claude-code-test-frame-focused-p ()
   "Focus is a `t' focus state on a visible frame, and nothing else."
@@ -1792,10 +2000,10 @@ status the instance has now rather than a cached one."
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf)))
                   ((symbol-function 'claude-code--on-screen-p) #'ignore))
-          (claude-code--notify id "Claude is waiting for your input"))
+          (claude-code--notify id "Finished after 4m 12s"))
         (should (= (length seen) 1))
         (pcase-let ((`(,session . ,body) (car seen)))
-          (should (equal body "Claude is waiting for your input"))
+          (should (equal body "Finished after 4m 12s"))
           (should (equal (claude-code-session-id session) id))
           (should (eq (claude-code-session-buffer session) buf))
           (should (claude-code-session-alive-p session))
@@ -1816,18 +2024,18 @@ status the instance has now rather than a cached one."
           ;; The user can see the instance already.
           (cl-letf (((symbol-function 'claude-code--on-screen-p)
                      (lambda (_buffer) t)))
-            (claude-code--notify id "Claude is waiting for your input"))
+            (claude-code--notify id "Finished after 4m 12s"))
           (should (= announced 0))
           (cl-letf (((symbol-function 'claude-code--on-screen-p) #'ignore))
             ;; An id that has left the registry, e.g. the instance just exited.
-            (claude-code--notify "gone" "Claude is waiting for your input")
+            (claude-code--notify "gone" "Finished after 4m 12s")
             (should (= announced 0))
             ;; Notifications turned off entirely.
             (let ((claude-code-notify-function nil))
-              (claude-code--notify id "Claude is waiting for your input"))
+              (claude-code--notify id "Finished after 4m 12s"))
             (should (= announced 0))
             ;; The same call announces once every guard is out of the way.
-            (claude-code--notify id "Claude is waiting for your input")
+            (claude-code--notify id "Finished after 4m 12s")
             (should (= announced 1))))))))
 
 (ert-deftest claude-code-test-notify-follow-shows-the-instance-once-raised ()
@@ -2039,6 +2247,35 @@ The follow is handed the session id, so it resolves the instance itself."
           (should (null followed))
           (funcall on-close 1 'dismissed)
           (should (equal followed '("id-1"))))))))
+
+(ert-deftest claude-code-test-notify-desktop-closes-with-the-instance ()
+  "Notifications still up when their instance's buffer dies are closed.
+One already closed -- clicked, waved away or expired -- is forgotten as it
+closes, so the kill closes only what is still up.  A close the server
+refuses does not keep the buffer alive."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((posts '())
+          (closed '())
+          (session (claude-code-session--create :id "id-1" :title "T"
+                                                :buffer buf)))
+      (cl-letf (((symbol-function 'notifications-close-notification)
+                 (lambda (id &rest _)
+                   (push id closed)
+                   (signal 'dbus-error '("No such notification"))))
+                ((symbol-function 'claude-code--notify-follow) #'ignore))
+        (claude-code-tests--recording-notify posts
+          (claude-code-notify-desktop session "first")
+          (claude-code-notify-desktop session "second")
+          (claude-code-notify-desktop session "third")
+          ;; Posted as 1, 2 and 3; the first and the last close on their own.
+          (funcall (plist-get (nth 2 posts) :on-close) 1 'dismissed)
+          (funcall (plist-get (nth 0 posts) :on-close) 3 'expired)
+          (should (null closed))
+          ;; ERT debugs every error; a session left to run would not.
+          (let ((debug-on-error nil))
+            (kill-buffer buf))
+          (should (equal closed '(2)))
+          (should-not (buffer-live-p buf)))))))
 
 ;;;; View
 

@@ -4,7 +4,7 @@
 
 ;; Author: Lautaro Emanuel
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "30.1") (ghostel "0") (web-server "0.1.2"))
+;; Package-Requires: ((emacs "30.1") (ghostel "0.58.0") (web-server "0.1.2"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/emlautarom1/claude-code.el
 
@@ -45,7 +45,10 @@
 (defvar ghostel--process)
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-buffer-name-function)
-(defvar ghostel-notification-function)
+(defvar ghostel-notification-functions)
+(defvar ghostel-program-status)
+(defvar ghostel-program-status-functions)
+(defvar ghostel-status-notify-states)
 (defvar ghostel-semi-char-mode-map)
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
@@ -129,11 +132,12 @@ files its transcripts under itself, making it a project in its own right."
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
 The table is keyed by session id; each value is a plist with keys
-:pid, :cwd, :status and :waiting-for.  This is pure parsing of
+:pid, :cwd, :status, :waiting-for and :shell-p.  This is pure parsing of
 the files Claude writes for every running instance; process liveness
 is decided by the caller.  A missing status field yields a nil :status
 rather than an error, and Claude's \"shell\" reads as \"busy\": the turn has
-ended but a background command runs, whose completion starts the next one."
+ended but a background command runs, whose completion starts the next one.
+:shell-p tells that case apart from a turn in progress."
   (let ((dir (expand-file-name "sessions" claude-code-config-dir))
         (table (make-hash-table :test 'equal)))
     (when (file-directory-p dir)
@@ -144,14 +148,14 @@ ended but a background command runs, whose completion starts the next one."
                         (json-parse-buffer :object-type 'hash-table)))
                  (id (gethash "sessionId" obj)))
             (when id
-              (puthash id
-                       (list :pid (gethash "pid" obj)
-                             :cwd (gethash "cwd" obj)
-                             :status (pcase (gethash "status" obj)
-                                       ("shell" "busy")
-                                       (status status))
-                             :waiting-for (gethash "waitingFor" obj))
-                       table))))))
+              (let ((status (gethash "status" obj)))
+                (puthash id
+                         (list :pid (gethash "pid" obj)
+                               :cwd (gethash "cwd" obj)
+                               :status (if (equal status "shell") "busy" status)
+                               :waiting-for (gethash "waitingFor" obj)
+                               :shell-p (equal status "shell"))
+                         table)))))))
     table))
 
 (defun claude-code--live-info (id &optional table)
@@ -937,18 +941,22 @@ is where `claude-code--session-display-name' reads it back on the next refresh."
 
 ;;;; Notifications
 ;;
-;; An instance asks for attention with a terminal notification escape, which
-;; Ghostel hands to the buffer-local `ghostel-notification-function' installed
-;; here.  What a click does, and why the notification is shaped the way it is,
-;; are in docs/architecture.md.
+;; An instance reports what it is doing over OSC 7501, which Ghostel keeps as
+;; program status records and hands, change by change, to the buffer-local
+;; `ghostel-program-status-functions' entry installed here.  Which reports are
+;; announced, what a click does, and why the notification is shaped the way it
+;; is, are in docs/architecture.md.
 
 ;; `notifications' ships with Emacs but needs a D-Bus build, so it is required
 ;; where it is used rather than at the top level.
 (declare-function notifications-notify "notifications" (&rest params))
+(declare-function notifications-close-notification "notifications"
+                  (id &optional bus))
 
 (defcustom claude-code-notify-function #'claude-code-notify-desktop
   "Function announcing that an instance wants the user's attention.
-Called with the instance's `claude-code-session' and the message Claude sent.
+Called with the instance's `claude-code-session' and the message to show:
+the one Claude sent with its status report, else one describing the report.
 Set to nil to ignore notifications."
   :type '(choice (const :tag "Disabled" nil) function))
 
@@ -1009,13 +1017,84 @@ already see."
                (claude-code--session-by-id id buffer)
                body))))
 
+(defvar claude-code--notify-settle 0.5
+  "Seconds a reported state must hold before it is announced.
+Claude rewrites its sessions/ status just after the report, and that status is
+what tells a finished turn from one a background shell command keeps going.")
+
+(defvar-local claude-code--working-since nil
+  "When the instance in this buffer set to work after resting, or nil.")
+
+(defvar-local claude-code--pending nil
+  "The timer announcing the root state of this buffer's instance, or nil.")
+
 (defun claude-code--install-notifications (id buffer)
-  "Route BUFFER's terminal notifications to those of instance ID.
-The binding is buffer-local, so Ghostel terminals this package does not manage
-keep the user's global handler."
+  "Announce instance ID from the status reports BUFFER's terminal receives.
+Ghostel's own announcement of them and every OSC 9 or OSC 777 notification
+are silenced, while its mode-line indicator stays.  The bindings are
+buffer-local, so Ghostel terminals this package does not manage keep the
+user's handlers."
   (with-current-buffer buffer
-    (setq-local ghostel-notification-function
-                (lambda (_title body) (claude-code--notify id body)))))
+    (setq-local ghostel-notification-functions nil)
+    (setq-local ghostel-status-notify-states nil)
+    (add-hook 'ghostel-program-status-functions
+              (lambda (record-id old new)
+                (claude-code--on-status id record-id old new))
+              nil t)))
+
+(defun claude-code--on-status (id record-id old new)
+  "Track instance ID's status record RECORD-ID changing from OLD to NEW.
+Only the root record, \"\", speaks for the session; the others are its
+subagents.  A change of the root's state closes the notifications announcing
+the one it left, and entering `done', `blocked' or `error' is announced once
+it has held for `claude-code--notify-settle' seconds.  A stretch of work
+starts when the root sets to work after resting, and ends with an interrupt,
+a record the user acknowledged, or an announced `done' or `error'."
+  (when (string-empty-p record-id)
+    (let ((state (plist-get new :state)))
+      (unless (eq state (plist-get old :state))
+        (pcase state
+          ('working (unless claude-code--working-since
+                      (setq claude-code--working-since (float-time))))
+          ((or 'idle 'nil) (setq claude-code--working-since nil)))
+        (when claude-code--pending
+          (cancel-timer claude-code--pending))
+        (claude-code--close-posted)
+        (setq claude-code--pending
+              (when (memq state '(done blocked error))
+                (let ((reported (float-time)))
+                  (run-at-time claude-code--notify-settle nil
+                               (lambda ()
+                                 (claude-code--announce id state
+                                                        reported))))))))))
+
+(defun claude-code--announce (id state reported)
+  "Announce instance ID's root STATE, reported at time REPORTED.
+A `done' while a background shell command the instance started still runs is
+a turn the command keeps going -- its completion starts the next one -- so it
+neither ends the stretch of work nor announces anything."
+  (when-let* ((buffer (claude-code--managed-buffer id))
+              ((not (and (eq state 'done)
+                         (plist-get (claude-code--live-info id) :shell-p)))))
+    (with-current-buffer buffer
+      (let ((since claude-code--working-since))
+        (unless (eq state 'blocked)
+          (setq claude-code--working-since nil))
+        (claude-code--notify
+         id (or (plist-get (cdr (assoc "" ghostel-program-status)) :msg)
+                (claude-code--status-message state since reported)))))))
+
+(defun claude-code--status-message (state since reported)
+  "Return the body announcing root STATE, reported at time REPORTED.
+For a report Claude sent without a message.  SINCE is when the stretch of
+work it ends began, or nil when that is unknown."
+  (pcase state
+    ('done (if (and since (>= (- reported since) 1))
+               (format "Finished after %s"
+                       (format-seconds "%hh %mm %z%ss%x" (- reported since)))
+             "Finished"))
+    ('blocked "Waiting for you")
+    ('error "Stopped on an error")))
 
 (defun claude-code--notify-retire ()
   "Release the activation window, if one is claimed."
@@ -1027,8 +1106,7 @@ keep the user's global handler."
 
 (defun claude-code--notify-show (id)
   "Display managed instance ID, resolved now rather than when it announced.
-An instance killed and resumed meanwhile is hosted in a new buffer, and that
-is the one to open.  The display runs from a timer so that it does not
+The display runs from a timer so that it does not
 rearrange windows inside the D-Bus handler or focus hook that asked for it, and
 deliberately not through `claude-code--show': a notification is no reason for
 the window the user is typing in to give way."
@@ -1062,20 +1140,46 @@ Emacs has no raise coming, so it displays at once."
           (setq claude-code--notify-claim (cons watch expiry))
           (add-function :after after-focus-change-function watch))))))
 
+(defvar-local claude-code--posted nil
+  "Desktop notifications posted for the instance in this buffer, still up.")
+
+(defun claude-code--close-posted ()
+  "Close the desktop notifications still up for this buffer's instance.
+Run when the state they announced ends, and from the buffer's
+`kill-buffer-hook', since a click on what a dead instance left behind would
+have nothing to open.  A failed close is only reported: the specification
+lets a server answer one for a notification already gone with an error, and
+an error escaping `kill-buffer-hook' would keep the buffer alive."
+  (dolist (posted claude-code--posted)
+    (with-demoted-errors "claude-code: closing a notification: %S"
+      (notifications-close-notification posted)))
+  (setq claude-code--posted nil))
+
 (defun claude-code-notify-desktop (session body)
   "Post BODY as a desktop notification that jumps to SESSION when clicked.
 The notification declares no actions: a desktop with one to invoke hands the
-click to Emacs instead of raising it, and the raise is what the jump needs."
+click to Emacs instead of raising it, and the raise is what the jump needs.
+It is remembered in SESSION's buffer, for `claude-code--close-posted'."
   (require 'notifications)
-  (let ((id (claude-code-session-id session)))
-    (notifications-notify
-     :title (claude-code--session-display-name session)
-     :body body
-     :desktop-entry claude-code-notify-desktop-entry
-     :urgency claude-code-notify-urgency
-     :on-close (lambda (_notification reason)
-                 (when (eq reason 'dismissed)
-                   (claude-code--notify-follow id))))))
+  (let* ((id (claude-code-session-id session))
+         (buffer (claude-code-session-buffer session))
+         (posted
+          (notifications-notify
+           :title (claude-code--session-display-name session)
+           :body body
+           :desktop-entry claude-code-notify-desktop-entry
+           :urgency claude-code-notify-urgency
+           :on-close (lambda (notification reason)
+                       (when (buffer-live-p buffer)
+                         (with-current-buffer buffer
+                           (setq claude-code--posted
+                                 (delq notification claude-code--posted))))
+                       (when (eq reason 'dismissed)
+                         (claude-code--notify-follow id))))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (push posted claude-code--posted)
+        (add-hook 'kill-buffer-hook #'claude-code--close-posted nil t)))))
 
 
 ;;;; View
