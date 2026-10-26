@@ -3655,6 +3655,15 @@ The name is given as several words to show that it reaches the CLI whole."
             (keymap-unset claude-code-instance-mode-map "C-c M-z" t))
           (setq pid (buffer-local-value 'ghostel--pid buffer))
           (should (claude-code--pid-live-p pid))
+          ;; A live status only appears once the child writes its sessions file,
+          ;; which only happens for a real (non-nested) session.
+          (should (member
+                   (claude-code-tests--await
+                    (lambda () (let ((s (claude-code-tests--find-session
+                                         (claude-code-project-sessions root) id)))
+                                 (and s (claude-code-session-status s))))
+                    45)
+                   '("busy" "idle" "waiting")))
           ;; Ghostel ran the pre-spawn hook: the entry the `inline' renderer
           ;; asks for is in the spawned process's own environment.
           (when (file-readable-p (format "/proc/%d/environ" pid))
@@ -3665,15 +3674,6 @@ The name is given as several words to show that it reaches the CLI whole."
                                 (format "/proc/%d/environ" pid))
                                (buffer-string))
                              "\0" t))))
-          ;; A live status only appears once the child writes its sessions file,
-          ;; which only happens for a real (non-nested) session.
-          (should (member
-                   (claude-code-tests--await
-                    (lambda () (let ((s (claude-code-tests--find-session
-                                         (claude-code-project-sessions root) id)))
-                                 (and s (claude-code-session-status s))))
-                    45)
-                   '("busy" "idle" "waiting")))
           ;; The name given at spawn is the name the view shows: the CLI records
           ;; it in the transcript this package takes a session's name from.
           (should (claude-code-tests--await
