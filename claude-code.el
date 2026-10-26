@@ -397,7 +397,7 @@ This is the single authority for a session's name, so it cannot drift: the
 name is derived from the transcript on every query, never cached by this
 package.  The sources, in order: the transcript TITLE (a user custom title,
 which a spawn name or a `/rename' writes, else Claude's generated one), the
-opening prompt, and finally the short session id."
+latest prompt, and finally the short session id."
   (or (claude-code-session-title session)
       (claude-code-session-last-prompt session)
       (string-limit (claude-code-session-id session) 8)))

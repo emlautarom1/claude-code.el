@@ -731,6 +731,19 @@ without filtering; making it recursive would put every subagent in the view."
     (should (equal (plist-get (claude-code--transcript-fields file) :title)
                    "renamed"))))
 
+(ert-deftest claude-code-test-transcript-fields-last-prompt ()
+  "`:last-prompt' is the latest prompt, not the opening one.
+A rewind writes a `last-prompt' line with no `lastPrompt', which is passed over."
+  (claude-code-tests--with-transcript file
+      '("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"What does the proposed format mean?\"},\"timestamp\":\"2026-10-26T22:58:41.112Z\"}"
+        "{\"type\":\"last-prompt\",\"lastPrompt\":\"What does the proposed format mean?\",\"leafUuid\":\"c52990d4-bdd7-4420-a4c2-c112963d313b\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\"}"
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"What does the proposed display format mean?\"},\"timestamp\":\"2026-10-26T23:00:52.397Z\"}"
+        "{\"type\":\"last-prompt\",\"lastPrompt\":\"What does the proposed display format mean?\",\"leafUuid\":\"9a385cbb-0463-4a24-8d15-226acdb81c96\",\"sessionId\":\"11111111-1111-4111-8111-111111111111\"}"
+        "{\"type\":\"last-prompt\",\"leafUuid\":\"00000000-0000-0000-0000-000000000000\",\"explicit\":true,\"sessionId\":\"11111111-1111-4111-8111-111111111111\"}")
+      1800000000
+    (should (equal (plist-get (claude-code--transcript-fields file) :last-prompt)
+                   "What does the proposed display format mean?"))))
+
 (ert-deftest claude-code-test-transcript-fields-last-active-snapshot-only ()
   "With only `file-history-snapshot' lines, last-active falls back to the mtime."
   (claude-code-tests--with-transcript file
