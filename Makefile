@@ -3,8 +3,9 @@ SRC   := claude-code.el claude-code-mcp.el
 TESTS := test/claude-code-tests.el test/claude-code-mcp-tests.el
 
 ## Everything needed to load the package and the suite into a batch Emacs.
-ERT_LOAD := --eval '(package-initialize)' -L . -L test \
-	    -l ert $(foreach t,$(TESTS),-l $(t))
+## A source edited since `make compile' outranks its stale .elc.
+ERT_LOAD := --eval '(package-initialize)' --eval '(setq load-prefer-newer t)' \
+	    -L . -L test -l ert $(foreach t,$(TESTS),-l $(t))
 
 .PHONY: all deps compile test integration lint clean
 
