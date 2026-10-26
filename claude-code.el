@@ -1108,8 +1108,8 @@ work it ends began, or nil when that is unknown."
   "Display managed instance ID, resolved now rather than when it announced.
 The display runs from a timer so that it does not
 rearrange windows inside the D-Bus handler or focus hook that asked for it, and
-deliberately not through `claude-code--show': a notification is no reason for
-the window the user is typing in to give way."
+deliberately not through `claude-code--show': a notification is no reason to
+take a sessions view's window."
   (run-at-time 0 nil
                (lambda ()
                  (when-let* ((buffer (claude-code--managed-buffer id)))
@@ -1433,13 +1433,19 @@ draws as alive.  The error names that row's remedy."
 ;;;;; Commands
 
 (defun claude-code--show (buffer)
-  "Display BUFFER, preferring the selected window.
-A window on this frame already showing BUFFER outranks the selected one, since
-Ghostel sizes the pty to the smallest window showing a buffer and an instance
-displayed twice renders short in the larger.  A selected window that cannot host
-BUFFER -- a minibuffer, or one dedicated to its buffer, a side window among them
--- keeps what it has."
-  (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-same-window))))
+  "Display and select BUFFER in its own window or a sessions view's, else another.
+Only windows on the selected frame count, the selected one first, and a
+dedicated view window is never taken."
+  (let* ((views (claude-code--views))
+         (window (or (get-buffer-window buffer)
+                     (seq-find (lambda (w)
+                                 (and (memq (window-buffer w) views)
+                                      (not (window-dedicated-p w))))
+                               (window-list nil 'nomini)))))
+    (pop-to-buffer buffer (if window
+                              `(display-buffer-use-some-window
+                                (some-window . ,(lambda (&rest _) window)))
+                            t))))
 
 (defun claude-code--ensure-sessions-mode ()
   "Signal a `user-error' unless the current buffer is a sessions view."

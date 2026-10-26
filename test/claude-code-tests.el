@@ -2066,7 +2066,7 @@ change cannot show the instance twice."
           (should-not (claude-code-tests--thunk-at log 0))
           (should (equal shown (list buf))))))))
 
-(ert-deftest claude-code-test-notify-does-not-claim-the-selected-window ()
+(ert-deftest claude-code-test-notify-does-not-claim-a-view-window ()
   "A notification jump displays with `pop-to-buffer', not `claude-code--show'.
 Every other notify test stubs `pop-to-buffer' -- which `claude-code--show' calls
 -- so none of them would notice this opt-out being dropped."
@@ -3200,75 +3200,116 @@ same policy is `claude-code-test-sessions-visit-dispatch'."
           (should (equal shown (list instance))))
       (kill-buffer instance))))
 
-(ert-deftest claude-code-test-show-prefers-the-selected-window ()
-  "`claude-code--show' takes the selected window only when it can host the buffer.
-Run against real windows: an ordinary selected window is reused; a dedicated one
--- a side window among them -- keeps its buffer and the instance goes elsewhere;
-and a window already showing the instance wins over the selected one, since a
-second window would shrink the terminal to whichever of the two is smaller."
+(ert-deftest claude-code-test-show-takes-a-view-window ()
+  "`claude-code--show' takes a sessions view's window, and no other buffer's.
+Run against real windows."
   (let ((instance (generate-new-buffer " *cc-instance*"))
         (occupant (generate-new-buffer " *cc-occupant*"))
-        (sidebar (generate-new-buffer " *cc-sidebar*")))
+        (view (generate-new-buffer " *cc-view*"))
+        (other-view (generate-new-buffer " *cc-other-view*"))
+        (projectless (generate-new-buffer " *cc-projectless*")))
     (unwind-protect
         ;; Nothing of the user's may decide the outcome: the three variables
         ;; `display-buffer' consults before this function's own action, the
-        ;; split thresholds, and the window parameters that would otherwise make
-        ;; `delete-other-windows' refuse (from a side window) or leave a
-        ;; `no-delete-other-windows' sibling standing.  `save-window-excursion'
-        ;; restores the layout, so the suite is safe to run from `M-x ert' in a
-        ;; live frame and not only in batch.
+        ;; pop-up and split settings, and the window parameters that would
+        ;; otherwise make `delete-other-windows' refuse (from a side window) or
+        ;; leave a `no-delete-other-windows' sibling standing.
+        ;; `save-window-excursion' restores the layout, so the suite is safe to
+        ;; run from `M-x ert' in a live frame and not only in batch.
         (let ((display-buffer-overriding-action nil)
               (display-buffer-alist nil)
               (display-buffer-base-action nil)
+              (pop-up-windows t)
+              (pop-up-frames nil)
+              (split-window-preferred-function #'split-window-sensibly)
               (split-height-threshold 4)
               (split-width-threshold nil)
               (ignore-window-parameters t))
-          (save-window-excursion
-            (delete-other-windows)
-            (set-window-buffer (selected-window) occupant)
-            (claude-code--show instance)
-            (should (eq (window-buffer (selected-window)) instance))
-            (should (= (length (window-list)) 1))
+          (dolist (b (list view other-view projectless))
+            (with-current-buffer b
+              (claude-code-sessions-mode)
+              (unless (eq b projectless)
+                (setq claude-code--project "/r"))))
+          (cl-flet ((reset (buffer)
+                      (delete-other-windows)
+                      (set-window-buffer (selected-window) buffer)
+                      (selected-window))
+                    (shown-in-p (window)
+                      (and (eq (selected-window) window)
+                           (eq (window-buffer window) instance))))
+            (save-window-excursion
+              (let ((kept (reset occupant)))
+                (claude-code--show instance)
+                (should (eq (window-buffer kept) occupant))
+                (should (eq (window-buffer (selected-window)) instance)))
 
-            ;; The instance is on screen nowhere here, so reuse cannot be what
-            ;; spares the side window.
-            (delete-other-windows)
-            (set-window-buffer (selected-window) occupant)
-            (let ((side (display-buffer
-                         sidebar '(display-buffer-in-side-window (side . bottom)))))
-              (select-window side)
-              (claude-code--show instance)
-              (should (eq (window-buffer side) sidebar))
-              (should (eq (window-dedicated-p side) 'side))
-              ;; Which window `display-buffer' then finds is its business; that
-              ;; the instance is on screen and selected, and not here, is not.
-              (should-not (eq (selected-window) side))
-              (should (eq (window-buffer (selected-window)) instance)))
+              (dolist (buffer (list view instance))
+                (let ((selected (reset buffer)))
+                  (claude-code--show instance)
+                  (should (shown-in-p selected))
+                  (should (= (length (window-list)) 1))))
 
-            (delete-other-windows)
-            (set-window-buffer (selected-window) occupant)
-            (let ((elsewhere (split-window)))
-              (set-window-buffer elsewhere instance)
-              (claude-code--show instance)
-              (should (eq (selected-window) elsewhere))
-              (should (= (length (get-buffer-window-list instance nil t)) 1)))
+              (let* ((kept (reset occupant))
+                     (beside (split-window)))
+                (set-window-buffer beside view)
+                (claude-code--show instance)
+                (should (shown-in-p beside))
+                (should (eq (window-buffer kept) occupant)))
 
-            ;; Expressing the preference as a `display-buffer' action is what
-            ;; leaves the user the last word, which a `switch-to-buffer' would
-            ;; quietly take away.
-            (delete-other-windows)
-            (set-window-buffer (selected-window) occupant)
-            (let* ((kept (selected-window))
-                   (display-buffer-alist
-                    `((,(regexp-quote (buffer-name instance))
-                       display-buffer-in-side-window (side . bottom)))))
-              (claude-code--show instance)
-              (should (eq (window-buffer kept) occupant))
-              (should (eq (window-parameter (get-buffer-window instance) 'window-side)
-                          'bottom)))))
-      (kill-buffer instance)
-      (kill-buffer occupant)
-      (kill-buffer sidebar))))
+              (let* ((selected (reset view))
+                     (beside (split-window)))
+                (set-window-buffer beside other-view)
+                (claude-code--show instance)
+                (should (shown-in-p selected))
+                (should (eq (window-buffer beside) other-view)))
+
+              ;; Neither a dedicated view nor a sessions buffer naming no
+              ;; project is a target.
+              (dolist (buffer (list view projectless))
+                (let* ((kept (reset occupant))
+                       (beside (split-window)))
+                  (set-window-buffer beside buffer)
+                  (set-window-dedicated-p beside (eq buffer view))
+                  (claude-code--show instance)
+                  (should (eq (window-buffer beside) buffer))
+                  (should (eq (window-buffer kept) occupant))
+                  (should (eq (window-buffer (selected-window)) instance))))
+
+              ;; Which window a selected side window sends the instance to is
+              ;; `display-buffer''s business; that it is not this one is not.
+              (dolist (select-side '(nil t))
+                (let ((kept (reset occupant))
+                      (side (display-buffer
+                             view '(display-buffer-in-side-window (side . bottom)))))
+                  (when select-side
+                    (select-window side))
+                  (claude-code--show instance)
+                  (should (eq (window-buffer side) view))
+                  (should (eq (window-dedicated-p side) 'side))
+                  (unless select-side
+                    (should (eq (window-buffer kept) occupant)))
+                  (should (eq (window-buffer (selected-window)) instance))))
+
+              (dolist (selected-buffer (list occupant view))
+                (reset selected-buffer)
+                (let ((elsewhere (split-window)))
+                  (set-window-buffer elsewhere instance)
+                  (claude-code--show instance)
+                  (should (shown-in-p elsewhere))
+                  (should (= (length (get-buffer-window-list instance nil t)) 1))))
+
+              ;; The user's entry gets the last word, even one the view beside
+              ;; would otherwise outrank.
+              (let* ((kept (reset occupant))
+                     (beside (split-window))
+                     (display-buffer-alist
+                      `((,(regexp-quote (buffer-name instance))
+                         display-buffer-same-window))))
+                (set-window-buffer beside view)
+                (claude-code--show instance)
+                (should (shown-in-p kept))
+                (should (eq (window-buffer beside) view))))))
+      (mapc #'kill-buffer (list instance occupant view other-view projectless)))))
 
 (ert-deftest claude-code-test-command-surface ()
   "The spawn menu's suffix is never offered by `M-x'; the entry points always are.
