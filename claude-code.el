@@ -83,13 +83,47 @@ Mirrors the CLI's own `$CLAUDE_CONFIG_DIR' resolution."
 ;; the rest of the package must speak in `claude-code-session' structs.  See
 ;; docs/storage-model.md for the documented formats.
 
+(defconst claude-code--encoded-cwd-limit 200
+  "Length past which Claude cuts a project-directory name and appends a hash.")
+
+(defun claude-code--utf16-units (string)
+  "Return STRING as the UTF-16 code units JavaScript sees in it."
+  (mapcan (lambda (char)
+            (if (< char #x10000)
+                (list char)
+              (let ((offset (- char #x10000)))
+                (list (+ #xD800 (ash offset -10))
+                      (+ #xDC00 (logand offset #x3FF))))))
+          (string-to-list string)))
+
+(defun claude-code--cwd-hash (dir)
+  "Return the base-36 hash Claude appends to DIR's cut project-directory name."
+  (let ((hash 0))
+    (dolist (unit (claude-code--utf16-units dir))
+      (setq hash (logand (+ (* hash 31) unit) #xFFFFFFFF)))
+    (let ((value (if (>= hash #x80000000) (- #x100000000 hash) hash))
+          (digits '()))
+      (while (progn (push (aref "0123456789abcdefghijklmnopqrstuvwxyz"
+                                (% value 36))
+                          digits)
+                    (> (setq value (/ value 36)) 0)))
+      (concat digits))))
+
 (defun claude-code--encode-cwd (path)
   "Encode absolute PATH into its Claude project-directory name.
-Claude replaces every slash and dot in the absolute working directory with a
-hyphen.  This mapping is lossy and MUST NOT be inverted; read the real cwd from
-session data instead."
-  (replace-regexp-in-string
-   "[/.]" "-" (directory-file-name (expand-file-name path))))
+The mapping is lossy and MUST NOT be inverted; read the real cwd from session
+data instead.  See docs/storage-model.md for the rule."
+  (let* ((dir (directory-file-name (expand-file-name path)))
+         (name (concat (mapcar (lambda (unit)
+                                 (if (or (<= ?a unit ?z) (<= ?A unit ?Z)
+                                         (<= ?0 unit ?9))
+                                     unit
+                                   ?-))
+                               (claude-code--utf16-units dir)))))
+    (if (<= (length name) claude-code--encoded-cwd-limit)
+        name
+      (concat (substring name 0 claude-code--encoded-cwd-limit)
+              "-" (claude-code--cwd-hash dir)))))
 
 (defun claude-code--projects-dir ()
   "Return the directory holding every project's transcript directory."

@@ -207,7 +207,9 @@ the developer exports."
 ;;;; Storage adapter
 
 (ert-deftest claude-code-test-encode-cwd ()
-  "Encoding replaces slashes and dots with hyphens, losslessly per Claude."
+  "Encoding names a directory exactly as Claude does.
+Every expected name under /tmp/cc-probe-enc is one CLI v2.1.304 created
+under projects/ for that directory."
   (should (equal (claude-code--encode-cwd
                   "/home/emlautarom1/Development/Elisp/claude-code.el")
                  "-home-emlautarom1-Development-Elisp-claude-code-el"))
@@ -216,7 +218,47 @@ the developer exports."
                  "-home-emlautarom1--dotfiles"))
   ;; A trailing slash (as `project-root' returns) must not add a trailing dash.
   (should (equal (claude-code--encode-cwd "/home/x/proj/")
-                 "-home-x-proj")))
+                 "-home-x-proj"))
+  ;; Everything but an ASCII letter or digit is a hyphen, one per UTF-16 code
+  ;; unit: the emoji outside the BMP takes two.
+  (should (equal (claude-code--encode-cwd "/tmp/cc-probe-enc/my_project dir/a+b")
+                 "-tmp-cc-probe-enc-my-project-dir-a-b"))
+  (should (equal (claude-code--encode-cwd "/tmp/cc-probe-enc/café/😀")
+                 "-tmp-cc-probe-enc-caf----"))
+  ;; A name of 200 is kept whole; one more character cuts it and appends the
+  ;; hash of the whole directory.
+  (let ((dir (concat "/tmp/cc-probe-enc/" (make-string 182 ?x))))
+    (should (equal (claude-code--encode-cwd dir)
+                   (concat "-tmp-cc-probe-enc-" (make-string 182 ?x))))
+    (should (equal (claude-code--encode-cwd (concat dir "y"))
+                   (concat "-tmp-cc-probe-enc-" (make-string 182 ?x)
+                           "-kcmpb5"))))
+  ;; A hash that folds negative is taken absolute, and the emoji's surrogate
+  ;; pair is what it hashes.
+  (should (equal (claude-code--encode-cwd
+                  (concat "/tmp/cc-probe-enc/😀/neg4/" (make-string 190 ?d)))
+                 (concat "-tmp-cc-probe-enc----neg4-" (make-string 174 ?d)
+                         "-wso8zt"))))
+
+(ert-deftest claude-code-test-project-transcripts-under-a-cut-name ()
+  "A project whose directory name Claude cut still lists its transcripts.
+The directory is named as CLI v2.1.304 named it for that cwd."
+  (let* ((config (make-temp-file "cc-config" t))
+         (claude-code-config-dir config)
+         (cwd (concat "/tmp/cc-probe-enc/" (make-string 182 ?x) "y"))
+         (dir (expand-file-name (concat "projects/-tmp-cc-probe-enc-"
+                                        (make-string 182 ?x) "-kcmpb5")
+                                config))
+         (id "11111111-1111-4111-8111-111111111111"))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (with-temp-file (expand-file-name (concat id ".jsonl") dir)
+            (insert "{\"type\":\"last-prompt\",\"lastPrompt\":\"hi\"}\n"))
+          (should (equal (mapcar (lambda (tr) (plist-get tr :id))
+                                 (claude-code--project-transcripts cwd))
+                         (list id))))
+      (delete-directory config t))))
 
 (ert-deftest claude-code-test-live-status-table ()
   "Every sessions/ file is parsed and keyed by session id."

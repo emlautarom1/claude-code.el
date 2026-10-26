@@ -37,7 +37,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Config dir** — Claude Code's state directory, `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when set (`claude-code-config-dir`).
 
-- **Encoded project directory** — the name of a project's transcript directory under `projects/`, produced by replacing every `/` and `.` in the absolute working directory with `-`. The mapping is lossy (see [`storage-model.md`](storage-model.md)).
+- **Encoded project directory** — the name of a project's transcript directory under `projects/`, derived from its absolute working directory by a lossy [encoding](storage-model.md#the-cwd-encoding-lossy--never-invert).
 
 - **MCP server** — the Model Context Protocol server (`claude-code-mcp.el`) that exposes Emacs *to* the sessions this package spawns. One loopback HTTP server runs per Emacs, shared by every session; each spawned instance is pointed at it with an inline `--mcp-config`. See the [architecture notes](architecture.md#mcp-server).
 

@@ -84,26 +84,29 @@ The stamp settles only the agent that gets a session of its own. The other kind 
 
 ## The cwd encoding (lossy — never invert)
 
-A project's transcript directory name is its absolute working directory with **every `/` and `.` replaced by `-`** (after `directory-file-name`, so a trailing slash adds no trailing hyphen):
+A project's transcript directory name is its absolute working directory with **every character but an ASCII letter or digit replaced by `-`**:
 
 ```
 /home/me/Development/proj      ->  -home-me-Development-proj
 /home/me/.dotfiles             ->  -home-me--dotfiles      (the "/." becomes "--")
+/home/me/my_project dir        ->  -home-me-my-project-dir
 ```
 
-The mapping is **not reversible** (`proj.el` and `proj-el` collide), so the code never decodes a directory name — a live session's real `cwd` is read from `sessions/*.json`. `claude-code--encode-cwd` implements the encoding, and `claude-code--project-transcripts` consumes it by matching encoded directory names rather than decoding the ones it finds.
+The CLI works on JavaScript strings, so "character" means UTF-16 code unit: a character outside the BMP becomes two hyphens. A name longer than 200 is cut to 200 and suffixed with `-` and the base-36 absolute value of a 32-bit `(h << 5) - h + unit` hash over the whole directory (measured on v2.1.304).
+
+The mapping is **not reversible** (`proj.el`, `proj_el` and `proj-el` collide), so the code never decodes a directory name — a live session's real `cwd` is read from `sessions/*.json`. `claude-code--project-transcripts` consumes the encoding by matching encoded directory names rather than decoding the ones it finds.
 
 ## Worktrees
 
-`claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript starts out in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, so worktree sessions appear under the parent project either way.
+`claude --worktree [name]` runs a session in a git worktree under the project's `.claude/worktrees/<name>`. Its transcript starts out in an encoded directory prefixed by the parent project's encoding + `--claude-worktrees-`. `claude-code--project-transcripts` lists both the project's own directory and any directory matching that prefix, so worktree sessions appear under the parent project either way — except for a parent so long that the cut at 200 falls inside that prefix, whose worktrees' transcripts are listed under each worktree alone (the CLI's own lookup misses them too).
 
 `.claude/worktrees/<name>` is the one place the flag builds a checkout, and it resolves against the **repository root**: a `--worktree` asked for from inside a worktree produces a sibling, and a `/` in the name is flattened to `+` rather than nesting. So the layout is exactly three directories deep, which is what lets `claude-code--worktree-parent` run it backwards (`claude-code--worktree-path` is the forward direction, and `claude-code--worktree-names` lists a project's checkouts for the create menu).
 
 **A name that already exists is entered, not duplicated** (measured against v2.1.272). The CLI reports `Resuming existing worktree at: …`, warning that it may carry an earlier session's commits. It may instead report `Reset existing worktree to the current base`, which is a `git reset --hard origin/<default>` — but only for a checkout on its own `worktree-<name>` branch, clean, and fully merged upstream, so nothing is lost. A name outside letters, digits, dots, underscores and dashes is a hard error (`Invalid worktree name`), the empty name included.
 
-That prefixed name is also **exactly** what encoding the worktree's own path produces — `-home-me-proj--claude-worktrees-feat` is both the parent's worktree directory and `/home/me/proj/.claude/worktrees/feat`'s base directory. While the transcript sits there it belongs to two roots, and since a git worktree is its own `project.el` project, either of them can be the root a query or a spawn names. This is why nothing in the model may key a session's liveness on the root it was asked about (see the [session model](architecture.md#the-session-model)).
+Unless it is cut, the prefixed name is also **exactly** what encoding the worktree's own path produces — `-home-me-proj--claude-worktrees-feat` is both the parent's worktree directory and `/home/me/proj/.claude/worktrees/feat`'s base directory. While the transcript sits there it belongs to two roots, and since a git worktree is its own `project.el` project, either of them can be the root a query or a spawn names. This is why nothing in the model may key a session's liveness on the root it was asked about (see the [session model](architecture.md#the-session-model)).
 
-The token after that prefix decides **membership only** — which project's view lists the transcript — and never leaves `claude-code--project-transcripts`, which is what keeps that true. It is not a name: the encoding is lossy, so a dot or `/` in the worktree name reads as a hyphen, and two names differing only in flattened characters share one transcript directory. Nor is it evidence that a session ran in a worktree — a session started *inside* a worktree directory with no `--worktree` files its transcript there while being bound to no worktree at all. Only [the binding](#the-binding--worktree-state) names one.
+The token after that prefix decides **membership only** — which project's view lists the transcript — and never leaves `claude-code--project-transcripts`, which is what keeps that true. It is not a name: the encoding is lossy, so anything but a letter or digit in the worktree name reads as a hyphen, and two names differing only in flattened characters share one transcript directory. Nor is it evidence that a session ran in a worktree — a session started *inside* a worktree directory with no `--worktree` files its transcript there while being bound to no worktree at all. Only [the binding](#the-binding--worktree-state) names one.
 
 ### The filing cwd — `relocated`
 
