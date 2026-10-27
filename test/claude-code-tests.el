@@ -13,6 +13,7 @@
 ;; Stand-ins for Ghostel's own definitions, since tests run without it loaded.
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-pre-spawn-hook nil)
+(defvar vc-deduce-backend-nonvc-modes)
 
 ;; `claude-code-instance-mode' derives from `ghostel-mode' and installs
 ;; `ghostel-semi-char-mode-map', so entering it needs both to exist.  An
@@ -292,6 +293,16 @@ The directory is named as CLI v2.1.304 named it for that cwd."
                    (lambda () (error "Reparsed"))))
           (should (eq (claude-code--live-info id table)
                       (gethash id table))))))))
+
+(ert-deftest claude-code-test-pid-cwd ()
+  "A process's working directory is read off its own sessions/ file, by pid."
+  (claude-code-tests--with-fixtures
+    (should (equal (claude-code--pid-cwd 1003)
+                   "/home/test/proj/.claude/worktrees/feat"))
+    (should (equal (claude-code--pid-cwd 1001) "/home/test/proj"))
+    ;; No file for the pid, or no pid at all, is no directory, not an error.
+    (should-not (claude-code--pid-cwd 999999))
+    (should-not (claude-code--pid-cwd nil))))
 
 (ert-deftest claude-code-test-project-transcripts ()
   "Transcripts of the project and its worktrees are enumerated."
@@ -1056,6 +1067,39 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
       ;; An unknown id yields nil, so `default-directory' is left unchanged.
       (should (null (claude-code--session-cwd "no-such-id"))))))
 
+(ert-deftest claude-code-test-session-directory ()
+  "A session works where the process running it is now, else in its worktree.
+Emacs's instance is found by pid, so a `/clear' that moved it onto another
+session id still finds it; one outside Emacs, by session id.  With no process,
+the worktree the binding names counts while it is on disk -- the one the
+Worktree column shows -- and the root otherwise."
+  (let* ((root (file-truename (make-temp-file "cc-root" t)))
+         (feat (claude-code--worktree-path root "feat"))
+         (wt "33333333-3333-4333-8333-333333333333")
+         (fixture-feat "/home/test/proj/.claude/worktrees/feat")
+         (dir (lambda (&rest slots)
+                (claude-code--session-directory
+                 (apply #'claude-code-session--create slots) root))))
+    (unwind-protect
+        (claude-code-tests--with-fixtures
+          (make-directory feat t)
+          ;; sessions/1003.json runs session 33333333 in its worktree.
+          (should (equal (funcall dir :id "cleared" :alive-p t :pid 1003)
+                         fixture-feat))
+          (should (equal (funcall dir :id wt :external-p t) fixture-feat))
+          ;; A row still drawn alive whose process has gone.
+          (should (equal (funcall dir :id wt :alive-p t :pid 999999) root))
+          (should (equal (funcall dir :id wt :worktree-binding
+                                  (list :name "feat" :path feat :bound nil))
+                         feat))
+          (should (equal (funcall dir :id wt :worktree-binding
+                                  (list :name "gone" :bound t
+                                        :path (claude-code--worktree-path
+                                               root "gone")))
+                         root))
+          (should (equal (funcall dir :id wt) root)))
+      (delete-directory root t))))
+
 
 ;;;; Operations
 
@@ -1228,6 +1272,52 @@ local variables, disabling undo, and making it read-only -- with nothing to
 undo any of it."
   (should (fboundp 'claude-code-instance-mode))
   (should-not (commandp 'claude-code-instance-mode)))
+
+(ert-deftest claude-code-test-instance-mode-follows-its-directory ()
+  "VC's whole-repository commands act on an instance buffer's directory.
+They deduce a backend from `default-directory' only in the modes
+`vc-deduce-backend-nonvc-modes' names, which the mode answers for itself
+alone."
+  (require 'vc)
+  (let ((root (file-truename (make-temp-file "cc-root" t)))
+        (global (default-value 'vc-deduce-backend-nonvc-modes)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" root))
+          (with-temp-buffer
+            (claude-code-instance-mode)
+            (setq default-directory (file-name-as-directory root))
+            (should (eq (vc-deduce-backend) 'Git)))
+          (should (equal (default-value 'vc-deduce-backend-nonvc-modes) global)))
+      (delete-directory root t))))
+
+(ert-deftest claude-code-test-follow-directory ()
+  "Ghostel is handed the instance's directory as the root record changes state.
+Driven through the hook as Ghostel runs it, so the mode's wiring is what is
+under test.  A subagent's record, or a report leaving the state as it was,
+reads nothing."
+  (let ((handed '()))
+    (claude-code-tests--with-fixtures
+      (cl-letf (((symbol-function 'ghostel--update-directory)
+                 (lambda (dir) (push dir handed))))
+        (with-temp-buffer
+          (claude-code-instance-mode)
+          ;; sessions/1003.json runs in the fixture project's worktree.
+          (setq-local ghostel--pid 1003)
+          (let ((report (lambda (id old new)
+                          (run-hook-with-args 'ghostel-program-status-functions
+                                              id old new))))
+            (funcall report "a93609d08ab42add7" nil '(:state working))
+            (funcall report "" '(:state working) '(:state working :msg "m"))
+            (should-not handed)
+            (funcall report "" nil '(:state idle))
+            (funcall report "" '(:state idle) '(:state working))
+            (should (equal handed (make-list
+                                   2 "/home/test/proj/.claude/worktrees/feat")))
+            ;; A process with no sessions/ file hands over nothing.
+            (setq handed nil ghostel--pid 999999)
+            (funcall report "" '(:state working) '(:state done))
+            (should-not handed)))))))
 
 (ert-deftest claude-code-test-buffer-kill-unregisters ()
   "An instance's buffer dying removes its registry entry."
@@ -2549,6 +2639,29 @@ The dispatch is shared with RET \(`claude-code-test-sessions-visit-dispatch')."
         (claude-code-sessions-visit-other-window)
         (should (eq shown 'terminal))))))
 
+(ert-deftest claude-code-test-sessions-vc ()
+  "`v' hands the tree the session at point works in to `claude-code-vc-function'.
+The tree is found as the key is pressed, so a row drawn before its instance
+moved still opens where the instance is now."
+  (let* ((at-point nil) (shown '())
+         (claude-code-vc-function (lambda (dir) (push dir shown))))
+    (should (eq (keymap-lookup claude-code-sessions-mode-map "v")
+                #'claude-code-sessions-vc))
+    (cl-letf (((symbol-function 'claude-code--session-at-point)
+               (lambda () at-point)))
+      (claude-code-tests--with-fixtures
+        (claude-code-tests--in-view
+          (setq-local claude-code--project "/home/test/proj")
+          (should (equal (should-error (claude-code-sessions-vc) :type 'user-error)
+                         '(user-error "No session on this line")))
+          (setq at-point (claude-code-session--create :id "d"))
+          (claude-code-sessions-vc)
+          (setq at-point (claude-code-session--create :id "a" :alive-p t :pid 1003))
+          (claude-code-sessions-vc)
+          (should (equal (reverse shown)
+                         '("/home/test/proj/"
+                           "/home/test/proj/.claude/worktrees/feat/"))))))))
+
 (ert-deftest claude-code-test-sessions-point-commands-refuse-before-prompting ()
   "`r', `s' and `i' refuse a row they cannot drive before reading any input.
 The gate is the live process, not the row's `alive-p': a session that ended
@@ -2934,6 +3047,32 @@ scoped and is never redirected."
       (setq-local claude-code--project "/home/test/proj/.claude/worktrees/feat")
       (should (equal (claude-code--current-project)
                      '("/home/test/proj/.claude/worktrees/feat" . nil))))))
+
+(ert-deftest claude-code-test-current-project-of-an-instance ()
+  "An instance buffer acts on the project it was launched from.
+The worktree is the one of that project the instance works in now.  Wherever
+else it works decides nothing, so the view it opens stays the same and a
+checkout the menu could not name is not offered."
+  (claude-code-tests--with-managed-buffer buf
+    (cl-letf (((symbol-function 'project-current)
+               (lambda (&rest _) (ert-fail "Asked `project.el'"))))
+      (with-current-buffer buf
+        (pcase-dolist (`(,origin ,here ,project)
+                       '(("/home/test/proj" "/home/test/proj/"
+                          ("/home/test/proj" . nil))
+                         ("/home/test/proj" "/home/test/proj/.claude/worktrees/feat/"
+                          ("/home/test/proj" . "feat"))
+                         ;; Launched from a worktree, Claude built a sibling.
+                         ("/home/test/proj/.claude/worktrees/feat"
+                          "/home/test/proj/.claude/worktrees/fix/"
+                          ("/home/test/proj" . "fix"))
+                         ("/home/test/proj" "/home/test/checkouts/feat/"
+                          ("/home/test/proj" . nil))
+                         ("/home/test/proj" "/home/test/other/.claude/worktrees/feat/"
+                          ("/home/test/proj" . nil))))
+          (claude-code--register "id" buf origin nil)
+          (setq default-directory here)
+          (should (equal (claude-code--current-project) project)))))))
 
 (ert-deftest claude-code-test-spawn-menu-resolves-project-up-front ()
   "The menu resolves the project into its scope and opens no view to do it.

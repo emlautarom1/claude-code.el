@@ -58,6 +58,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `r`       | rename the running session at point                         |
 | `i`       | interrupt (SIGINT) the running session at point             |
 | `s`       | send a line of text to the running session at point         |
+| `v`       | show VC status of the tree the session at point works in    |
 | `m` / `u` | mark / unmark the session at point                          |
 | `G`       | cycle grouping (status ↔ liveness)                          |
 | `g`       | refresh                                                     |
@@ -65,7 +66,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 
 An instance replaces a sessions view on the selected frame — the one you are in, if any — and otherwise opens in another window. Side and dedicated windows keep what they have, and an instance already on screen is shown where it is. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this.
 
-Instances are hosted in `claude-code-instance-mode`, a major mode deriving from `ghostel-mode`, so `(derived-mode . claude-code-instance-mode)` is the `display-buffer-alist` condition that matches Claude's terminals and no other. Bindings for them go in its keymap; they survive Ghostel's input-mode switches and outrank every enabled minor mode. Char mode is the exception — it sends every key to the terminal.
+Instances are hosted in `claude-code-instance-mode`, a major mode deriving from `ghostel-mode`, so `(derived-mode . claude-code-instance-mode)` is the `display-buffer-alist` condition that matches Claude's terminals and no other. Bindings for them go in its keymap; they survive Ghostel's input-mode switches and outrank every enabled minor mode. Char mode is the exception — it sends every key to the terminal. An instance buffer's `default-directory` follows the directory Claude works in, so `magit-status`, `C-x p` and `C-x v` commands run from it act on the session's worktree.
 
 ```elisp
 (use-package claude-code

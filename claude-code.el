@@ -41,6 +41,7 @@
 (declare-function ghostel-send-key "ghostel" (key-name &optional mods))
 (declare-function ghostel-paste-string "ghostel" (string))
 (declare-function ghostel-send-C-c "ghostel" ())
+(declare-function ghostel--update-directory "ghostel" (dir))
 (defvar ghostel--pid)
 (defvar ghostel--process)
 (defvar ghostel-kill-buffer-on-exit)
@@ -50,6 +51,7 @@
 (defvar ghostel-program-status-functions)
 (defvar ghostel-status-notify-states)
 (defvar ghostel-semi-char-mode-map)
+(defvar vc-deduce-backend-nonvc-modes)
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
@@ -163,6 +165,19 @@ files its transcripts under itself, making it a project in its own right."
              ((equal (claude-code--worktree-path parent name) root)))
     (cons parent name)))
 
+(defun claude-code--sessions-dir ()
+  "Return the directory holding one file per running `claude' process."
+  (expand-file-name "sessions" claude-code-config-dir))
+
+(defun claude-code--read-session-file (file)
+  "Return the JSON object in sessions/ FILE as a hash table, or nil.
+Nil covers a file that is gone, unreadable, or not an object."
+  (let ((obj (ignore-errors
+               (with-temp-buffer
+                 (insert-file-contents file)
+                 (json-parse-buffer :object-type 'hash-table)))))
+    (and (hash-table-p obj) obj)))
+
 (defun claude-code--live-status-table ()
   "Parse the per-process files under sessions/ into a hash table.
 The table is keyed by session id; each value is a plist with keys
@@ -172,24 +187,20 @@ is decided by the caller.  A missing status field yields a nil :status
 rather than an error, and Claude's \"shell\" reads as \"busy\": the turn has
 ended but a background command runs, whose completion starts the next one.
 :shell-p tells that case apart from a turn in progress."
-  (let ((dir (expand-file-name "sessions" claude-code-config-dir))
+  (let ((dir (claude-code--sessions-dir))
         (table (make-hash-table :test 'equal)))
     (when (file-directory-p dir)
       (dolist (file (directory-files dir t "\\.json\\'"))
-        (ignore-errors
-          (let* ((obj (with-temp-buffer
-                        (insert-file-contents file)
-                        (json-parse-buffer :object-type 'hash-table)))
-                 (id (gethash "sessionId" obj)))
-            (when id
-              (let ((status (gethash "status" obj)))
-                (puthash id
-                         (list :pid (gethash "pid" obj)
-                               :cwd (gethash "cwd" obj)
-                               :status (if (equal status "shell") "busy" status)
-                               :waiting-for (gethash "waitingFor" obj)
-                               :shell-p (equal status "shell"))
-                         table)))))))
+        (when-let* ((obj (claude-code--read-session-file file))
+                    (id (gethash "sessionId" obj)))
+          (let ((status (gethash "status" obj)))
+            (puthash id
+                     (list :pid (gethash "pid" obj)
+                           :cwd (gethash "cwd" obj)
+                           :status (if (equal status "shell") "busy" status)
+                           :waiting-for (gethash "waitingFor" obj)
+                           :shell-p (equal status "shell"))
+                     table)))))
     table))
 
 (defun claude-code--live-info (id &optional table)
@@ -197,6 +208,18 @@ ended but a background command runs, whose completion starts the next one.
 TABLE, when given, is a pre-parsed `claude-code--live-status-table', letting
 a caller resolving many ids parse sessions/ once."
   (gethash id (or table (claude-code--live-status-table))))
+
+(defun claude-code--pid-cwd (pid)
+  "Return the directory the `claude' process PID works in, or nil.
+Read off that process's own sessions/ file, which keeps naming it across a
+change of the session it runs."
+  (when-let* (((integerp pid))
+              (obj (claude-code--read-session-file
+                    (expand-file-name (format "%d.json" pid)
+                                      (claude-code--sessions-dir))))
+              (cwd (gethash "cwd" obj))
+              ((stringp cwd)))
+    cwd))
 
 (defvar claude-code--transcript-cache (make-hash-table :test 'equal)
   "Cache mapping a transcript file to (MTIME . FIELDS).
@@ -636,6 +659,23 @@ from, and is nil for an unknown id."
   (or (plist-get (claude-code--live-info id) :cwd)
       (plist-get (gethash id claude-code--managed) :origin)))
 
+(defun claude-code--session-directory (session root)
+  "Return the directory SESSION, listed under project ROOT, works in now.
+A process running it answers for itself: Emacs's instance by its pid, which
+names it across a `/clear', and one outside Emacs by the session id.  A
+session no process runs works in the worktree its binding names while that is
+a directory, and in ROOT otherwise."
+  (or (pcase (claude-code--session-liveness session)
+        ('alive (claude-code--pid-cwd (claude-code-session-pid session)))
+        ('external (let ((cwd (plist-get (claude-code--live-info
+                                          (claude-code-session-id session))
+                                         :cwd)))
+                     (and (stringp cwd) cwd))))
+      (let ((path (plist-get (claude-code-session-worktree-binding session)
+                             :path)))
+        (and path (file-directory-p path) path))
+      root))
+
 
 ;;;; Operations
 
@@ -720,10 +760,22 @@ A parent of your own may replace the empty one.")
 (defvar-local claude-code--instance-keys nil
   "Non-nil in buffers where `claude-code-instance-mode-map' is active.")
 
+(defun claude-code--follow-directory (record-id old new)
+  "Hand Ghostel the directory this buffer's `claude' process works in.
+A `ghostel-program-status-functions' entry, acting when the root record, whose
+RECORD-ID is \"\", changes state from OLD to NEW.  The directory goes through
+Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report itself."
+  (when-let* (((string-empty-p record-id))
+              ((not (eq (plist-get old :state) (plist-get new :state))))
+              (cwd (claude-code--pid-cwd ghostel--pid)))
+    (ghostel--update-directory cwd)))
+
 (define-derived-mode claude-code-instance-mode ghostel-mode "Claude"
   "Major mode for a Ghostel terminal hosting a Claude instance.
 Gives Claude's terminals a `display-buffer-alist' key and a keymap that no
-other Ghostel terminal answers to.
+other Ghostel terminal answers to.  The buffer's `default-directory' follows
+the directory the instance works in (`claude-code--follow-directory'), and VC
+commands act on it.
 
 \\{claude-code-instance-mode-map}"
   :interactive nil
@@ -733,7 +785,10 @@ other Ghostel terminal answers to.
               (cons (cons 'claude-code--instance-keys
                           claude-code-instance-mode-map)
                     minor-mode-overriding-map-alist))
-  (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name))
+  (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name)
+  (add-hook 'ghostel-program-status-functions #'claude-code--follow-directory
+            90 t)
+  (setq-local vc-deduce-backend-nonvc-modes t))
 
 (defun claude-code--new-uuid ()
   "Return a random RFC-4122 version-4 UUID string."
@@ -1567,6 +1622,23 @@ A dead session is resumed first."
                                   (user-error "No session on this line"))
                               #'switch-to-buffer-other-window))
 
+(defcustom claude-code-vc-function #'vc-dir
+  "Function showing the version-control status of a working tree.
+Called with the directory of the session at point by
+`claude-code-sessions-vc'; `magit-status' takes the same argument."
+  :type 'function)
+
+(defun claude-code-sessions-vc ()
+  "Show the version-control status of the tree the session at point works in."
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
+  (funcall claude-code-vc-function
+           (file-name-as-directory
+            (claude-code--session-directory
+             (or (claude-code--session-at-point)
+                 (user-error "No session on this line"))
+             claude-code--project))))
+
 (defun claude-code-sessions-mark ()
   "Mark the session on the current line."
   (interactive nil claude-code-sessions-mode)
@@ -1666,6 +1738,7 @@ however the batch ends."
   "r"   #'claude-code-sessions-rename
   "i"   #'claude-code-sessions-interrupt
   "s"   #'claude-code-sessions-send
+  "v"   #'claude-code-sessions-vc
   "m"   #'claude-code-sessions-mark
   "u"   #'claude-code-sessions-unmark
   "G"   #'claude-code-sessions-cycle-grouping)
@@ -1710,12 +1783,32 @@ Claude worktree the buffer sits in, nil for a buffer sitting in none.
 A worktree resolves to its parent, which is the only root that lists the whole
 tree (see docs/storage-model.md); WORKTREE is what the create menu asks for
 instead, so a session created from inside a worktree is created in it.
-A sessions view names its own project; every other buffer resolves the one it
-belongs to, prompting for a project when it belongs to none."
-  (if claude-code--project
-      (cons claude-code--project nil)
-    (let ((root (claude-code--normalize-root (project-root (project-current t)))))
-      (or (claude-code--worktree-parent root) (cons root nil)))))
+A sessions view names its own project, and an instance buffer the one its
+instance was launched from (`claude-code--instance-project'); every other
+buffer resolves the one it belongs to, prompting for a project when it belongs
+to none."
+  (cond
+   (claude-code--project (cons claude-code--project nil))
+   ((claude-code--instance-project))
+   (t (let ((root (claude-code--normalize-root
+                   (project-root (project-current t)))))
+        (or (claude-code--worktree-parent root) (cons root nil))))))
+
+(defun claude-code--instance-project ()
+  "Return (ROOT . WORKTREE) for the instance hosted in this buffer, or nil.
+ROOT is the project the instance was launched from, resolved to its parent
+when that is a worktree, so the instance belongs to the same project wherever
+it goes to work.  WORKTREE is the worktree of ROOT the buffer's directory --
+the one the instance works in -- names, nil when it names none."
+  (when-let* ((origin (cl-loop for plist being the hash-values
+                               of claude-code--managed
+                               when (eq (plist-get plist :buffer)
+                                        (current-buffer))
+                               return (plist-get plist :origin))))
+    (let ((root (or (car (claude-code--worktree-parent origin)) origin))
+          (here (claude-code--worktree-parent
+                 (claude-code--normalize-root default-directory))))
+      (cons root (and (equal (car here) root) (cdr here))))))
 
 (defun claude-code--project-root ()
   "Return the project root the current buffer's commands should act on."

@@ -13,12 +13,14 @@ Claude writes one JSON file per running process, named by OS PID. The fields thi
 | Field        | Meaning                                                    |
 | ------------ | ---------------------------------------------------------- |
 | `sessionId`  | the session UUID — the join key to a transcript            |
-| `cwd`        | the real, absolute working directory (never encoded)       |
+| `cwd`        | the real, absolute directory the process works in          |
 | `status`     | `idle` \| `busy` \| `waiting` \| `shell` (absent early on) |
 | `waitingFor` | set only while `waiting`, e.g. `"permission prompt"`       |
 | `pid`        | OS PID (also the filename)                                 |
 
 `claude-code--live-status-table` parses every such file into a hash keyed by `sessionId`. It matches `<pid>.json` and nothing else, which is the CLI's own filter too: a companion `sessions/<pid>.<sha256>.key` holds the `peerToken` authorizing that process's messaging socket and carries no session id. Parsing is pure — a missing `status` yields nil, and process liveness is decided separately (`claude-code--pid-live-p`). This package treats a session as *alive* only when it manages the instance itself, so this table is used to read a managed session's status and to flag [external](glossary.md) sessions — not as the source of aliveness.
+
+`cwd` follows the process: `--worktree` starts it in the worktree, `EnterWorktree` and `ExitWorktree` move it within the turn that calls them, and a Bash `cd` does not. `/clear` rewrites the file under a new `sessionId`, so a running instance is looked up by PID (`claude-code--pid-cwd`). Verified against CLI v2.1.304.
 
 `shell` stands in for `idle` while a background shell command the instance started is still running (verified against CLI v2.1.304): the turn has ended, but the command's completion starts the next one with no user input, and Claude's own job list shows it as *working*. A prompt typed meanwhile still reads `busy`, and a permission prompt `waiting`. `claude-code--live-status-table` therefore reads `shell` as `busy`, leaving the three statuses the [glossary](glossary.md) names, and flags it with `:shell-p`, which is what holds back the [attention notification](architecture.md#attention-notifications) for a turn the command keeps going. Claude rewrites the file some 30 ms after the OSC 7501 report of the same change, so that flag is read only once `claude-code--notify-settle` has passed. `claude-code--status-display` renders an unrecognised value as `unknown (VALUE)` rather than guessing, which is what keeps a vocabulary Anthropic extends from reading as the wrong status.
 
