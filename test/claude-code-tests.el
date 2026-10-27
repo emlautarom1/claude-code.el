@@ -3074,6 +3074,35 @@ checkout the menu could not name is not offered."
           (setq default-directory here)
           (should (equal (claude-code--current-project) project)))))))
 
+(ert-deftest claude-code-test-project-switch-outranks-the-buffer-project ()
+  "The create menu opens on the project `project-switch-project' picked."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((menus '())
+          (project-switch-commands #'claude-code-spawn-menu))
+      (cl-letf (((symbol-function 'project-current)
+                 (lambda (&optional _ dir)
+                   (or dir project-current-directory-override default-directory)))
+                ((symbol-function 'project-root) #'identity)
+                ;; Keep the pick out of the user's project list.
+                ((symbol-function 'project--remember-dir) #'ignore)
+                ((symbol-function 'claude-code--seed-worktree)
+                 (lambda (_obj worktree) worktree))
+                ((symbol-function 'transient-setup)
+                 (lambda (_name _layout _edit &rest props)
+                   (push (cons (plist-get props :scope)
+                               (and-let* ((seed (plist-get props :init-value)))
+                                 (funcall seed nil)))
+                         menus))))
+        (claude-code-tests--in-view
+          (setq-local claude-code--project "/home/test/proj")
+          (project-switch-project "/home/test/other/"))
+        (claude-code--register "id" buf "/home/test/proj" nil)
+        (with-current-buffer buf
+          (project-switch-project "/home/test/other/.claude/worktrees/feat/")))
+      (let ((other (claude-code--normalize-root "/home/test/other")))
+        (should (equal (reverse menus)
+                       (list (cons other nil) (cons other "feat"))))))))
+
 (ert-deftest claude-code-test-spawn-menu-resolves-project-up-front ()
   "The menu resolves the project into its scope and opens no view to do it.
 A sessions view names its own project without consulting `project.el'; any

@@ -65,7 +65,7 @@ Bindings are the one thing derivation does not give for free, because `ghostel-m
 
 An instance buffer's `default-directory` follows the directory its instance works in, so it is the worktree of an instance started in or entering one. Claude sends no OSC 7 report, so `claude-code--follow-directory` hands Ghostel the directory each time the instance's state changes; a move made mid-turn is followed once the turn stops. VC's whole-repository commands act on that directory too.
 
-An instance buffer still belongs to the project it was launched from (`claude-code--instance-project`): `claude-code-sessions` opens the same view wherever the instance works, and the create menu is seeded with the instance's worktree when that is one of the project's.
+An instance buffer still belongs to the project it was launched from (`claude-code--instance-project`): `claude-code-sessions` opens the same view wherever the instance works, and the create menu is seeded with the instance's worktree when that is one of the project's. A project picked through `project-switch-project` outranks it, as it does a sessions view's own.
 
 ## The renderer
 

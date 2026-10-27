@@ -1777,22 +1777,20 @@ however the batch ends."
 ;;;;; Entry points
 
 (defun claude-code--current-project ()
-  "Return (ROOT . WORKTREE) for the current buffer.
-ROOT is the project root the buffer's commands act on, WORKTREE the name of the
-Claude worktree the buffer sits in, nil for a buffer sitting in none.
-A worktree resolves to its parent, which is the only root that lists the whole
-tree (see docs/storage-model.md); WORKTREE is what the create menu asks for
-instead, so a session created from inside a worktree is created in it.
-A sessions view names its own project, and an instance buffer the one its
-instance was launched from (`claude-code--instance-project'); every other
-buffer resolves the one it belongs to, prompting for a project when it belongs
-to none."
-  (cond
-   (claude-code--project (cons claude-code--project nil))
-   ((claude-code--instance-project))
-   (t (let ((root (claude-code--normalize-root
+  "Return (ROOT . WORKTREE) for the current buffer's commands to act on.
+In order: the project `project-current-directory-override' names, as
+`project-switch-project' sets it; a sessions view's own; an instance's, from
+`claude-code--instance-project'; the buffer's `project.el' project, prompted
+for when it has none.  A `project.el' root inside a Claude worktree resolves to
+its parent, WORKTREE naming the worktree (see \"Worktree session\" in
+docs/glossary.md)."
+  (or (unless project-current-directory-override
+        (if claude-code--project
+            (cons claude-code--project nil)
+          (claude-code--instance-project)))
+      (let ((root (claude-code--normalize-root
                    (project-root (project-current t)))))
-        (or (claude-code--worktree-parent root) (cons root nil))))))
+        (or (claude-code--worktree-parent root) (cons root nil)))))
 
 (defun claude-code--instance-project ()
   "Return (ROOT . WORKTREE) for the instance hosted in this buffer, or nil.
