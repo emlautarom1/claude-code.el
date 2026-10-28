@@ -125,6 +125,14 @@ session external and every other fixture session dead."
                  ,@body)))
          (kill-buffer buf)))))
 
+(defun claude-code-tests--await (pred timeout)
+  "Pump events until PRED is non-nil or TIMEOUT seconds elapse; return PRED."
+  (let ((deadline (+ (float-time) timeout)))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.2)
+      (sleep-for 0.1))
+    (funcall pred)))
+
 (defun claude-code-tests--goto-session (id)
   "Move point to the row of session ID in the view."
   (claude-code--goto-line-where (lambda () (equal id (tabulated-list-get-id)))))
@@ -1861,6 +1869,210 @@ unlink here is a hard failure, not a deleted fixture."
                    :alive-p nil :transcript file))
                  :type 'user-error)))))
       (when (file-exists-p file) (delete-file file)))))
+
+(defconst claude-code-tests--export-answer
+  (concat "{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\","
+          "\"request_id\":\"claude-code\",\"response\":{\"text\":"
+          "\"\\n● Because you asked.\\n  Twice.\","
+          "\"default_filename\":\"conversation-2026-10-28-203102.txt\"}}}")
+  "The CLI's answer to an export request, as v2.1.304 prints it.")
+
+(defmacro claude-code-tests--with-fake-cli (vars script &rest body)
+  "Run BODY with `claude-code-cli' a shell script running SCRIPT.
+VARS is (SESSION ROOT LOG): SESSION a dead session whose transcript is on
+disk, ROOT a fresh directory it is listed under, and LOG the file SCRIPT may
+reach as \"$0.log\".  The export's config dir lies inside ROOT, and
+everything is deleted afterwards.  SCRIPT ends in `exec cat', so an export it
+answers lasts until its input closes, and SIGTERM ends it whole."
+  (declare (indent 2))
+  (pcase-let ((`(,session ,root ,log) vars))
+    `(let* ((,root (file-truename (make-temp-file "cc-export" t)))
+            (claude-code-cli (expand-file-name "claude" ,root))
+            (,log (concat claude-code-cli ".log"))
+            (claude-code-export-config-dir (expand-file-name "config/" ,root))
+            (,session (claude-code-session--create
+                       :id "export" :transcript (expand-file-name "t.jsonl" ,root))))
+       (unwind-protect
+           (progn
+             (write-region "" nil (claude-code-session-transcript ,session))
+             (write-region (concat "#!/bin/sh\n" ,script) nil claude-code-cli)
+             (set-file-modes claude-code-cli #o700)
+             ,@body)
+         (delete-directory ,root t)))))
+
+(defun claude-code-tests--export (session root)
+  "Export SESSION under ROOT; return (CALLS . PROCESS) once the process ends.
+CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE),
+so a second call shows up rather than slipping by.  Asserting here rather than
+in a callback matters: a failed `should' inside a process filter aborts the
+batch run."
+  (let* ((calls '())
+         (proc (claude-code-export-transcript
+                session root
+                (lambda (text) (push (list 'text text) calls))
+                (lambda (msg) (push (list 'error msg) calls)))))
+    (claude-code-tests--await (lambda () (not (process-live-p proc))) 5)
+    (cons (reverse calls) proc)))
+
+(ert-deftest claude-code-test-export-transcript ()
+  "An export asks the CLI for the text and hands it over, once.
+It runs with its own config dir, in the directory the session works in, and
+closes the CLI's input once answered, which is what lets the CLI exit.  Lines
+that answer nothing of ours are passed over."
+  (claude-code-tests--with-fake-cli (session root log)
+      (concat "read -r request\n"
+              "{ pwd; printf '%s\\n' \"$CLAUDE_CONFIG_DIR\" \"$request\" \"$@\"; }"
+              " > \"$0.log\"\n"
+              "echo 'not json'\n"
+              "echo '{\"type\":\"control_response\",\"response\":"
+              "{\"subtype\":\"success\",\"request_id\":\"other\","
+              "\"response\":{\"text\":\"not ours\"}}}'\n"
+              "echo '" claude-code-tests--export-answer "'\n"
+              "exec cat >/dev/null\n")
+    (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
+      (should (equal calls '((text "\n● Because you asked.\n  Twice."))))
+      (should (eq (process-status proc) 'exit))
+      (should (= (process-exit-status proc) 0))
+      (should-not (process-list))
+      (let ((logged (with-temp-buffer
+                      (insert-file-contents log)
+                      (split-string (buffer-string) "\n" t))))
+        (should (equal (nth 0 logged) root))
+        (should (equal (nth 1 logged)
+                       (expand-file-name claude-code-export-config-dir)))
+        (should (equal (json-parse-string (nth 2 logged) :object-type 'alist)
+                       '((type . "control_request")
+                         (request_id . "claude-code")
+                         (request (subtype . "export_conversation")))))
+        (should (equal (nthcdr 3 logged)
+                       (claude-code--export-args
+                        (claude-code-session-transcript session))))))))
+
+(ert-deftest claude-code-test-export-transcript-reports-a-failure ()
+  "An export the CLI cannot answer reports why, once, and leaves no process.
+The CLI's own account comes first: an error answer, or a failed run's result.
+A CLI that dies with neither is described by its stderr, and failing that by
+how it ended."
+  (pcase-dolist (`(,script ,message)
+                 `((,(concat "read -r r\n"
+                             "echo '{\"type\":\"control_response\",\"response\":"
+                             "{\"subtype\":\"error\",\"request_id\":\"claude-code\","
+                             "\"error\":\"Unsupported control request subtype: "
+                             "export_conversation\"}}'\n"
+                             "exec cat >/dev/null\n")
+                    "Unsupported control request subtype: export_conversation")
+                   (,(concat "read -r r\n"
+                             "echo 'No conversation found with session ID: 0f' >&2\n"
+                             "echo '{\"type\":\"result\",\"subtype\":"
+                             "\"error_during_execution\",\"is_error\":true,"
+                             "\"errors\":[\"No conversation found with session ID: 0f\"]}'\n"
+                             "exit 1\n")
+                    "No conversation found with session ID: 0f")
+                   (,(concat "echo \"error: unknown option '--bare'\" >&2\n"
+                             "exit 1\n")
+                    "%s ended with no transcript: error: unknown option '--bare'")
+                   (,(concat "read -r r\n" "exit 0\n")
+                    "%s ended with no transcript: finished")))
+    (claude-code-tests--with-fake-cli (session root _log) script
+      (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
+        (should (equal calls
+                       (list (list 'error (format message claude-code-cli)))))
+        (should-not (process-live-p proc))
+        (should-not (process-list))))))
+
+(ert-deftest claude-code-test-export-transcript-times-out ()
+  "A CLI that never answers is given up on, reported, and terminated."
+  (claude-code-tests--with-fake-cli (session root _log)
+      "read -r r\nexec cat >/dev/null\n"
+    (let ((claude-code--export-timeout 0.3))
+      (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
+        (should (equal calls '((error "Export timed out after 0.3s"))))
+        (should (eq (process-status proc) 'signal))
+        (should-not (process-list))))))
+
+(ert-deftest claude-code-test-export-transcript-cancel ()
+  "A cancelled export calls neither callback, and its process ends."
+  (claude-code-tests--with-fake-cli (session root _log)
+      (concat "read -r r\nsleep 0.3\n"
+              "echo '" claude-code-tests--export-answer "'\n"
+              "exec cat >/dev/null\n")
+    (let* ((calls '())
+           (proc (claude-code-export-transcript
+                  session root
+                  (lambda (text) (push text calls))
+                  (lambda (msg) (push msg calls)))))
+      (claude-code--export-cancel proc)
+      (should (claude-code-tests--await (lambda () (not (process-live-p proc))) 5))
+      (claude-code-tests--await (lambda () calls) 0.5)
+      (should-not calls)
+      (should-not (process-list)))))
+
+(ert-deftest claude-code-test-export-transcript-of-any-length ()
+  "The answer is one line as long as the transcript, read in many pieces.
+Multibyte text split across those pieces must come out whole."
+  (claude-code-tests--with-fake-cli (session root log)
+      "read -r r\ncat \"$0.log\"\nexec cat >/dev/null\n"
+    (let ((text (apply #'concat (make-list 30000 "● ─── text\n"))))
+      ;; `json-serialize' hands back the UTF-8 bytes themselves.
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region (concat (json-serialize
+                               `((type . "control_response")
+                                 (response (subtype . "success")
+                                           (request_id . "claude-code")
+                                           (response (text . ,text)))))
+                              "\n")
+                      nil log))
+      (should (> (file-attribute-size (file-attributes log))
+                 (* 4 read-process-output-max)))
+      (should (equal (car (claude-code-tests--export session root))
+                     (list (list 'text text)))))))
+
+(ert-deftest claude-code-test-export-outcome ()
+  "Only an answer to our request, or a failed result, settles an export."
+  (pcase-dolist (`(,line ,outcome)
+                 `((,claude-code-tests--export-answer
+                    (text . "\n● Because you asked.\n  Twice."))
+                   (,(concat "{\"type\":\"control_response\",\"response\":"
+                             "{\"subtype\":\"success\",\"request_id\":\"claude-code\","
+                             "\"response\":{}}}")
+                    (error . "malformed answer"))
+                   (,(concat "{\"type\":\"result\",\"subtype\":"
+                             "\"error_during_execution\",\"is_error\":true,"
+                             "\"errors\":[]}")
+                    (error . "error_during_execution"))
+                   ("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}"
+                    nil)
+                   ("{\"type\":\"system\",\"subtype\":\"init\"}" nil)
+                   ("[1]" nil)
+                   ("Warning: something" nil)))
+    (should (equal (claude-code--export-outcome line) outcome))))
+
+(ert-deftest claude-code-test-export-file ()
+  "An export reads the transcript where it lies now.
+Claude moves a transcript after the directory it files the session under, so a
+path the session recorded may be gone; the session's id finds it again."
+  (claude-code-tests--with-fixtures
+    (let ((id "99999999-9999-4999-8999-999999999999")
+          (file (make-temp-file "cc-transcript" nil ".jsonl")))
+      (unwind-protect
+          (progn
+            (should (equal (claude-code--export-file
+                            (claude-code-session--create :id id :transcript file)
+                            "/home/test/proj")
+                           file))
+            (should (equal (claude-code--export-file
+                            (claude-code-session--create
+                             :id id :transcript "/gone/x.jsonl")
+                            "/home/test/proj")
+                           (expand-file-name
+                            (concat "projects/-home-test-proj/" id ".jsonl")
+                            claude-code-tests--fixtures)))
+            (should (equal (should-error (claude-code--export-file
+                                          (claude-code-session--create :id "new")
+                                          "/home/test/proj")
+                                         :type 'user-error)
+                           '(user-error "No transcript on disk for session new"))))
+        (delete-file file)))))
 
 ;;;; Notifications
 
@@ -4117,14 +4329,6 @@ tests themselves run inside a Claude Code session."
                        claude-code-tests--nesting-env-vars))
            process-environment)))
      ,@body))
-
-(defun claude-code-tests--await (pred timeout)
-  "Pump events until PRED is non-nil or TIMEOUT seconds elapse; return PRED."
-  (let ((deadline (+ (float-time) timeout)))
-    (while (and (not (funcall pred)) (< (float-time) deadline))
-      (accept-process-output nil 0.2)
-      (sleep-for 0.1))
-    (funcall pred)))
 
 (defun claude-code-tests--project-dir (cwd)
   "Return the transcript directory under `claude-code-config-dir' for CWD."

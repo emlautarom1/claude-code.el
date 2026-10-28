@@ -9,7 +9,7 @@ Ghostel adapter   an instance's program status records
         │  returns plain data
 Model             claude-code-session structs, the sessions query, process usage
         │  structs only
-Operations        spawn / resume / kill / delete / rename / send / interrupt
+Operations        spawn / resume / kill / delete / rename / send / interrupt / export
         │
 Notifications     an instance asking for attention -> claude-code-notify-function
         │
@@ -18,7 +18,7 @@ View              claude-code-sessions-mode + create menu + claude-code-sessions
 
 ## Model / view separation
 
-Every fundamental capability is a plain function usable from Elisp without the UI: `claude-code-spawn`, `claude-code-resume`, `claude-code-kill`, `claude-code-delete`, `claude-code-rename`, `claude-code-send-text`, `claude-code-interrupt`, and the query `claude-code-project-sessions`. The view is a thin presentation and command layer over these.
+Every fundamental capability is a plain function usable from Elisp without the UI: `claude-code-spawn`, `claude-code-resume`, `claude-code-kill`, `claude-code-delete`, `claude-code-rename`, `claude-code-send-text`, `claude-code-interrupt`, `claude-code-export-transcript`, and the query `claude-code-project-sessions`. The view is a thin presentation and command layer over these.
 
 ## Storage-adapter boundary
 
@@ -92,6 +92,16 @@ The unset is not optional: `DISABLE_ALTERNATE_SCREEN` is read first and wins out
 Measured on CLI v2.1.265 from raw PTY output (`ESC[?1049h`): each renderer against the opposite `tui` setting, and both variables together to establish which wins.
 
 One condition outranks the environment as well: with **screen-reader mode** on (`--ax-screen-reader`, `CLAUDE_AX_SCREEN_READER`, `CLAUDE_CODE_ACCESSIBILITY`) the CLI refuses the alt screen whatever it was asked for, so `fullscreen` yields there. The rest of what the CLI checks before `tui` — a crash auto-off, `tmux -CC`, Windows over SSH — is read *after* `CLAUDE_CODE_NO_FLICKER`, so the table holds against all three.
+
+## Exporting a transcript
+
+`claude-code-export-transcript` hands back a session's conversation as the text Claude's own `/export` writes — the text `v` in its transcript view (`Ctrl-o`) opens in an editor, there wrapped to the terminal's width: the conversation laid out as a terminal shows it, at a fixed 80 columns, with each run of tool calls collapsed to one line. Claude draws it; nothing here reads a transcript's messages. The CLI answers the SDK's `export_conversation` control request with one `control_response` line holding the text, and makes no API call for it — 0.2 s for a small transcript, 0.5 s for a 15 MB one. `--bare` keeps the user's hooks (a `SessionStart` hook fires on every resume) and plugins out of the process, and `--no-session-persistence` leaves the transcript as it was. The CLI reads requests until its input closes, so the answer is followed by an EOF, and it exits some 0.3 s later.
+
+- **It runs with a config dir of its own**, `claude-code-export-config-dir`. Any `claude -p` files itself in its config dir's `sessions/` under the session it resumes (see [storage model](storage-model.md#not-every-process-here-is-a-terminal-session)), so an export run against the real one would make a dead session read as external, refusing resume and delete, and lend a live one its own status. The CLI cannot find a session by id there, so it is handed the transcript's path, looked up again by id when Claude has moved the file since the struct was built. The text is byte-identical either way (compared on a 3.7 MB transcript).
+- **It runs in the directory the session works in** (`claude-code--session-directory`). Claude prints a tool's path relative to its cwd: the same export run from the home directory reads `Update(Development/proj/foo.el)` for `Update(foo.el)`.
+- **Exactly one callback is called.** The first of the answer, the process's exit, the `claude-code--export-timeout` timer and a cancel settles the export (`claude-code--export-settle`). A CLI that ends without answering is described by its stderr, which has a pipe of its own so that nothing it prints can split the answer — one line as long as the transcript, arriving in many pieces.
+
+A compacted session exports from its last compaction on, and a tool call a live session is still running exports as interrupted. Verified against CLI v2.1.304.
 
 ## The view
 

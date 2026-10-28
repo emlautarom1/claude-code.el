@@ -32,6 +32,8 @@ Liveness is a plain per-PID `process-attributes` existence check. Claude records
 
 `kind` names what the process is: `interactive`, `bg` for a background agent, and `daemon` / `daemon-worker` for Claude's background-agent supervisor and the workers it owns. A pre-warmed spare carries `spare: true` and no `jobId`. The table takes them all, since it keys on `sessionId` and reads only the fields above.
 
+Headless runs register too. A `claude -p` resuming a session files itself under that session's id as `kind: "interactive"`, `entrypoint: "sdk-cli"`, `status: "idle"`, for as long as it runs — even one that only [exports the transcript](architecture.md#exporting-a-transcript), which is why the export runs with a config dir of its own. Nothing in the file tells such a process from the session's own instance. Verified against CLI v2.1.304.
+
 This is not the inert detail it looks like. A `claude --bg` session stamps its transcript `entrypoint: "cli"`, exactly as a terminal session does, so [the entrypoint filter](#the-entrypoint-stamp) cannot tell the two apart and a project's view **lists background agents alongside the user's own sessions** — [external](glossary.md) while the worker runs, dead once it stops. That is the right answer for a session the user dispatched and may want to read or resume, and it costs no knowledge of the supervisor to reach: a live process with a matching transcript is all *external* means.
 
 Deletion is the one asymmetry. `claude-code-delete` removes the transcript and nothing else, while Claude keeps a background agent's own state under `jobs/<first 8 of sessionId>/` — so deleting one from Emacs leaves a row in `claude agents` whose conversation is gone. Removing that state is `claude rm`'s business, not this package's.

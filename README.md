@@ -99,6 +99,9 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 (claude-code-rename session "name")  ; alive sessions only
 (claude-code-send-text session "hello" t)
 (claude-code-interrupt session)
+
+;; Export a session's conversation as text, as Claude's /export does.
+(claude-code-export-transcript session root (lambda (text) (insert text)))
 ```
 
 ## Emacs as an MCP server
