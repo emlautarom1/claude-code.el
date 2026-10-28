@@ -6,7 +6,7 @@ Terms used throughout `claude-code.el` and its documentation. They are chosen to
 
 - **Interactive session** — a session a person drove at least once, from a terminal or any other Claude surface, as opposed to one a program drove start to finish: an agent in a fan-out, or a `claude -p` one-shot. The [entrypoint stamp](storage-model.md#the-entrypoint-stamp) tells them apart, and the view lists only these.
 
-- **Transcript** — the append-only `.jsonl` file recording a session's messages, stored under `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`.
+- **Transcript** — the append-only `.jsonl` file recording a session's messages, stored under `~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`. Its *export* is the conversation as text, the way Claude's `/export` writes it, which `t` in the view shows in a `claude-code-transcript-mode` buffer (see [exporting a transcript](architecture.md#exporting-a-transcript)).
 
 - **Recap** — Claude's own short account of where a session stood, written into the transcript each time the user returns to it after a break. A session carries one only if Claude wrote one; the newest is the session's recap (see [storage model](storage-model.md#transcripts--projectsencoded-cwdsessionidjsonl)).
 

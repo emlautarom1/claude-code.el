@@ -13,7 +13,7 @@ Operations        spawn / resume / kill / delete / rename / send / interrupt / e
         │
 Notifications     an instance asking for attention -> claude-code-notify-function
         │
-View              claude-code-sessions-mode + create menu + claude-code-sessions
+View              claude-code-sessions-mode + transcripts + create menu + claude-code-sessions
 ```
 
 ## Model / view separation
@@ -112,6 +112,8 @@ A flag is as fresh as the view's last redraw.
 A row is one line and a [recap](glossary.md#recap) is a paragraph, so the recap is not a column: the view answers ElDoc instead. `claude-code-sessions-mode` adds `claude-code--eldoc-session` to `eldoc-documentation-functions` **buffer-locally**, which is also what makes the default `global-eldoc-mode` turn `eldoc-mode` on here; it answers with struct fields, so the backend takes the synchronous half of ElDoc's contract and returns the string rather than arranging a callback. The answer is the status modifier's message, when Claude sent one, above the recap. It answers for a session in any liveness state — the recap says where the work stood, which is worth as much on a session still running as on one that stopped — and nil for a group header or a session with neither, which is what clears the echo area on the way out of a row that had one. ElDoc prints after the commands in `eldoc-message-commands`, which is what the view is moved by (`n`/`p` are `tabulated-list-mode`'s `next-line` and `previous-line`), and how much of the paragraph reaches the echo area is `eldoc-echo-area-use-multiline-p`'s business, not this package's.
 
 `v` shows the version-control status of the tree a row's session works in now, through `claude-code-vc-function`.
+
+`t` shows the [export](#exporting-a-transcript) of a row's transcript in `*claude-transcript: <name>*`, a `claude-code-transcript-mode` buffer, one per session and found by its id the way a view is found by its project. The buffer is displayed at once, beside the view and without selecting it, so a run of rows is read by moving through the view: another row's transcript takes the window an earlier one holds (`display-buffer-reuse-mode-window`), and only the first splits the view's window to the right. The text arrives some 0.3 s later, with `:exporting` in the mode line until it does. `t` again, or `g` in the buffer, exports afresh and abandons an export the buffer still awaits; killing the buffer abandons it too. Every window showing the buffer keeps its place through the new text (`claude-code--transcript-fill`): one at the end stays at the end, at the conversation's latest, and any other keeps its line and column, where `erase-buffer` alone would send each window but the selected one to the top. A failed export is reported in the echo area and leaves the text there was. Claude wraps the text at 80 columns, so the buffer truncates lines rather than wrapping them a second time.
 
 Spawn, resume, kill and delete change which sessions exist, so they redraw through `claude-code--refresh-views`; kill and delete also retire the marks they consumed through `claude-code--drop-marks`. `claude-code--refresh-views` and `claude-code--drop-marks` each cover **every** view whether or not it is displayed: no view owns a session (per the [session model](#the-session-model) above), so any of them can be holding the row a command just changed, or a spent mark. Each view recomputes independently. `g`, `TAB` and `G` change one view's own presentation only, and redraw that buffer alone.
 

@@ -14,7 +14,8 @@
 ;; current `project.el' project.  Running instances are hosted in `ghostel'
 ;; terminal buffers.  A "claude sessions" view lists every session of a project
 ;; -- alive, external or dead -- and offers visit, create, resume, kill, delete,
-;; rename, send-text and interrupt actions.
+;; rename, send-text and interrupt actions, and each session's transcript as
+;; Claude exports it.
 ;;
 ;; The package is split into a programmatic model (plain functions operating on
 ;; `claude-code-session' structs) and a view layer.  All knowledge of the
@@ -2048,6 +2049,144 @@ however the batch ends."
         (if (eq claude-code--group-by 'status) 'state 'status))
   (claude-code-sessions-refresh))
 
+(defun claude-code-sessions-transcript ()
+  "Show the transcript of the session at point beside the view.
+The text is Claude's own export.  The view stays selected, and the next row's
+transcript takes the same window."
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
+  (display-buffer
+   (claude-code--transcript-export
+    (or (claude-code--session-at-point) (user-error "No session on this line"))
+    claude-code--project)
+   '((display-buffer-reuse-window
+      display-buffer-reuse-mode-window
+      display-buffer-in-direction)
+     (mode . claude-code-transcript-mode)
+     (direction . right))))
+
+;;;;; Transcripts
+
+(defvar-local claude-code--transcript-session nil
+  "The session whose transcript this buffer shows.")
+
+(defvar-local claude-code--transcript-root nil
+  "The project root `claude-code--transcript-session' is listed under.")
+
+(defvar-local claude-code--transcript-export nil
+  "The export this buffer awaits, or nil.")
+
+(defun claude-code--text-place (pos)
+  "Return POS as (LINE . COLUMN), or nil when it is the end of the buffer."
+  (unless (= pos (point-max))
+    (save-excursion
+      (goto-char pos)
+      (cons (line-number-at-pos) (current-column)))))
+
+(defun claude-code--text-pos (place)
+  "Return the position `claude-code--text-place' PLACE names."
+  (if place
+      (save-excursion
+        (goto-char (point-min))
+        (forward-line (1- (car place)))
+        (move-to-column (cdr place))
+        (point))
+    (point-max)))
+
+(defun claude-code--transcript-fill (text)
+  "Replace the current buffer's text with TEXT, keeping every place in it.
+A window, or the buffer's own point, that was at the end stays there, at the
+latest of the conversation, with as much of it in view as fits.  Any other
+keeps its line and column, and a window the line its display started on."
+  (let ((windows (mapcar (lambda (window)
+                           (list window
+                                 (claude-code--text-place (window-point window))
+                                 (claude-code--text-place (window-start window))))
+                         (get-buffer-window-list nil nil t)))
+        (here (claude-code--text-place (point)))
+        (inhibit-read-only t))
+    (erase-buffer)
+    (insert text)
+    (goto-char (claude-code--text-pos here))
+    (pcase-dolist (`(,window ,place ,start) windows)
+      (set-window-point window (claude-code--text-pos place))
+      (set-window-start window
+                        (if place
+                            (claude-code--text-pos start)
+                          (save-excursion
+                            (goto-char (point-max))
+                            (forward-line (- 1 (window-body-height window)))
+                            (point)))
+                        t))))
+
+(defun claude-code--transcript-buffer (id)
+  "Return the buffer showing session ID's transcript, or nil."
+  (seq-find (lambda (buffer)
+              (with-current-buffer buffer
+                (and (derived-mode-p 'claude-code-transcript-mode)
+                     claude-code--transcript-session
+                     (equal (claude-code-session-id
+                             claude-code--transcript-session)
+                            id))))
+            (buffer-list)))
+
+(defun claude-code--transcript-export (session root)
+  "Export SESSION's transcript, listed under ROOT, into its buffer; return it.
+The buffer is made when SESSION has none, and an export it still awaits is
+abandoned for this one.  The export starts first, so a session it refuses
+leaves no empty buffer behind."
+  (let* ((id (claude-code-session-id session))
+         (answer (lambda (fn)
+                   (lambda (arg)
+                     (with-current-buffer (claude-code--transcript-buffer id)
+                       (setq claude-code--transcript-export nil
+                             mode-line-process nil)
+                       (funcall fn arg)))))
+         (proc (claude-code-export-transcript
+                session root
+                (funcall answer #'claude-code--transcript-fill)
+                (funcall answer (lambda (msg)
+                                  (message "%s: %s" (buffer-name) msg)))))
+         (buffer (or (claude-code--transcript-buffer id)
+                     (with-current-buffer
+                         (generate-new-buffer
+                          (format "*claude-transcript: %s*"
+                                  (truncate-string-to-width
+                                   (claude-code--session-display-name session)
+                                   40 nil nil "…")))
+                       (claude-code-transcript-mode)
+                       (current-buffer)))))
+    (with-current-buffer buffer
+      (when claude-code--transcript-export
+        (claude-code--export-cancel claude-code--transcript-export))
+      (setq claude-code--transcript-session session
+            claude-code--transcript-root root
+            claude-code--transcript-export proc
+            mode-line-process ":exporting"))
+    buffer))
+
+(defun claude-code--transcript-revert (&rest _)
+  "Export this buffer's session again; its `revert-buffer-function'."
+  (claude-code--transcript-export claude-code--transcript-session
+                                  claude-code--transcript-root))
+
+(defun claude-code--transcript-abandon ()
+  "Abandon the export this buffer awaits; a `kill-buffer-hook' member."
+  (when claude-code--transcript-export
+    (claude-code--export-cancel claude-code--transcript-export)))
+
+(define-derived-mode claude-code-transcript-mode special-mode "Claude Transcript"
+  "Major mode showing a session's transcript as Claude exports it.
+\\<claude-code-transcript-mode-map>\\[revert-buffer] exports it again.
+Claude wraps the text at 80 columns, so a narrower window truncates its lines
+rather than wrapping them a second time.
+
+\\{claude-code-transcript-mode-map}"
+  :interactive nil
+  (setq-local truncate-lines t)
+  (setq-local revert-buffer-function #'claude-code--transcript-revert)
+  (add-hook 'kill-buffer-hook #'claude-code--transcript-abandon nil t))
+
 ;;;;; Mode
 
 (defvar-keymap claude-code-sessions-mode-map
@@ -2062,6 +2201,7 @@ however the batch ends."
   "r"   #'claude-code-sessions-rename
   "i"   #'claude-code-sessions-interrupt
   "s"   #'claude-code-sessions-send
+  "t"   #'claude-code-sessions-transcript
   "v"   #'claude-code-sessions-vc
   "m"   #'claude-code-sessions-mark
   "u"   #'claude-code-sessions-unmark

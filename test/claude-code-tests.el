@@ -3148,6 +3148,174 @@ moved still opens where the instance is now."
                          '("/home/test/proj/"
                            "/home/test/proj/.claude/worktrees/feat/"))))))))
 
+(defmacro claude-code-tests--recording-exports (exports cancelled &rest body)
+  "Run BODY with exports and their cancels stubbed and recorded.
+Each export pushes (ID ROOT ON-TEXT ON-ERROR PROC) onto EXPORTS, PROC a fresh
+symbol standing for its process, and refuses session \"gone\" the way a
+session with no transcript is refused; each cancel pushes PROC onto
+CANCELLED.  Every transcript buffer is killed afterwards."
+  (declare (indent 2))
+  `(cl-letf (((symbol-function 'claude-code-export-transcript)
+              (lambda (session root on-text on-error)
+                (let ((id (claude-code-session-id session))
+                      (proc (gensym "export")))
+                  (when (equal id "gone")
+                    (user-error "No transcript on disk for session gone"))
+                  (push (list id root on-text on-error proc) ,exports)
+                  proc)))
+             ((symbol-function 'claude-code--export-cancel)
+              (lambda (proc) (push proc ,cancelled))))
+     (unwind-protect (progn ,@body)
+       (dolist (buffer (buffer-list))
+         (when (eq (buffer-local-value 'major-mode buffer)
+                   'claude-code-transcript-mode)
+           (kill-buffer buffer))))))
+
+(ert-deftest claude-code-test-sessions-transcript ()
+  "`t' shows the row's transcript beside the view, leaving the view selected.
+Another row's takes the same window; a row's own is exported again into the
+buffer it has, abandoning an export that buffer still awaits.  A session the
+export refuses leaves no buffer behind.  Run against real windows."
+  (let ((exports '()) (cancelled '()) (at-point nil)
+        (view (generate-new-buffer " *cc-view*"))
+        (a (claude-code-session--create :id "a" :title "Alpha"))
+        (b (claude-code-session--create :id "b" :title "Beta")))
+    (should (eq (keymap-lookup claude-code-sessions-mode-map "t")
+                #'claude-code-sessions-transcript))
+    (unwind-protect
+        (let ((display-buffer-overriding-action nil)
+              (display-buffer-alist nil)
+              (display-buffer-base-action nil)
+              (ignore-window-parameters t))
+          (cl-letf (((symbol-function 'claude-code--session-at-point)
+                     (lambda () at-point)))
+            (claude-code-tests--recording-exports exports cancelled
+              (save-window-excursion
+                (delete-other-windows)
+                (set-window-buffer (selected-window) view)
+                (cl-flet ((press (session)
+                            (setq at-point session)
+                            (with-current-buffer view
+                              (claude-code-sessions-transcript)))
+                          (answer (n fn arg)
+                            (funcall (nth (if (eq fn 'text) 2 3) (nth n exports))
+                                     arg)))
+                  (with-current-buffer view
+                    (claude-code-sessions-mode)
+                    (setq claude-code--project "/r")
+                    (should (equal (should-error (claude-code-sessions-transcript)
+                                                 :type 'user-error)
+                                   '(user-error "No session on this line"))))
+                  (press a)
+                  (let* ((buffer-a (claude-code--transcript-buffer "a"))
+                         (window (get-buffer-window buffer-a)))
+                    (should (equal (buffer-name buffer-a)
+                                   "*claude-transcript: Alpha*"))
+                    (should (eq (window-in-direction 'right) window))
+                    (should (eq (window-buffer (selected-window)) view))
+                    (should (equal (mapcar (lambda (e) (list (nth 0 e) (nth 1 e)))
+                                           exports)
+                                   '(("a" "/r"))))
+                    (should (equal (buffer-local-value 'mode-line-process buffer-a)
+                                   ":exporting"))
+                    (answer 0 'text "first\nsecond")
+                    (with-current-buffer buffer-a
+                      (should (equal (buffer-string) "first\nsecond"))
+                      (should-not mode-line-process)
+                      (should-not claude-code--transcript-export))
+                    ;; Another row's takes the same window.
+                    (press b)
+                    (should (eq (window-buffer window) (claude-code--transcript-buffer "b")))
+                    (should (= (length (window-list)) 2))
+                    ;; Pressed again before the answer: the first is abandoned.
+                    (press b)
+                    (should (equal cancelled (list (nth 4 (nth 1 exports)))))
+                    (should (eq (claude-code--transcript-buffer "b")
+                                (window-buffer window)))
+                    ;; A row's own buffer is reused, nothing left to abandon.
+                    (press a)
+                    (should (eq (window-buffer window) buffer-a))
+                    (should (= (length cancelled) 1))
+                    ;; A failure keeps the text there was.
+                    (answer 0 'error "boom")
+                    (with-current-buffer buffer-a
+                      (should (equal (buffer-string) "first\nsecond"))
+                      (should-not mode-line-process))
+                    ;; Refused: no buffer, and the window keeps what it had.
+                    (should-error (press (claude-code-session--create :id "gone"))
+                                  :type 'user-error)
+                    (should-not (claude-code--transcript-buffer "gone"))
+                    (should (eq (window-buffer window) buffer-a))))))))
+      (kill-buffer view))))
+
+(ert-deftest claude-code-test-transcript-buffer-exports-again ()
+  "`g' exports a transcript buffer's session again; killing it abandons that."
+  (let ((exports '()) (cancelled '())
+        (session (claude-code-session--create :id "a")))
+    (claude-code-tests--recording-exports exports cancelled
+      (let ((buffer (claude-code--transcript-export session "/r")))
+        (with-current-buffer buffer
+          (should (eq major-mode 'claude-code-transcript-mode))
+          (should (eq (keymap-lookup (current-local-map) "g") #'revert-buffer))
+          (revert-buffer)
+          (should (equal (mapcar (lambda (e) (list (nth 0 e) (nth 1 e))) exports)
+                         '(("a" "/r") ("a" "/r"))))
+          (should (equal cancelled (list (nth 4 (nth 1 exports))))))
+        (kill-buffer buffer)
+        (should (equal cancelled (list (nth 4 (nth 0 exports))
+                                       (nth 4 (nth 1 exports)))))))))
+
+(ert-deftest claude-code-test-transcript-fill-keeps-places ()
+  "Exporting again leaves every window, and the buffer's point, where it was.
+One at the end stays at the end, the latest of the conversation in view."
+  (let ((buffer (generate-new-buffer " *cc-transcript*"))
+        (other (generate-new-buffer " *cc-other*"))
+        (lines (lambda (n)
+                 (mapconcat (lambda (i) (format "line %d" i))
+                            (number-sequence 1 n) "\n"))))
+    (cl-flet ((line-col (pos)
+                (with-current-buffer buffer
+                  (save-excursion
+                    (goto-char pos)
+                    (list (line-number-at-pos) (current-column))))))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) other)
+            (with-current-buffer buffer
+              (claude-code-transcript-mode)
+              ;; A first export lands at the end.
+              (claude-code--transcript-fill (funcall lines 100))
+              (should (eobp)))
+            (let ((top (split-window))
+                  (bottom (split-window nil nil 'right)))
+              (set-window-buffer top buffer)
+              (set-window-buffer bottom buffer)
+              (with-current-buffer buffer
+                (goto-char (point-min))
+                (forward-line 9))
+              (set-window-start top (with-current-buffer buffer
+                                      (save-excursion (goto-char (point-min))
+                                                      (forward-line 34)
+                                                      (point))))
+              (set-window-point top (with-current-buffer buffer
+                                      (save-excursion (goto-char (point-min))
+                                                      (forward-line 39)
+                                                      (forward-char 3)
+                                                      (point))))
+              (set-window-point bottom (with-current-buffer buffer (point-max)))
+              (with-current-buffer buffer
+                (claude-code--transcript-fill (funcall lines 150))
+                (should (equal (line-col (point)) '(10 0))))
+              (should (equal (line-col (window-point top)) '(40 3)))
+              (should (equal (line-col (window-start top)) '(35 0)))
+              (should (= (window-point bottom)
+                         (with-current-buffer buffer (point-max))))
+              (should (equal (line-col (window-start bottom))
+                             (list (- 151 (window-body-height bottom)) 0)))))
+        (kill-buffer buffer)
+        (kill-buffer other)))))
+
 (ert-deftest claude-code-test-sessions-point-commands-refuse-before-prompting ()
   "`r', `s' and `i' refuse a row they cannot drive before reading any input.
 The gate is the live process, not the row's `alive-p': a session that ended
