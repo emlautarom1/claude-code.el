@@ -1520,6 +1520,10 @@ Emacs has no raise coming, so it displays at once."
 (defvar-local claude-code--posted nil
   "Desktop notifications posted for the instance in this buffer, still up.")
 
+(defvar-local claude-code--closes 0
+  "How many times `claude-code--close-posted' has run in this buffer.
+`claude-code-notify-desktop' compares it across a post.")
+
 (defun claude-code--close-posted ()
   "Close the desktop notifications still up for this buffer's instance.
 Run when the state they announced ends, when the instance comes into sight,
@@ -1531,6 +1535,7 @@ keep the buffer alive.  The list is emptied first, since a close waits on
 D-Bus, where a timer or focus change can run this again."
   (let ((posted claude-code--posted))
     (setq claude-code--posted nil)
+    (cl-incf claude-code--closes)
     (dolist (notification posted)
       (with-demoted-errors "claude-code: closing a notification: %S"
         (notifications-close-notification notification)))))
@@ -1556,7 +1561,6 @@ can exit and leave the registry."
   (dolist (buffer (cl-loop for plist being the hash-values of claude-code--managed
                            collect (plist-get plist :buffer)))
     (when (and (buffer-live-p buffer)
-               (buffer-local-value 'claude-code--posted buffer)
                (claude-code--on-screen-p buffer))
       (with-current-buffer buffer (claude-code--close-posted)))))
 
@@ -1570,10 +1574,14 @@ can exit and leave the registry."
   "Post BODY as a desktop notification that jumps to SESSION when clicked.
 The notification declares no actions: a desktop with one to invoke hands the
 click to Emacs instead of raising it, and the raise is what the jump needs.
-It is remembered in SESSION's buffer, for `claude-code--close-posted'."
+It is remembered in SESSION's buffer, for `claude-code--close-posted'.
+Posting waits on D-Bus, where that close or the buffer's kill can run before
+the notification is up; it is then closed as soon as it is."
   (require 'notifications)
   (let* ((id (claude-code-session-id session))
          (buffer (claude-code-session-buffer session))
+         (closes (and (buffer-live-p buffer)
+                      (buffer-local-value 'claude-code--closes buffer)))
          (posted
           (notifications-notify
            :title (claude-code--session-display-name session)
@@ -1587,10 +1595,14 @@ It is remembered in SESSION's buffer, for `claude-code--close-posted'."
                                  (delq notification claude-code--posted))))
                        (when (eq reason 'dismissed)
                          (claude-code--notify-follow id))))))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (push posted claude-code--posted)
-        (add-hook 'kill-buffer-hook #'claude-code--close-posted nil t)))))
+    (cond ((and (buffer-live-p buffer)
+                (eql closes (buffer-local-value 'claude-code--closes buffer)))
+           (with-current-buffer buffer
+             (push posted claude-code--posted)
+             (add-hook 'kill-buffer-hook #'claude-code--close-posted nil t)))
+          (closes
+           (with-demoted-errors "claude-code: closing a notification: %S"
+             (notifications-close-notification posted))))))
 
 
 ;;;; View

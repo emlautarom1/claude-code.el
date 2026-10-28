@@ -2974,6 +2974,45 @@ refuses does not keep the buffer alive."
           (should (equal closed '(2)))
           (should-not (buffer-live-p buf)))))))
 
+(ert-deftest claude-code-test-notify-desktop-closes-what-ends-while-posting ()
+  "A notification its instance is done with before it is up closes once up.
+Posting waits on D-Bus, where a change of the root's state, the instance
+coming into sight and its buffer's kill all close the notifications up for
+it -- which the one being posted is not yet."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (now 1000.0) (closed '()) (posted 0) (inside nil)
+          (claude-code--seen-timer nil)
+          (session (claude-code-session--create :id "id-1" :title "T"
+                                                :buffer buf)))
+      (claude-code--register "id-1" buf "/home/test/proj" nil)
+      (cl-letf (((symbol-function 'notifications-notify)
+                 (lambda (&rest _)
+                   (when inside (funcall (prog1 inside (setq inside nil))))
+                   (cl-incf posted)))
+                ((symbol-function 'notifications-close-notification)
+                 (lambda (id &rest _) (push id closed)))
+                ((symbol-function 'claude-code--on-screen-p) #'always))
+        (claude-code-tests--without-requiring '(notifications)
+          (claude-code-tests--reporting buf log now
+            ;; Undisturbed, it is remembered for the close to come.
+            (claude-code-tests--status buf 'done)
+            (claude-code-notify-desktop session "Finished")
+            (should (equal claude-code--posted '(1)))
+            (claude-code-tests--status buf 'working)
+            (should (equal closed '(1)))
+            (claude-code-tests--status buf 'done)
+            (setq inside (lambda () (claude-code-tests--status buf 'working)))
+            (claude-code-notify-desktop session "Finished")
+            (should (equal closed '(2 1)))
+            (should (null claude-code--posted))
+            (setq inside #'claude-code--close-seen)
+            (claude-code-notify-desktop session "Finished")
+            (should (equal closed '(3 2 1)))
+            (should (null claude-code--posted))
+            (setq inside (lambda () (kill-buffer buf)))
+            (claude-code-notify-desktop session "Finished")
+            (should (equal closed '(4 3 2 1)))))))))
+
 ;;;; View
 
 (ert-deftest claude-code-test-status-display ()
