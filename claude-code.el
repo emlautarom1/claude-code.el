@@ -1435,11 +1435,19 @@ The empty string is returned when TIME is nil."
             ((< secs 604800) (format "%dd" (/ secs 86400)))
             (t (format "%dw" (/ secs 604800)))))))
 
+(defun claude-code--modifier-flag (session)
+  "Return the flag cell for SESSION's status modifier, empty for none."
+  (pcase (claude-code-session-modifier session)
+    ('done (propertize "+" 'face 'success 'help-echo "Turn finished"))
+    ('error (propertize "!" 'face 'error 'help-echo "Turn failed"))
+    (_ "")))
+
 (defun claude-code--format-session (session usage now)
   "Return the column vector for SESSION.
 USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
   (let ((status (claude-code--status-display session)))
-    (vector (propertize (car status) 'face (cdr status))
+    (vector (claude-code--modifier-flag session)
+            (propertize (car status) 'face (cdr status))
             (propertize (claude-code--format-relative-time
                          (claude-code-session-last-active session) now)
                         'face 'shadow)
@@ -1473,14 +1481,27 @@ splits out by status, and only when grouping by status."
   "Return non-nil when group A should sort before group B."
   (< (claude-code--group-rank a) (claude-code--group-rank b)))
 
-(defun claude-code--group-header (key count collapsed marked)
-  "Return the header line for group KEY with COUNT rows and COLLAPSED state.
-MARKED is how many of those rows are marked; a collapsed group reports it,
-standing in for the `*' tags it is not showing."
-  (propertize (format "%s %s (%d%s)"
-                      (if collapsed ">" "v") (capitalize key) count
-                      (if (> marked 0) (format ", %d marked" marked) ""))
-              'claude-code-group key 'face 'bold))
+(defun claude-code--group-header (key sessions collapsed)
+  "Return the header line for group KEY holding SESSIONS.
+A COLLAPSED group also counts how many of them are marked and how many carry
+each status modifier, standing in for the tags and flags it is not showing."
+  (let ((counts
+         (when collapsed
+           (cl-loop for (label . pred)
+                    in `(("marked" . ,(lambda (s)
+                                        (member (claude-code-session-id s)
+                                                claude-code--marks)))
+                         ("done" . ,(lambda (s)
+                                      (eq (claude-code-session-modifier s) 'done)))
+                         ("error" . ,(lambda (s)
+                                       (eq (claude-code-session-modifier s) 'error))))
+                    for n = (seq-count pred sessions)
+                    unless (zerop n) collect (format "%d %s" n label)))))
+    (propertize (format "%s %s (%s)" (if collapsed ">" "v") (capitalize key)
+                        (string-join (cons (number-to-string (length sessions))
+                                           counts)
+                                     ", "))
+                'claude-code-group key 'face 'bold)))
 
 (defun claude-code--num-sorter (get)
   "Return a tabulated-list sorter over usage values read with GET.
@@ -1535,17 +1556,9 @@ cannot outlive its row and come back armed."
                       claude-code--marks))
     (mapcar
      (lambda (key)
-       (let* ((rows (nreverse (gethash key buckets)))
-              (collapsed (and (member key claude-code--collapsed) t))
-              ;; Only a collapsed group reports its marks; an expanded one
-              ;; shows the tags themselves.
-              (marked (if collapsed
-                          (seq-count
-                           (lambda (s) (member (claude-code-session-id s)
-                                               claude-code--marks))
-                           rows)
-                        0)))
-         (cons (claude-code--group-header key (length rows) collapsed marked)
+       (let ((rows (nreverse (gethash key buckets)))
+             (collapsed (member key claude-code--collapsed)))
+         (cons (claude-code--group-header key rows collapsed)
                (unless collapsed
                  (mapcar (lambda (s)
                            (list (claude-code-session-id s)
@@ -1563,12 +1576,15 @@ cannot outlive its row and come back armed."
   (when-let* ((id (tabulated-list-get-id)))
     (gethash id claude-code--session-table)))
 
-(defun claude-code--eldoc-recap (&rest _)
-  "Return the recap of the session on the current line, or nil.
-The view's `eldoc-documentation-functions' member.  The recap is a cached
-transcript field, so this answers synchronously by returning the string."
-  (when-let* ((session (claude-code--session-at-point)))
-    (claude-code-session-recap session)))
+(defun claude-code--eldoc-session (&rest _)
+  "Return the documentation of the session on the current line, or nil.
+The view's `eldoc-documentation-functions' member: the status modifier's
+message, then the recap.  Both are struct fields, so this answers
+synchronously by returning the string."
+  (when-let* ((session (claude-code--session-at-point))
+              (parts (delq nil (list (claude-code-session-modifier-message session)
+                                     (claude-code-session-recap session)))))
+    (string-join parts "\n\n")))
 
 (defun claude-code--group-at-point ()
   "Return the key of the group the current line belongs to, or nil.
@@ -1871,7 +1887,10 @@ however the batch ends."
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-printer #'claude-code--print-entry)
   (setq-local tabulated-list-format
-              (vector '("Status" 9 t)
+              ;; The unnamed first column flags a status modifier.  Sortable,
+              ;; so `S' on it brings flagged rows together.
+              (vector '("" 1 t)
+                      '("Status" 9 t)
                       (list "Active" 8 #'claude-code--time-less-p :right-align t)
                       '("Id" 9 t)
                       '("Worktree" 14 t)
@@ -1887,7 +1906,7 @@ however the batch ends."
   ;; Not a function: `C-u -1 S' sorts this value directly.
   (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
-  (add-hook 'eldoc-documentation-functions #'claude-code--eldoc-recap nil t)
+  (add-hook 'eldoc-documentation-functions #'claude-code--eldoc-session nil t)
   (tabulated-list-init-header))
 
 ;;;;; Entry points
