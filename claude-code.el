@@ -1166,14 +1166,19 @@ what tells a finished turn from one a background shell command keeps going.")
 Ghostel's own announcement of them and every OSC 9 or OSC 777 notification
 are silenced, while its mode-line indicator stays.  The bindings are
 buffer-local, so Ghostel terminals this package does not manage keep the
-user's handlers."
+user's handlers.  BUFFER's window changes, and every focus change while an
+instance runs, close the notifications of an instance that comes into sight."
   (with-current-buffer buffer
     (setq-local ghostel-notification-functions nil)
     (setq-local ghostel-status-notify-states nil)
     (add-hook 'ghostel-program-status-functions
               (lambda (record-id old new)
                 (claude-code--on-status id record-id old new))
-              nil t)))
+              nil t)
+    (add-hook 'window-buffer-change-functions #'claude-code--schedule-seen
+              nil t))
+  (add-function :after after-focus-change-function
+                #'claude-code--schedule-seen))
 
 (defun claude-code--on-status (id record-id old new)
   "Track instance ID's status record RECORD-ID changing from OLD to NEW.
@@ -1350,15 +1355,49 @@ Emacs has no raise coming, so it displays at once."
 
 (defun claude-code--close-posted ()
   "Close the desktop notifications still up for this buffer's instance.
-Run when the state they announced ends, and from the buffer's
-`kill-buffer-hook', since a click on what a dead instance left behind would
-have nothing to open.  A failed close is only reported: the specification
-lets a server answer one for a notification already gone with an error, and
-an error escaping `kill-buffer-hook' would keep the buffer alive."
-  (dolist (posted claude-code--posted)
-    (with-demoted-errors "claude-code: closing a notification: %S"
-      (notifications-close-notification posted)))
-  (setq claude-code--posted nil))
+Run when the state they announced ends, when the instance comes into sight,
+and from the buffer's `kill-buffer-hook', since a click on what a dead
+instance left behind would have nothing to open.  A failed close is only
+reported: the specification lets a server answer one for a notification
+already gone with an error, and an error escaping `kill-buffer-hook' would
+keep the buffer alive.  The list is emptied first, since a close waits on
+D-Bus, where a timer or focus change can run this again."
+  (let ((posted claude-code--posted))
+    (setq claude-code--posted nil)
+    (dolist (notification posted)
+      (with-demoted-errors "claude-code: closing a notification: %S"
+        (notifications-close-notification notification)))))
+
+(defvar claude-code--seen-timer nil
+  "The timer about to close the notifications of instances in sight, or nil.")
+
+(defun claude-code--schedule-seen (&rest _)
+  "Close the notifications of every instance in sight, from a timer.
+An instance buffer's `window-buffer-change-functions' member and an
+`after-focus-change-function' advice.  A close waits on D-Bus, which
+neither redisplay nor a focus change should, and one timer serves a burst
+of changes."
+  (unless claude-code--seen-timer
+    (setq claude-code--seen-timer
+          (run-at-time 0 nil #'claude-code--close-seen))))
+
+(defun claude-code--close-seen ()
+  "Close the notifications of every managed instance now on screen.
+The buffers are collected first: a close waits on D-Bus, where an instance
+can exit and leave the registry."
+  (setq claude-code--seen-timer nil)
+  (dolist (buffer (cl-loop for plist being the hash-values of claude-code--managed
+                           collect (plist-get plist :buffer)))
+    (when (and (buffer-live-p buffer)
+               (buffer-local-value 'claude-code--posted buffer)
+               (claude-code--on-screen-p buffer))
+      (with-current-buffer buffer (claude-code--close-posted)))))
+
+(defun claude-code--unwatch-focus ()
+  "Stop closing notifications on focus changes, once no instance is left."
+  (remove-function after-focus-change-function #'claude-code--schedule-seen))
+
+(add-hook 'claude-code-last-instance-exit-hook #'claude-code--unwatch-focus)
 
 (defun claude-code-notify-desktop (session body)
   "Post BODY as a desktop notification that jumps to SESSION when clicked.

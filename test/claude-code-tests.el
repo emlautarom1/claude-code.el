@@ -163,10 +163,12 @@ that decide it: the pre-spawn hook runs in the instance's buffer, over a
 `process-environment' sharing its tail with Emacs's own.
 Neither Ghostel's native module nor the MCP server is wanted under test, so
 requiring either is a no-op and the MCP CLI arguments are a fixed stand-in.
-Every buffer a launch hosted is killed afterwards, however BODY exits."
+The focus hook a launch watches is bound around BODY, and every buffer a
+launch hosted is killed afterwards, however BODY exits."
   (declare (indent 1))
   `(claude-code-tests--without-requiring '(ghostel claude-code-mcp)
-     (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
+     (cl-letf ((after-focus-change-function after-focus-change-function)
+               ((symbol-function 'claude-code--mcp-cli-args)
                 (lambda (_id) '("--mcp-config" "{}")))
                ((symbol-function 'ghostel-exec)
                 (lambda (buffer _program args)
@@ -1918,16 +1920,23 @@ Ghostel's announcement of them and its OSC 9/777 notifications are silenced
 buffer-locally, so terminals this package does not manage keep the user's
 handlers.  The status hook still runs its global entries -- the mode-line
 indicator among them -- and the instance's own carries the instance id rather
-than reading it back from whatever buffer happens to be current."
+than reading it back from whatever buffer happens to be current.  The buffer's
+window changes and every focus change watch for the instance being seen."
   (claude-code-tests--with-managed-buffer buf
-    (let ((seen '()))
+    (let ((seen '())
+          (after-focus-change-function #'ignore))
       (claude-code--install-notifications "id-1" buf)
       (with-current-buffer buf
         (should (local-variable-p 'ghostel-notification-functions))
         (should (null ghostel-notification-functions))
         (should (local-variable-p 'ghostel-status-notify-states))
         (should (null ghostel-status-notify-states))
-        (should (memq t ghostel-program-status-functions)))
+        (should (memq t ghostel-program-status-functions))
+        (should (local-variable-p 'window-buffer-change-functions))
+        (should (memq #'claude-code--schedule-seen
+                      window-buffer-change-functions)))
+      (should (advice-function-member-p #'claude-code--schedule-seen
+                                        after-focus-change-function))
       (cl-letf (((symbol-function 'claude-code--on-status)
                  (lambda (&rest args) (push args seen))))
         (funcall (car (buffer-local-value 'ghostel-program-status-functions buf))
@@ -2116,6 +2125,64 @@ leaves a banner that asks for nothing."
           (claude-code-tests--status buf 'working)
           (should (equal closed '(7)))
           (should (null claude-code--posted)))))))
+
+(ert-deftest claude-code-test-seeing-an-instance-closes-its-notifications ()
+  "Notifications close once their instance is on screen, from a timer.
+A burst of window and focus changes schedules one close, which spares the
+instances still out of sight."
+  (claude-code-tests--with-managed-buffer seen
+    (claude-code-tests--with-managed-buffer hidden
+      (let ((log '()) (closed '()) (claude-code--seen-timer nil)
+            (gone (generate-new-buffer " *cc-gone*")))
+        (claude-code--register "id-1" seen "/home/test/proj" nil)
+        (claude-code--register "id-2" hidden "/home/test/proj" nil)
+        ;; An entry whose buffer died without retiring it is skipped.
+        (puthash "id-3" (list :buffer gone) claude-code--managed)
+        (kill-buffer gone)
+        (with-current-buffer seen (setq claude-code--posted (list 1 2)))
+        (with-current-buffer hidden (setq claude-code--posted (list 3)))
+        (cl-letf (((symbol-function 'notifications-close-notification)
+                   (lambda (id &rest _) (push id closed)))
+                  ((symbol-function 'claude-code--on-screen-p)
+                   (lambda (buffer) (eq buffer seen))))
+          (claude-code-tests--capturing-timers log
+            (claude-code--schedule-seen (selected-window))
+            (claude-code--schedule-seen)
+            (should (= (length (claude-code-tests--live-timers log)) 1))
+            (should (null closed))
+            (funcall (claude-code-tests--thunk-at log 0))
+            (should (equal (sort closed #'<) '(1 2)))
+            (should (null (buffer-local-value 'claude-code--posted seen)))
+            (should (equal (buffer-local-value 'claude-code--posted hidden)
+                           '(3)))
+            (should-not claude-code--seen-timer)))))))
+
+(ert-deftest claude-code-test-last-exit-stops-watching-focus ()
+  "Focus changes stop being watched once the last instance exits."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((after-focus-change-function #'ignore))
+      (claude-code--register "id-1" buf "/home/test/proj" nil)
+      (claude-code--install-notifications "id-1" buf)
+      (should (advice-function-member-p #'claude-code--schedule-seen
+                                        after-focus-change-function))
+      (kill-buffer buf)
+      (should-not (advice-function-member-p #'claude-code--schedule-seen
+                                            after-focus-change-function)))))
+
+(ert-deftest claude-code-test-close-posted-closes-each-once ()
+  "A close run while another waits on D-Bus finds nothing left to close.
+Timers and focus events still run during that wait."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((closed '()))
+      (with-current-buffer buf
+        (setq claude-code--posted (list 1 2))
+        (cl-letf (((symbol-function 'notifications-close-notification)
+                   (lambda (id &rest _)
+                     (push id closed)
+                     (when (= (length closed) 1)
+                       (claude-code--close-posted)))))
+          (claude-code--close-posted)))
+      (should (equal (sort closed #'<) '(1 2))))))
 
 (ert-deftest claude-code-test-status-message ()
   "A report Claude sent without a message is described by its state.
@@ -4146,6 +4213,7 @@ The name is given as several words to show that it reaches the CLI whole."
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))
          (name "emacs integration name")
+         (after-focus-change-function after-focus-change-function)
          buffer id pid mcp-port)
     (unwind-protect
         (claude-code-tests--with-top-level-env
