@@ -746,6 +746,25 @@ when nothing but the indicator is left, like `ghostel-buffer-name-by-title'."
       (unless (string= "" clean)
         (format "*claude: %s*" clean)))))
 
+(defvar-local claude-code--names-held nil
+  "Names this instance buffer has held, newest first, as (NAME . SINCE).
+SINCE is the `float-time' at which NAME was taken.  Kept from the mode's entry
+by `claude-code--record-name', so the name held at any instant since can be
+looked up (`claude-code--name-at').")
+
+(defun claude-code--record-name ()
+  "Log the current buffer's name in `claude-code--names-held' when it changed.
+A buffer-local `buffer-list-update-hook' entry: `rename-buffer' runs the hook
+in the renamed buffer with the new name in place.  The hook also runs for a
+buffer created or killed while this one is current, which changes no name."
+  (unless (equal (buffer-name) (caar claude-code--names-held))
+    (push (cons (buffer-name) (float-time)) claude-code--names-held)))
+
+(defun claude-code--name-at (buffer time)
+  "Return the name BUFFER held at TIME, or nil when it did not exist yet."
+  (car (seq-find (lambda (held) (<= (cdr held) time))
+                 (buffer-local-value 'claude-code--names-held buffer))))
+
 (defvar-keymap claude-code-instance-mode-map
   ;; Declared with a parent so `define-derived-mode' does not adopt
   ;; `ghostel-semi-char-mode-map' as one, leaking terminal bindings into copy
@@ -786,6 +805,8 @@ commands act on it.
                           claude-code-instance-mode-map)
                     minor-mode-overriding-map-alist))
   (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name)
+  (claude-code--record-name)
+  (add-hook 'buffer-list-update-hook #'claude-code--record-name nil t)
   (add-hook 'ghostel-program-status-functions #'claude-code--follow-directory
             90 t)
   (setq-local vc-deduce-backend-nonvc-modes t))
@@ -1193,16 +1214,88 @@ work it ends began, or nil when that is unknown."
       (remove-function after-focus-change-function (car claim)))
     (cancel-timer (cdr claim))))
 
+(defun claude-code--display-frames ()
+  "Return the frames a jump may land on: this display's, the selected one first.
+`frame-terminal' groups the frames of one display and leaves out the terminal
+frames of `emacsclient -t'.  A minimized frame counts; an invisible one does
+not, since reaching a window on it would bring the frame back."
+  (let ((here (selected-frame)))
+    (cons here (seq-filter (lambda (frame)
+                             (and (frame-visible-p frame)
+                                  (eq (frame-terminal frame)
+                                      (frame-terminal here))))
+                           (remq here (frame-list))))))
+
+(defun claude-code--tab-shows-p (tab buffer frame)
+  "Non-nil when TAB, a background tab of FRAME, shows BUFFER.
+TAB's window state names its buffers as they were when the tab was left, at
+TAB's time.  Selecting a tab whose window configuration belongs to FRAME puts
+that configuration back, and it holds the buffers themselves, so BUFFER is in
+it if it held a listed name at that time.  Any other tab is rebuilt from the
+state by name, so BUFFER is in it only if it holds a listed name now."
+  (when-let* ((ws (alist-get 'ws tab))
+              (name (let ((wc (alist-get 'wc tab))
+                          (time (alist-get 'time tab)))
+                      (if (and time
+                               (window-configuration-p wc)
+                               (eq (window-configuration-frame wc) frame))
+                          (claude-code--name-at buffer time)
+                        (buffer-name buffer)))))
+    (member name (window-state-buffers ws))))
+
+(defun claude-code--tab-showing (buffer frame)
+  "Return the background tab of FRAME showing BUFFER, or nil.
+When several do, the one left most recently.  The tabs are read off the frame
+parameter: `tab-bar-tabs' on a frame other than the selected one renames that
+frame's current tab after the selected frame's buffer."
+  (car (sort (seq-filter (lambda (tab)
+                           (claude-code--tab-shows-p tab buffer frame))
+                         (frame-parameter frame 'tabs))
+             :key (lambda (tab) (alist-get 'time tab 0))
+             :reverse t)))
+
+(defun claude-code--instance-place (buffer)
+  "Return where BUFFER is displayed: a window, (FRAME . TAB), or nil.
+A live window on any frame of the display outranks every background tab:
+restoring a tab would show the instance a second time, and Ghostel sizes the
+pty to the smallest window showing it.  The selected frame is searched first."
+  (let ((frames (claude-code--display-frames)))
+    (or (seq-some (lambda (frame) (get-buffer-window buffer frame)) frames)
+        (seq-some (lambda (frame)
+                    (when-let* ((tab (claude-code--tab-showing buffer frame)))
+                      (cons frame tab)))
+                  frames))))
+
+(defun claude-code--jump-to (buffer)
+  "Select a window showing BUFFER, in whatever tab and frame, or pop it up.
+An instance shown nowhere -- or a tab that turns out not to show it -- is
+displayed with `pop-to-buffer', deliberately not `claude-code--show': a
+notification is no reason to take a sessions view's window."
+  (pcase (claude-code--instance-place buffer)
+    ((and (pred windowp) window)
+     (unless (eq (window-frame window) (selected-frame))
+       (select-frame-set-input-focus (window-frame window)))
+     (select-window window))
+    (`(,frame . ,tab)
+     (unless (eq frame (selected-frame))
+       (select-frame-set-input-focus frame))
+     ;; Numbered as `tab-bar-select-tab' counts, through `tab-bar-tabs-function'.
+     (when-let* ((index (seq-position (funcall tab-bar-tabs-function) tab #'eq)))
+       (let ((inhibit-message t))
+         (tab-bar-select-tab (1+ index))))
+     (if-let* ((window (get-buffer-window buffer)))
+         (select-window window)
+       (pop-to-buffer buffer)))
+    (_ (pop-to-buffer buffer))))
+
 (defun claude-code--notify-show (id)
   "Display managed instance ID, resolved now rather than when it announced.
-The display runs from a timer so that it does not
-rearrange windows inside the D-Bus handler or focus hook that asked for it, and
-deliberately not through `claude-code--show': a notification is no reason to
-take a sessions view's window."
+The display runs from a timer so that it does not rearrange windows inside
+the D-Bus handler or focus hook that asked for it."
   (run-at-time 0 nil
                (lambda ()
                  (when-let* ((buffer (claude-code--managed-buffer id)))
-                   (pop-to-buffer buffer)))))
+                   (claude-code--jump-to buffer)))))
 
 (defun claude-code--notify-follow (id)
   "Display instance ID if the notification announcing it was the one clicked.

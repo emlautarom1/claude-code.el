@@ -1228,6 +1228,32 @@ Worktree column shows -- and the root otherwise."
     (should (eq ghostel-buffer-name-function
                 #'claude-code--ghostel-buffer-name))))
 
+(ert-deftest claude-code-test-instance-mode-logs-the-names-it-holds ()
+  "An instance buffer records each name it takes, and when it took it.
+`rename-buffer' runs the buffer's `buffer-list-update-hook'.  So does a buffer
+created while the instance is current, which logs nothing: the name stands."
+  (let ((now 100.0)
+        (buf (generate-new-buffer " *cc-seed*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+          (with-current-buffer buf
+            (claude-code-instance-mode)
+            (setq now 101.0)
+            (kill-buffer (generate-new-buffer " *cc-noise*"))
+            (setq now 102.0)
+            (rename-buffer " *cc-startup*")
+            (setq now 103.0)
+            (rename-buffer " *cc-topic*")
+            (should (equal claude-code--names-held
+                           '((" *cc-topic*" . 103.0)
+                             (" *cc-startup*" . 102.0)
+                             (" *cc-seed*" . 100.0)))))
+          (should-not (claude-code--name-at buf 99.0))
+          (should (equal (claude-code--name-at buf 100.0) " *cc-seed*"))
+          (should (equal (claude-code--name-at buf 102.5) " *cc-startup*"))
+          (should (equal (claude-code--name-at buf 104.0) " *cc-topic*")))
+      (kill-buffer buf))))
+
 (ert-deftest claude-code-test-instance-mode-leaves-ghostel-the-local-map ()
   "The mode's own bindings sit above Ghostel's map rather than replacing it.
 A binding is checked by what it resolves to, not by the shape of the alist
@@ -2228,6 +2254,137 @@ Every other notify test stubs `pop-to-buffer' -- which `claude-code--show' calls
           (claude-code--notify-show "id-1")
           (funcall (claude-code-tests--thunk-at log 0))))
       (should (equal calls (list (list 'pop buf)))))))
+
+(defmacro claude-code-tests--jumping (var popped &rest body)
+  "Run BODY with VAR bound to an instance buffer and `pop-to-buffer' stubbed.
+The stub pushes its buffer onto POPPED.  Tabs are real tab-bar tabs on the
+one batch frame: the frame's windows, its tab list and `tab-bar-mode', which
+the first tab turns on, are put back afterwards, and VAR is killed."
+  (declare (indent 2))
+  (let ((tabs (gensym "tabs"))
+        (mode (gensym "mode")))
+    `(save-window-excursion
+       (let ((,tabs (frame-parameter nil 'tabs))
+             (,mode tab-bar-mode)
+             (,var (generate-new-buffer " *cc-instance*"))
+             (,popped '()))
+         (unwind-protect
+             (cl-letf (((symbol-function 'pop-to-buffer)
+                        (lambda (b &rest _) (push b ,popped))))
+               (with-current-buffer ,var (claude-code-instance-mode))
+               (delete-other-windows)
+               ,@body)
+           (set-frame-parameter nil 'tabs ,tabs)
+           (tab-bar-mode (if ,mode 1 -1))
+           (kill-buffer ,var))))))
+
+(defun claude-code-tests--current-tab-index ()
+  "Return the 0-based index of the frame's current tab."
+  (cl-position 'current-tab (frame-parameter nil 'tabs) :key #'car))
+
+(ert-deftest claude-code-test-display-frames ()
+  "The frames a jump may land on: this display's visible ones, the selected first.
+Symbols stand in for frames, since batch Emacs cannot make a second one."
+  (cl-letf (((symbol-function 'selected-frame) (lambda () 'b))
+            ((symbol-function 'frame-list) (lambda () '(a b c d)))
+            ((symbol-function 'frame-terminal)
+             (lambda (frame) (if (eq frame 'c) 'tty 'display)))
+            ((symbol-function 'frame-visible-p)
+             (lambda (frame) (if (eq frame 'd) nil 'icon))))
+    (should (equal (claude-code--display-frames) '(b a)))))
+
+(ert-deftest claude-code-test-jump-selects-a-window-already-showing-the-instance ()
+  "A live window showing the instance is selected, over any background tab.
+Restoring the tab would show the instance a second time, and Ghostel sizes the
+pty to the smallest window showing it."
+  (claude-code-tests--jumping buf popped
+    (switch-to-buffer buf)
+    (tab-bar-new-tab)
+    (let ((other (split-window)))
+      (set-window-buffer other buf)
+      (switch-to-buffer (get-scratch-buffer-create))
+      (claude-code--jump-to buf)
+      (should (eq (selected-window) other))
+      (should (eql (claude-code-tests--current-tab-index) 1))
+      (should (null popped)))))
+
+(ert-deftest claude-code-test-jump-restores-the-tab-that-showed-the-instance ()
+  "A background tab is matched by the name the instance held when it was left.
+The tab's window state names buffers as of then.  The instance has been
+retitled since, and its old name has passed to a newer instance -- which is
+not sent to the tab, since it did not exist when the tab was left."
+  (claude-code-tests--jumping buf popped
+    (switch-to-buffer buf)
+    (tab-bar-new-tab)
+    (switch-to-buffer (get-scratch-buffer-create))
+    (with-current-buffer buf (rename-buffer " *cc-topic*"))
+    (let ((decoy (generate-new-buffer " *cc-instance*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer decoy (claude-code-instance-mode))
+            (claude-code--jump-to decoy)
+            (should (equal popped (list decoy)))
+            (should (eql (claude-code-tests--current-tab-index) 1))
+            (claude-code--jump-to buf)
+            (should (eq (window-buffer (selected-window)) buf))
+            (should (eql (claude-code-tests--current-tab-index) 0))
+            (should (equal popped (list decoy))))
+        (kill-buffer decoy)))))
+
+(ert-deftest claude-code-test-jump-prefers-the-tab-left-most-recently ()
+  "Of several background tabs showing the instance, the one left last is taken."
+  (claude-code-tests--jumping buf popped
+    (switch-to-buffer buf)
+    (tab-bar-new-tab)
+    (tab-bar-new-tab)
+    (switch-to-buffer (get-scratch-buffer-create))
+    (claude-code--jump-to buf)
+    (should (eq (window-buffer (selected-window)) buf))
+    (should (eql (claude-code-tests--current-tab-index) 1))
+    (should (null popped))))
+
+(ert-deftest claude-code-test-jump-matches-a-restored-tab-by-its-current-name ()
+  "A tab without a configuration of this frame is rebuilt from its state, by name.
+That is a tab moved from another frame or brought back by `desktop-save-mode'.
+It shows the instance only while the instance holds the name listed, so a
+renamed instance is popped up instead, and one renamed back is found."
+  (claude-code-tests--jumping buf popped
+    (switch-to-buffer buf)
+    (tab-bar-new-tab)
+    (switch-to-buffer (get-scratch-buffer-create))
+    (let ((tab (car (frame-parameter nil 'tabs))))
+      (setcdr tab (assq-delete-all 'wc (cdr tab))))
+    (with-current-buffer buf (rename-buffer " *cc-topic*"))
+    (claude-code--jump-to buf)
+    (should (equal popped (list buf)))
+    (should (eql (claude-code-tests--current-tab-index) 1))
+    (with-current-buffer buf (rename-buffer " *cc-instance*"))
+    (claude-code--jump-to buf)
+    (should (eq (window-buffer (selected-window)) buf))
+    (should (eql (claude-code-tests--current-tab-index) 0))
+    (should (equal popped (list buf)))))
+
+(ert-deftest claude-code-test-jump-pops-up-when-the-tab-shows-nothing ()
+  "A tab selected and found not to show the instance ends in the pop-up."
+  (claude-code-tests--jumping buf popped
+    (switch-to-buffer buf)
+    (tab-bar-new-tab)
+    (switch-to-buffer (get-scratch-buffer-create))
+    (cl-letf (((symbol-function 'tab-bar-select-tab) #'ignore))
+      (claude-code--jump-to buf))
+    (should (equal popped (list buf)))))
+
+(ert-deftest claude-code-test-jump-focuses-the-frame-first ()
+  "A place on another frame is reached by focusing that frame before anything."
+  (claude-code-tests--jumping buf popped
+    (let ((focused '()))
+      (cl-letf (((symbol-function 'claude-code--instance-place)
+                 (lambda (_buffer) (list 'elsewhere)))
+                ((symbol-function 'select-frame-set-input-focus)
+                 (lambda (frame &rest _) (push frame focused))))
+        (claude-code--jump-to buf))
+      (should (equal focused '(elsewhere)))
+      (should (equal popped (list buf))))))
 
 (ert-deftest claude-code-test-notify-follow-leaves-a-dismissal-alone ()
   "Waving a notification away never rearranges windows.
