@@ -1455,7 +1455,7 @@ splits out by status, and only when grouping by status."
 MARKED is how many of those rows are marked; a collapsed group reports it,
 standing in for the `*' tags it is not showing."
   (propertize (format "%s %s (%d%s)"
-                      (if collapsed "▸" "▾") (capitalize key) count
+                      (if collapsed ">" "v") (capitalize key) count
                       (if (> marked 0) (format ", %d marked" marked) ""))
               'claude-code-group key 'face 'bold))
 

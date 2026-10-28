@@ -3777,22 +3777,22 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
     (setq claude-code--collapsed nil)
     (claude-code-sessions-refresh)
     (claude-code--goto-group "dead")
-    (should (string-match-p "▾ Dead (6)$" (thing-at-point 'line t)))
+    (should (string-match-p "^v Dead (6)$" (thing-at-point 'line t)))
     ;; `m' advances, so this marks two of the six dead rows.
     (forward-line 1)
     (claude-code-sessions-mark)
     (claude-code-sessions-mark)
     (claude-code--goto-group "dead")
     ;; Their tags are on screen, so the header adds nothing.
-    (should (string-match-p "▾ Dead (6)$" (thing-at-point 'line t)))
+    (should (string-match-p "^v Dead (6)$" (thing-at-point 'line t)))
     (claude-code-sessions-toggle-group)
     (should (member "dead" claude-code--collapsed))
     (should (equal 2 (length claude-code--marks)))
     (should (null (claude-code-tests--tagged-ids)))
-    (should (string-match-p "▸ Dead (6, 2 marked)$" (thing-at-point 'line t)))
+    (should (string-match-p "^> Dead (6, 2 marked)$" (thing-at-point 'line t)))
     ;; Unfolding hands the rows back their tags.
     (claude-code-sessions-toggle-group)
-    (should (string-match-p "▾ Dead (6)$" (thing-at-point 'line t)))
+    (should (string-match-p "^v Dead (6)$" (thing-at-point 'line t)))
     (should (equal 2 (length (claude-code-tests--tagged-ids))))))
 
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()
