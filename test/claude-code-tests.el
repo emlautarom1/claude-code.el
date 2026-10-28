@@ -4734,5 +4734,35 @@ where a typed RET would be taken as a newline.  No model turn is spent."
           (when (file-exists-p f) (delete-file f))
           (when (file-directory-p own) (delete-directory own t)))))))
 
+(ert-deftest claude-code-test-integration-export-transcript ()
+  "A real CLI exports a transcript's whole conversation, in order.
+The fixture chains its messages by uuid, as Claude writes them; the CLI
+follows that chain, so without it only the last message would export.  The
+export's config dir holds no sessions/ entry once it has ended."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (let* ((id "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+         (root (file-truename (make-temp-file "cc-export" t)))
+         (claude-code-export-config-dir (expand-file-name "config/" root))
+         (session (claude-code-session--create
+                   :id id
+                   :transcript (expand-file-name (concat "export/" id ".jsonl")
+                                                 claude-code-tests--fixtures))))
+    (unwind-protect
+        (claude-code-tests--with-top-level-env
+          (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
+            (should (eq (process-status proc) 'exit))
+            (should (= (process-exit-status proc) 0))
+            (should (= (length calls) 1))
+            (should (eq (car (car calls)) 'text))
+            (let ((text (cadr (car calls))) (pos 0))
+              (dolist (part '("say ok" "ok" "now tell me why" "Because you asked."))
+                (setq pos (string-search part text pos))
+                (should pos)
+                (cl-incf pos (length part))))
+            (should-not (directory-files
+                         (expand-file-name "sessions" claude-code-export-config-dir)
+                         nil "\\.json\\'"))))
+      (delete-directory root t))))
+
 (provide 'claude-code-tests)
 ;;; claude-code-tests.el ends here
