@@ -1122,7 +1122,7 @@ and no raise had to be waited for.")
   "Non-nil when FRAME is on screen and holds input focus.
 An `unknown' focus state is not focus.  Visibility is asked for separately
 because a minimized frame keeps whatever `last-focus-update' it was left with."
-  (and (frame-visible-p frame) (eq (frame-focus-state frame) t)))
+  (and (eq (frame-visible-p frame) t) (eq (frame-focus-state frame) t)))
 
 (defun claude-code--focused-p ()
   "Non-nil when any frame has input focus.

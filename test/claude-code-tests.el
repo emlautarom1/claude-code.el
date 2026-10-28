@@ -2215,8 +2215,11 @@ duration names no unit past its last non-zero one."
       (should-not (claude-code--frame-focused-p 'f))
       (setf (alist-get 'f state) nil)
       (should-not (claude-code--frame-focused-p 'f))
-      ;; Minimized while the window manager owed it a focus-out.
+      ;; Minimized while the window manager owed it a focus-out, and made
+      ;; invisible.
       (setf (alist-get 'f state) t)
+      (setf (alist-get 'f visible) 'icon)
+      (should-not (claude-code--frame-focused-p 'f))
       (setf (alist-get 'f visible) nil)
       (should-not (claude-code--frame-focused-p 'f)))))
 
