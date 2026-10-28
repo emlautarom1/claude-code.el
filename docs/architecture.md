@@ -1,9 +1,11 @@
 # Architecture
 
-The package is two files. `claude-code.el` is the core, organized as five layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
+The package is two files. `claude-code.el` is the core, organized as six layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
 
 ```
 Storage adapter   ~/.claude parsing + cwd encoding   (Claude internals live here)
+        │  returns plain data
+Ghostel adapter   an instance's program status records
         │  returns plain data
 Model             claude-code-session structs, the sessions query, process usage
         │  structs only
@@ -22,11 +24,13 @@ Every fundamental capability is a plain function usable from Elisp without the U
 
 All knowledge of Claude's on-disk formats is quarantined in the *Storage adapter* section (see [`storage-model.md`](storage-model.md)). It exposes only plain data — hashes and plists — so a format change is a single-section fix and never ripples through the model, operations, or view.
 
+The *Ghostel adapter* section holds the reads of the program status records Ghostel keeps for an instance; the status hooks receive those records from Ghostel as they change.
+
 ## The session model
 
 `claude-code-session` is a `cl-defstruct` describing a session. `claude-code-project-sessions PROJECT-ROOT` builds the list, and every row falls into one of three liveness states (`claude-code--session-liveness`):
 
-- **Alive** = one entry per live *managed* instance (`claude-code--managed` registry ∩ live Ghostel process), keyed by the UUID we assigned at spawn. Status comes from the live `sessions/*.json` entry; title/last-prompt (and hence the display name) from the transcript.
+- **Alive** = one entry per live *managed* instance (`claude-code--managed` registry ∩ live Ghostel process), keyed by the UUID we assigned at spawn. Status comes from the live `sessions/*.json` entry; the [status modifier](glossary.md) from the root record Ghostel keeps for the instance, read when the struct is built; title/last-prompt (and hence the display name) from the transcript.
 - **External** = a transcript for the project that is *not* an Emacs-managed instance but whose `sessions/*.json` PID is still alive — i.e. a `claude` running the session in some other terminal. It is flagged `external-p`, and it gets its own group in the view. It is deliberately **not** called "dead": a process is handling it. Resume and delete both refuse it **in the model**, so a headless caller cannot attach a second process to it either, and both check by **id** through `claude-code--external-p`, not only the flag on a struct.
 - **Dead** = every remaining transcript — no process, inside or outside Emacs, is running it. Only dead sessions can be resumed or deleted.
 

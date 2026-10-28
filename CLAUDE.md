@@ -31,6 +31,7 @@ model: `docs/glossary.md`, `docs/storage-model.md`, `docs/architecture.md`.
   internals and version-volatile — keep them quarantined and documented in
   `docs/storage-model.md`. The rest of the code speaks only
   `claude-code-session` structs.
+- **Ghostel adapter.** Reads of the program status records Ghostel keeps for an instance go through the "Ghostel adapter" section.
 - **MCP tool documentation.** What one tool does — its arguments, what it
   returns, what it deliberately does not do — belongs in `docs/mcp-tools.md`
   and nowhere else. `docs/architecture.md` covers the server's design and the

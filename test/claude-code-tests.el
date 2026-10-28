@@ -64,12 +64,15 @@ Instances a test registers are therefore invisible to every other test."
 
 (defmacro claude-code-tests--with-managed-buffer (var &rest body)
   "Run BODY with VAR bound to a fresh buffer and an empty managed registry.
-The buffer carries `ghostel--pid' 4242, as a Ghostel terminal would.  It is
-killed afterwards even when BODY already killed it."
+The buffer carries `ghostel--pid' 4242 and no program status record, as a
+Ghostel terminal would.  It is killed afterwards even when BODY already killed
+it."
   (declare (indent 1))
   `(claude-code-tests--with-registry
      (let ((,var (generate-new-buffer " *cc-test*")))
-       (with-current-buffer ,var (setq-local ghostel--pid 4242))
+       (with-current-buffer ,var
+         (setq-local ghostel--pid 4242
+                     ghostel-program-status nil))
        (unwind-protect (progn ,@body)
          (when (buffer-live-p ,var) (kill-buffer ,var))))))
 
@@ -860,6 +863,39 @@ carries no name, so it stays blank."
                            "Understand the project layout"))
             (should (equal (claude-code--session-display-name s1)
                            "Understand the project layout"))))))))
+
+(ert-deftest claude-code-test-sessions-carry-the-status-modifier ()
+  "An alive session's modifier is its root record's `done' or `error'.
+It lasts exactly as long as the record: any other state, or no record once
+Ghostel dropped it on input, leaves none, and a subagent's record never
+counts.  A session Emacs does not run has no record to read."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer buf
+      (let ((id "11111111-1111-4111-8111-111111111111"))
+        (claude-code--register id buf "/home/test/proj" nil)
+        (cl-letf (((symbol-function 'claude-code--session-process)
+                   (lambda (b) (eq b buf))))
+          (pcase-dolist (`(,records ,modifier ,message)
+                         '(((("" :state done)) done nil)
+                           ((("" :state done :msg "m")) done "m")
+                           ((("" :state error :msg "There's an issue"))
+                            error "There's an issue")
+                           ((("" :state working)) nil nil)
+                           ((("" :state blocked :kind permission :msg "approve"))
+                            nil nil)
+                           ((("" :state idle)) nil nil)
+                           (nil nil nil)
+                           ((("a93609d08ab42add7" :state error :msg "sub")
+                             ("" :state working))
+                            nil nil)))
+            (with-current-buffer buf (setq ghostel-program-status records))
+            (dolist (s (claude-code-project-sessions "/home/test/proj"))
+              (if (equal (claude-code-session-id s) id)
+                  (progn
+                    (should (eq (claude-code-session-modifier s) modifier))
+                    (should (equal (claude-code-session-modifier-message s)
+                                   message)))
+                (should-not (claude-code-session-modifier s))))))))))
 
 (ert-deftest claude-code-test-sessions-alive-from-another-root ()
   "Aliveness is keyed by session id, not by the root the query used.

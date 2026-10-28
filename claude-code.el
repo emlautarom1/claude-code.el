@@ -20,7 +20,8 @@
 ;; `claude-code-session' structs) and a view layer.  All knowledge of the
 ;; on-disk `~/.claude' layout is confined to the "Storage adapter" section;
 ;; those formats are Claude internals and are documented in
-;; docs/storage-model.md.
+;; docs/storage-model.md.  Reads of the status records Ghostel keeps for an
+;; instance are kept in the "Ghostel adapter" section.
 
 ;;; Code:
 
@@ -381,6 +382,21 @@ and never leaves this function.  The worktree a session runs in is
     (nreverse result)))
 
 
+;;;; Ghostel adapter
+;;
+;; Reads of the program status records Ghostel keeps for an instance's terminal,
+;; decoded from the OSC 7501 reports Claude sends.  Their layout is Ghostel's,
+;; described under `ghostel-program-status-functions'.
+
+(defun claude-code--root-status (buffer)
+  "Return the root program status of BUFFER's terminal as (STATE . MSG), or nil.
+The root record speaks for the session; the others are its subagents.  MSG is
+nil when Claude sent none."
+  (when-let* ((record (cdr (assoc "" (buffer-local-value 'ghostel-program-status
+                                                         buffer)))))
+    (cons (plist-get record :state) (plist-get record :msg))))
+
+
 ;;;; Model
 ;;
 ;; The rest of the package works with `claude-code-session' structs produced by
@@ -393,7 +409,9 @@ and never leaves this function.  The worktree a session runs in is
 ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live instance,
 in which case BUFFER holds the Ghostel buffer and PID its child process.  STATUS
 is Claude's native `busy'/`idle'/`waiting' string (alive sessions only), with
-WAITING-FOR set while waiting.  EXTERNAL-P flags a session whose process is
+WAITING-FOR set while waiting.  MODIFIER is the instance's root program
+status state when that is `done' or `error', with MODIFIER-MESSAGE Claude's
+message for it, if any.  EXTERNAL-P flags a session whose process is
 running outside Emacs, so it must not be resumed or deleted.  TITLE and
 LAST-PROMPT come from the transcript and, via
 `claude-code--session-display-name', are the session's only display-name
@@ -405,8 +423,9 @@ none.
 TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
 session's last genuine activity, taken from the newest timestamped transcript
 line."
-  id status waiting-for alive-p pid buffer worktree worktree-binding
-  title last-prompt recap transcript external-p last-active)
+  id status waiting-for modifier modifier-message alive-p pid buffer
+  worktree worktree-binding title last-prompt recap transcript external-p
+  last-active)
 
 (defvar claude-code--managed (make-hash-table :test 'equal)
   "Hash of session id -> plist describing an Emacs-managed instance.
@@ -530,13 +549,17 @@ LIVE is a pre-parsed `claude-code--live-status-table' supplying the instance's
 native status, and TR its `claude-code--project-transcripts' descriptor.  TR's
 worktree is authoritative when TR exists, including when it is nil; the
 registry stands in only for a session with no transcript yet."
-  (let ((info (claude-code--live-info id live)))
+  (let* ((info (claude-code--live-info id live))
+         (root (claude-code--root-status buffer))
+         (modifier (car (memq (car root) '(done error)))))
     (apply #'claude-code-session--create
            :id id :alive-p t :buffer buffer
            :pid (and (buffer-live-p buffer)
                      (buffer-local-value 'ghostel--pid buffer))
            :status (plist-get info :status)
            :waiting-for (plist-get info :waiting-for)
+           :modifier modifier
+           :modifier-message (and modifier (cdr root))
            (claude-code--transcript-session-args
             tr (unless tr (gethash id claude-code--managed))))))
 
@@ -1191,7 +1214,7 @@ neither ends the stretch of work nor announces anything."
         (unless (eq state 'blocked)
           (setq claude-code--working-since nil))
         (claude-code--notify
-         id (or (plist-get (cdr (assoc "" ghostel-program-status)) :msg)
+         id (or (cdr (claude-code--root-status buffer))
                 (claude-code--status-message state since reported)))))))
 
 (defun claude-code--status-message (state since reported)
