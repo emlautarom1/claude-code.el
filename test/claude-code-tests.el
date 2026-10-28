@@ -2386,6 +2386,35 @@ leaves a banner that asks for nothing."
           (should (equal closed '(7)))
           (should (null claude-code--posted)))))))
 
+(ert-deftest claude-code-test-on-status-heeds-reports-inside-its-close ()
+  "A report arriving while a state change's close waits on D-Bus is not lost.
+Process filters still run during that wait, so the root can move on before
+the change that closed the notification returns.  Only the state it ends up
+in is announced, and only once."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((log '()) (seen '()) (now 1000.0) (shell nil) (inside nil))
+      (claude-code-tests--announcing buf shell seen
+        (claude-code-tests--reporting buf log now
+          (cl-letf (((symbol-function 'notifications-close-notification)
+                     (lambda (&rest _)
+                       (dolist (state (prog1 inside (setq inside nil)))
+                         (claude-code-tests--status buf state)))))
+            (claude-code-tests--status buf 'working)
+            (claude-code-tests--status buf 'blocked :kind 'permission)
+            ;; The instance is back at work before `done' closes the banner.
+            (setq claude-code--posted (list 7) inside '(working))
+            (claude-code-tests--status buf 'done)
+            (mapc #'funcall (claude-code-tests--live-timers log))
+            (should (null seen))
+            (should (= claude-code--working-since 1000.0))
+            ;; It works through a whole turn inside the close.
+            (setq log '())
+            (claude-code-tests--status buf 'blocked :kind 'permission)
+            (setq claude-code--posted (list 8) inside '(working done))
+            (claude-code-tests--status buf 'done)
+            (mapc #'funcall (claude-code-tests--live-timers log))
+            (should (equal seen '("Finished")))))))))
+
 (ert-deftest claude-code-test-seeing-an-instance-closes-its-notifications ()
   "Notifications close once their instance is on screen, from a timer.
 A burst of window and focus changes schedules one close, which spares the

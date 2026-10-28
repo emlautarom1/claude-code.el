@@ -1353,7 +1353,8 @@ subagents.  A change of the root's state closes the notifications announcing
 the one it left, and entering `done', `blocked' or `error' is announced once
 it has held for `claude-code--notify-settle' seconds.  A stretch of work
 starts when the root sets to work after resting, and ends with an interrupt,
-a record the user acknowledged, or an announced `done' or `error'."
+a record the user acknowledged, or an announced `done' or `error'.  The close
+comes last: it waits on D-Bus, where the next report can run this again."
   (when (string-empty-p record-id)
     (let ((state (plist-get new :state)))
       (unless (eq state (plist-get old :state))
@@ -1363,14 +1364,14 @@ a record the user acknowledged, or an announced `done' or `error'."
           ((or 'idle 'nil) (setq claude-code--working-since nil)))
         (when claude-code--pending
           (cancel-timer claude-code--pending))
-        (claude-code--close-posted)
         (setq claude-code--pending
               (when (memq state '(done blocked error))
                 (let ((reported (float-time)))
                   (run-at-time claude-code--notify-settle nil
                                (lambda ()
                                  (claude-code--announce id state
-                                                        reported))))))))))
+                                                        reported))))))
+        (claude-code--close-posted)))))
 
 (defun claude-code--announce (id state reported)
   "Announce instance ID's root STATE, reported at time REPORTED.
