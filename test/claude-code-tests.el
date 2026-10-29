@@ -5127,9 +5127,7 @@ first of two `/clear's started."
             (clear)
             ;; Claude writes the transcript shortly after the switch.
             (should (claude-code-tests--await
-                     (lambda ()
-                       (claude-code-tests--find-session
-                        (claude-code-project-sessions root) (car ids)))
+                     (lambda () (claude-code--transcript-for root (car ids)))
                      15))
             (clear)
             (pcase-let ((`(,current ,left ,launched) ids))
