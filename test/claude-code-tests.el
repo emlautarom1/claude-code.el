@@ -161,6 +161,14 @@ session external and every other fixture session dead."
       (sleep-for 0.1))
     (funcall pred)))
 
+(defun claude-code-tests--proc-strings (pid file)
+  "Return the NUL-separated strings of `/proc/PID/FILE', or nil if unreadable."
+  (let ((path (format "/proc/%d/%s" pid file)))
+    (when (file-readable-p path)
+      (with-temp-buffer
+        (insert-file-contents-literally path)
+        (split-string (buffer-string) "\0" t)))))
+
 (defun claude-code-tests--goto-session (id)
   "Move point to the row of session ID in the view."
   (claude-code--goto-line-where (lambda () (equal id (tabulated-list-get-id)))))
@@ -4975,14 +4983,8 @@ The name is given as several words to show that it reaches the CLI whole."
                    '("busy" "idle" "waiting")))
           ;; Ghostel ran the pre-spawn hook: the entry the `inline' renderer
           ;; asks for is in the spawned process's own environment.
-          (when (file-readable-p (format "/proc/%d/environ" pid))
-            (should (member "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1"
-                            (split-string
-                             (with-temp-buffer
-                               (insert-file-contents-literally
-                                (format "/proc/%d/environ" pid))
-                               (buffer-string))
-                             "\0" t))))
+          (when-let* ((environ (claude-code-tests--proc-strings pid "environ")))
+            (should (member "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1" environ)))
           ;; The name given at spawn is the name the view shows: the CLI records
           ;; it in the transcript this package takes a session's name from.
           (should (claude-code-tests--await

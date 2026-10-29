@@ -1314,17 +1314,13 @@ An eval from it, in a worktree, sees the worktree as its cwd."
           ;; The token is in the instance's environment, and the command line
           ;; every local user can read carries only the variable's name.
           (let ((token (gethash buffer claude-code--mcp-tokens)))
-            (cl-flet ((proc-strings (file)
-                        (with-temp-buffer
-                          (insert-file-contents-literally
-                           (format "/proc/%d/%s" pid file))
-                          (split-string (buffer-string) "\0" t))))
-              (when (file-readable-p (format "/proc/%d/environ" pid))
-                (should (member (format "%s=%s"
-                                        claude-code--mcp-token-variable token)
-                                (proc-strings "environ")))
-                (should-not (seq-some (lambda (arg) (string-search token arg))
-                                      (proc-strings "cmdline"))))))
+            (when-let* ((environ (claude-code-tests--proc-strings pid "environ")))
+              (should (member (format "%s=%s"
+                                      claude-code--mcp-token-variable token)
+                              environ))
+              (should-not (seq-some (lambda (arg) (string-search token arg))
+                                    (claude-code-tests--proc-strings
+                                     pid "cmdline")))))
           ;; Knowing the port and the PID, which `ps' shows, is not enough.
           (let ((claude-code-mcp-tests--evaluated nil))
             (should (= (claude-code-mcp-tests--status
