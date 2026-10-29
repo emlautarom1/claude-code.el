@@ -47,6 +47,7 @@
 (require 'claude-code)
 (require 'web-server)
 (require 'eieio)
+(require 'hex-util)
 
 
 ;;;; Customization
@@ -496,7 +497,7 @@ Keyed by digest, so a lookup's timing says nothing about a guessed token.")
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (insert-file-contents-literally "/dev/urandom" nil nil 32)
-    (mapconcat (lambda (byte) (format "%02x" byte)) (buffer-string) "")))
+    (encode-hex-string (buffer-string))))
 
 (defun claude-code--mcp-caller (headers)
   "Return the PID of the instance a request with HEADERS comes from, or nil.
