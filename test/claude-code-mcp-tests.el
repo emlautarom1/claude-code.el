@@ -1203,7 +1203,7 @@ Any other token names no instance, so the call is refused before a tool runs."
                    (claude-code-mcp-tests--request
                     "notifications/initialized"))
                   (claude-code-mcp-tests--client-headers "tok"))))
-        (should (string-match-p "\\`HTTP/1\\.[01] 202 " raw))
+        (should (= (claude-code-mcp-tests--status raw) 202))
         (should (equal (claude-code-mcp-tests--raw-body raw) "")))
       ;; tools/list
       (let* ((resp (claude-code-mcp-tests--rpc

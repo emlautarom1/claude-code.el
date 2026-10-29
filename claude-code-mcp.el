@@ -549,9 +549,9 @@ a live managed instance whose token it presents in
   (ws-send process (claude-code--mcp-serialize response))
   (throw 'close-connection nil))
 
-(defun claude-code--mcp-send-empty (process)
-  "Acknowledge a notification on PROCESS with an empty HTTP 202 and close it."
-  (ws-response-header process 202)
+(defun claude-code--mcp-send-status (process code)
+  "Answer on PROCESS with an empty HTTP CODE reply and close it."
+  (ws-response-header process code '("Content-Length" . "0"))
   (throw 'close-connection nil))
 
 (defun claude-code--mcp-forbidden-p (request)
@@ -560,11 +560,10 @@ The `ws-start' matcher tried ahead of every handler."
   (not (claude-code--mcp-authorized-p (ws-headers request))))
 
 (defun claude-code--mcp-forbid (request)
-  "Refuse REQUEST with an empty HTTP 403 and close it.
+  "Refuse REQUEST with an empty HTTP 403.
 Not 401, which sends the CLI looking for an OAuth server to log in to."
   (with-slots (process) request
-    (ws-response-header process 403 '("Content-Length" . "0"))
-    (throw 'close-connection nil)))
+    (claude-code--mcp-send-status process 403)))
 
 (defun claude-code--mcp-handle (request)
   "Handle one MCP HTTP POST REQUEST from the `web-server' transport.
@@ -578,7 +577,7 @@ an empty 202 when there is none (a notification)."
                       (cdr (assoc :CONTENT-LENGTH headers)))))
       (if response
           (claude-code--mcp-send process response)
-        (claude-code--mcp-send-empty process)))))
+        (claude-code--mcp-send-status process 202)))))
 
 (defun claude-code--mcp-handle-get (request)
   "Answer a Streamable-HTTP GET REQUEST on the MCP endpoint with HTTP 405.
@@ -586,8 +585,7 @@ A client MAY open a server-to-client SSE stream with GET; we push no
 server-initiated messages, so the spec requires 405 Method Not Allowed here to
 signal that no stream is offered.  Every JSON-RPC message travels over POST."
   (with-slots (process) request
-    (ws-response-header process 405 '("Content-Length" . "0"))
-    (throw 'close-connection nil)))
+    (claude-code--mcp-send-status process 405)))
 
 (defun claude-code--mcp-ensure-server ()
   "Ensure the MCP server is running and return its port, or nil.
