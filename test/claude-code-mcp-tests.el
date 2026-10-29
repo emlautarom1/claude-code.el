@@ -428,15 +428,14 @@ must not outlive the call: the next one may come from another instance."
        :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
        :handler (lambda () (setq seen claude-code--mcp-session-cwd) "ok"))
       (claude-code-mcp-tests--isolated
-        (claude-code-tests--with-managed-buffer buf
-          (puthash "sess" (list :buffer buf :origin "/home/test/proj")
-                   claude-code--managed)
-          (pcase-dolist (`(,pid . ,cwd) '((4242 . "/home/test/proj")
-                                          (999 . nil)
-                                          (nil . nil)))
-            (setq seen 'unset)
-            (claude-code-mcp-tests--call-tool pid "cc-mcp-test-cwd")
-            (should (equal seen cwd))))))
+        (puthash 4242 (list :buffer nil :origin "/home/test/proj")
+                 claude-code--managed)
+        (pcase-dolist (`(,pid . ,cwd) '((4242 . "/home/test/proj")
+                                        (999 . nil)
+                                        (nil . nil)))
+          (setq seen 'unset)
+          (claude-code-mcp-tests--call-tool pid "cc-mcp-test-cwd")
+          (should (equal seen cwd)))))
     (should (null claude-code--mcp-session-cwd))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-follows-the-instance ()
@@ -444,8 +443,9 @@ must not outlive the call: the next one may come from another instance."
 Its cwd is read off its own sessions/ file, which a `/clear' rewrites under a
 new session id while the PID stays."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-managed-buffer (buf 1003)
-      (puthash "launched" (list :buffer buf :origin "/home/test/proj")
+    (claude-code-tests--with-registry
+      (puthash 1003 (list :buffer nil :origin "/home/test/proj"
+                          :session "launched")
                claude-code--managed)
       (let ((result (alist-get 'result
                                (claude-code-mcp-tests--call-tool
@@ -586,15 +586,14 @@ Nothing of that buffer may be read as source, and its point must not move."
 (ert-deftest claude-code-mcp-test-eval-sees-the-session-directory ()
   "The evaluated form runs in the calling session's own working directory."
   (claude-code-mcp-tests--isolated
-    (claude-code-tests--with-managed-buffer buf
-      (puthash "sess" (list :buffer buf :origin "/home/test/proj")
-               claude-code--managed)
-      (let ((result (alist-get 'result
-                               (claude-code-mcp-tests--call-tool
-                                4242 "eval" (cons 'code "default-directory")))))
-        (should (eq (alist-get 'isError result) :false))
-        (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
-                       "\"/home/test/proj/\""))))))
+    (puthash 4242 (list :buffer nil :origin "/home/test/proj")
+             claude-code--managed)
+    (let ((result (alist-get 'result
+                             (claude-code-mcp-tests--call-tool
+                              4242 "eval" (cons 'code "default-directory")))))
+      (should (eq (alist-get 'isError result) :false))
+      (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
+                     "\"/home/test/proj/\"")))))
 
 ;;;; Pure dispatch: tools/call spawn
 
@@ -603,12 +602,9 @@ Nothing of that buffer may be read as source, and its point must not move."
 EXECS collects the (BUFFER ARGS) of every launch, so a test asserts what
 reached the CLI without a `claude' ever running."
   (declare (indent 2))
-  (let ((caller (gensym "caller")))
-    `(claude-code-mcp-tests--isolated
-       (claude-code-tests--with-managed-buffer ,caller
-         (puthash "caller" (list :buffer ,caller :origin ,cwd)
-                  claude-code--managed)
-         (claude-code-tests--recording-launch ,execs ,@body)))))
+  `(claude-code-mcp-tests--isolated
+     (puthash 4242 (list :buffer nil :origin ,cwd) claude-code--managed)
+     (claude-code-tests--recording-launch ,execs ,@body)))
 
 (defun claude-code-mcp-tests--result-text (response)
   "Return the text payload of RESPONSE's tool result."
@@ -628,7 +624,7 @@ and the id is what the caller has to find the session by afterwards."
         (should (= (length execs) 1))
         ;; The instance was registered under that id, launched from the
         ;; caller's root, and carries the session id on its command line.
-        (should (equal (plist-get (gethash id claude-code--managed) :origin)
+        (should (equal (plist-get (claude-code-tests--entry id) :origin)
                        (claude-code--normalize-root "/home/test/proj")))
         (should (equal (nth 1 (car execs))
                        (list "--session-id" id)))))))
@@ -968,14 +964,13 @@ Any other token is answered as from no instance at all."
        :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
        :handler (lambda () (push claude-code--mcp-session-cwd seen) "ok"))
       (claude-code-mcp-tests--with-server port
-        (claude-code-tests--with-managed-buffer buf
-          (puthash "sess" (list :buffer buf :origin "/home/test/proj")
-                   claude-code--managed)
-          (dolist (token '("4242" "4242x" "x4242" "4242/extra" "sess"))
-            (claude-code-mcp-tests--rpc
-             port token
-             (claude-code-mcp-tests--request
-              "tools/call" 1 (list (cons 'name "cc-mcp-test-cwd"))))))))
+        (puthash 4242 (list :buffer nil :origin "/home/test/proj")
+                 claude-code--managed)
+        (dolist (token '("4242" "4242x" "x4242" "4242/extra" "sess"))
+          (claude-code-mcp-tests--rpc
+           port token
+           (claude-code-mcp-tests--request
+            "tools/call" 1 (list (cons 'name "cc-mcp-test-cwd")))))))
     (should (equal (nreverse seen) '("/home/test/proj" nil nil nil nil)))))
 
 (ert-deftest claude-code-mcp-test-socket-e2e ()

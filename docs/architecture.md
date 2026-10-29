@@ -30,7 +30,7 @@ The *Ghostel adapter* section holds the reads of the program status records Ghos
 
 `claude-code-session` is a `cl-defstruct` describing a session. `claude-code-project-sessions PROJECT-ROOT` builds the list, and every row falls into one of three liveness states (`claude-code--session-liveness`):
 
-- **Alive** = one entry per live *managed* instance (`claude-code--managed` registry ∩ live Ghostel process), keyed by the UUID we assigned at spawn. Status comes from the live `sessions/*.json` entry; the [status modifier](glossary.md) from the root record Ghostel keeps for the instance, read when the struct is built; title/last-prompt (and hence the display name) from the transcript.
+- **Alive** = a session a live *managed* instance runs now (`claude-code--running`): the instance's `sessions/<pid>.json` names it, since `/clear`, `/resume` and `/branch` move an instance onto another session (see [storage model](storage-model.md#running-instances--sessionspidjson)). Status comes from that file; the [status modifier](glossary.md) from the root record Ghostel keeps for the instance, read when the struct is built; title/last-prompt (and hence the display name) from the transcript. Of two instances on one session, the lower PID's is listed.
 - **External** = a transcript for the project that is *not* an Emacs-managed instance but whose `sessions/*.json` PID is still alive — i.e. a `claude` running the session in some other terminal. It is flagged `external-p`, and it gets its own group in the view. It is deliberately **not** called "dead": a process is handling it. Resume and delete both refuse it **in the model**, so a headless caller cannot attach a second process to it either, and both check by **id** through `claude-code--external-p`, not only the flag on a struct.
 - **Dead** = every remaining transcript — no process, inside or outside Emacs, is running it. Only dead sessions can be resumed or deleted.
 
@@ -47,7 +47,7 @@ The struct holds the transcript's raw name sources (the `title` and the last pro
 
 ### Registry lifecycle
 
-`claude-code-spawn` / `claude-code-resume` create a Ghostel buffer and record it in `claude-code--managed`. A spawn generates the session id, so it hands back `(ID . BUFFER)`: the buffer is renamed after Claude's terminal title, leaving the id as the caller's only stable handle on what it just started.
+`claude-code-spawn` / `claude-code-resume` create a Ghostel buffer and record it in `claude-code--managed` under the instance's PID. A spawn generates the session id, so it hands back `(ID . BUFFER)`: the buffer is renamed after Claude's terminal title, leaving the id as the caller's only stable handle on what it just started.
 
 Registering an instance is also what wires up its removal, and it does so by making the instance and its buffer share a lifetime: `claude-code--register` sets `ghostel-kill-buffer-on-exit` buffer-locally, so Ghostel kills the buffer the moment the process exits, whatever the user's global preference. Every way an instance can end therefore passes through `kill-buffer`, and a buffer-local `kill-buffer-hook` (`claude-code--on-buffer-kill`) is the single event that retires the entry — for a process that exited, for `claude-code-kill`, and for a user's own `C-x k` alike. Only the kill that removes the last entry runs `claude-code-last-instance-exit-hook`, whose handlers are individually shielded (see its docstring). Once the entry is gone the session naturally becomes dead on the next query.
 
@@ -139,7 +139,7 @@ The package adds one guard of its own, `claude-code--on-screen-p`: an instance t
 
 Two consequences. An instance permanently on screen — the common code-here, Claude-there split — announces nothing while Emacs holds focus, however far from it the user is working. And the guard runs once, when the announcement fires: a suppressed notification is dropped rather than deferred.
 
-The hand-off is `claude-code-notify-function`, called with the instance's `claude-code-session` and the body above. The struct is built when the notification fires (`claude-code--instance-session`), so a handler gets the name and status the session has *now*, and the whole model with it. Setting the variable to `nil` turns notifications off.
+The hand-off is `claude-code-notify-function`, called with the instance's `claude-code-session` and the body above. The struct is built when the notification fires (`claude-code--instance-session`), so a handler gets the session the instance runs *now*, with its current name and status, and the whole model with it. Setting the variable to `nil` turns notifications off.
 
 The default handler, `claude-code-notify-desktop`, posts a desktop notification titled with the session's display name — which is what tells several instances apart — and jumps to the instance when it is clicked. Everything below is measured against GNOME, the only desktop this is claimed to work on:
 
