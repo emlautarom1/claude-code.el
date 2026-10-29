@@ -585,17 +585,18 @@ registry stands in only for a session with no transcript yet."
             (and root (claude-code--project-transcripts root))))
 
 (defun claude-code--instance-session (buffer)
-  "Return the alive `claude-code-session' for the instance BUFFER hosts.
-It describes the session the instance runs now, its transcript looked up under
-the instance's `claude-code--origin-project', so the struct carries that
-session's name as well as its live status."
+  "Return the alive `claude-code-session' for the instance BUFFER hosts, or nil.
+Nil when BUFFER hosts no instance Emacs manages.  The struct describes the
+session the instance runs now, its transcript looked up under the instance's
+`claude-code--origin-project', so it carries that session's name as well as
+its live status."
   (let* ((pid (claude-code--instance-pid buffer))
-         (info (claude-code--pid-info pid))
-         (entry (claude-code--instance-entry pid info)))
-    (claude-code--alive-session
-     pid info (claude-code--transcript-for
-               (claude-code--origin-project (plist-get entry :origin))
-               (plist-get entry :session)))))
+         (info (claude-code--pid-info pid)))
+    (when-let* ((entry (claude-code--instance-entry pid info)))
+      (claude-code--alive-session
+       pid info (claude-code--transcript-for
+                 (claude-code--origin-project (plist-get entry :origin))
+                 (plist-get entry :session))))))
 
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
@@ -1357,13 +1358,13 @@ instance can sit on a focused frame and an unfocused one at once."
 
 (defun claude-code--notify (buffer body)
   "Announce BODY from BUFFER's instance via `claude-code-notify-function'.
-Silent for an instance that has exited, and for one the user can already see."
-  (when (and claude-code-notify-function
-             (claude-code--session-process buffer)
-             (not (claude-code--on-screen-p buffer)))
-    (funcall claude-code-notify-function
-             (claude-code--instance-session buffer)
-             body)))
+Silent for an instance that has exited or that Emacs does not manage, and for
+one the user can already see."
+  (when-let* (((and claude-code-notify-function
+                    (claude-code--session-process buffer)
+                    (not (claude-code--on-screen-p buffer))))
+              (session (claude-code--instance-session buffer)))
+    (funcall claude-code-notify-function session body)))
 
 (defvar claude-code--notify-settle 0.5
   "Seconds a reported state must hold before it is announced.

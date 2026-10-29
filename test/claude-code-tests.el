@@ -2779,7 +2779,8 @@ parent project lists, so that is where the name is looked up."
                        "Dotted worktree"))))))
 
 (ert-deftest claude-code-test-notify-stays-quiet ()
-  "Nothing is announced with notifications off, after an exit, or on screen."
+  "Nothing is announced with notifications off, after an exit, or on screen.
+Nor is anything from a terminal hosting no instance Emacs manages."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer buf
       (let* ((id "11111111-1111-4111-8111-111111111111")
@@ -2797,6 +2798,13 @@ parent project lists, so that is where the name is looked up."
             ;; An instance whose process has exited.
             (with-temp-buffer
               (claude-code--notify (current-buffer) "Finished after 4m 12s"))
+            (should (= announced 0))
+            ;; A live terminal hosting no instance Emacs manages.
+            (with-temp-buffer
+              (setq-local ghostel--pid 4243)
+              (cl-letf (((symbol-function 'claude-code--session-process)
+                         #'always))
+                (claude-code--notify (current-buffer) "Finished after 4m 12s")))
             (should (= announced 0))
             ;; Notifications turned off entirely.
             (let ((claude-code-notify-function nil))
