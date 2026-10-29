@@ -1975,11 +1975,16 @@ the group's header."
     (claude-code--redraw group)))
 
 (defun claude-code--visit-session (session display)
-  "Show SESSION's instance buffer through DISPLAY, resuming SESSION if it has none."
-  (let ((buffer (claude-code--resume
-                 claude-code--project
-                 (claude-code-session-id session)
-                 (claude-code-session-worktree-binding session))))
+  "Show SESSION's instance buffer through DISPLAY, resuming SESSION if it has none.
+The instance the row was drawn for is shown while it runs, even once a
+`/clear' has moved it onto another session."
+  (let ((buffer (if (claude-code--session-process
+                     (claude-code-session-buffer session))
+                    (claude-code-session-buffer session)
+                  (claude-code--resume
+                   claude-code--project
+                   (claude-code-session-id session)
+                   (claude-code-session-worktree-binding session)))))
     (unless (eq buffer (claude-code-session-buffer session))
       (claude-code--refresh-views))
     (funcall display buffer)))

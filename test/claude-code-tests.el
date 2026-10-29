@@ -3232,7 +3232,7 @@ never hands one to an operation that would only refuse it."
       (should (equal (funcall ids 'dead) '("d"))))))
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
-  "RET displays what `claude-code--resume' returns, whatever the row's liveness.
+  "RET shows a row's running instance, else what `claude-code--resume' returns.
 An external row is refused by the model alone
 \(`claude-code-test-resume-refuses-external')."
   (let* ((binding '(:name "feat" :path "/r/.claude/worktrees/feat" :bound nil))
@@ -3243,6 +3243,8 @@ An external row is refused by the model alone
          (at-point nil) (calls '()))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point))
+              ((symbol-function 'claude-code--session-process)
+               (lambda (b) (eq b 'terminal)))
               ((symbol-function 'claude-code--resume)
                (lambda (root id b)
                  (push (list 'resume root id b) calls) 'terminal))
@@ -3257,13 +3259,14 @@ An external row is refused by the model alone
         ;; A group header (no session at point) toggles.
         (claude-code-sessions-visit)
         (should (equal calls '((toggle))))
-        ;; An alive row gets its own buffer back, so nothing needs a redraw.
+        ;; An alive row shows the instance it was drawn for while that runs,
+        ;; even once a `/clear' has moved it onto another session, and
+        ;; nothing needs a redraw.
         (setq at-point alive calls nil)
         (claude-code-sessions-visit)
-        (should (equal (reverse calls)
-                       '((resume "/r" "a" nil) (show terminal))))
-        ;; A row still drawn alive whose instance has since exited or moved
-        ;; displays what the model returns, and the views catch up.
+        (should (equal calls '((show terminal))))
+        ;; A row still drawn alive whose instance has since exited displays
+        ;; what the model returns, and the views catch up.
         (setq at-point stale calls nil)
         (claude-code-sessions-visit)
         (should (equal (reverse calls)
