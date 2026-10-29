@@ -155,8 +155,6 @@ The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk lay
 
 (plus `--allowedTools` listing every registered tool when auto-approve is on). No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has.
 
-The URL names the instance by its PID, which only the started process knows, so the CLI is launched through `/bin/sh` (`claude-code--pid-exec`): it splices `$$` into `--mcp-config=` and `exec`s the CLI under the same PID.
-
 The one piece of on-disk state the server *reads* is the calling instance's real cwd: `claude-code--instance-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root in the brief window before that file exists.
 
 ## Mapping an Emacs buffer to a session
