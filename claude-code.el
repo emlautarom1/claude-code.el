@@ -574,13 +574,16 @@ registry stands in only for a session with no transcript yet."
   (seq-find (lambda (tr) (equal (plist-get tr :id) id))
             (and root (claude-code--project-transcripts root))))
 
-(defun claude-code--session-by-id (id buffer)
-  "Return the alive `claude-code-session' for managed instance ID in BUFFER.
-Finds the instance's transcript descriptor under the root it was launched
-from, so the struct carries the session's name as well as its live status."
-  (let ((root (plist-get (gethash id claude-code--managed) :origin)))
-    (claude-code--alive-session id buffer (claude-code--live-table)
-                                (claude-code--transcript-for root id))))
+(defun claude-code--instance-session (buffer)
+  "Return the alive `claude-code-session' for the instance BUFFER hosts.
+Its transcript is looked up under the root the instance was launched from, so
+the struct carries the session's name as well as its live status."
+  (cl-loop for id being the hash-keys of claude-code--managed
+           using (hash-values entry)
+           when (eq (plist-get entry :buffer) buffer)
+           return (claude-code--alive-session
+                   id buffer (claude-code--live-table)
+                   (claude-code--transcript-for (plist-get entry :origin) id))))
 
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
@@ -992,7 +995,7 @@ CLI through `claude-code--pid-exec'."
         (set-default 'ghostel-pre-spawn-hook
                      (delq renderer-hook
                            (default-value 'ghostel-pre-spawn-hook)))))
-    (claude-code--install-notifications id buffer)
+    (claude-code--install-notifications buffer)
     (claude-code--register id buffer root (plist-get opts :worktree))
     buffer))
 
@@ -1336,16 +1339,15 @@ instance can sit on a focused frame and an unfocused one at once."
               (claude-code--frame-focused-p (window-frame window)))
             (get-buffer-window-list buffer nil t)))
 
-(defun claude-code--notify (id body)
-  "Announce instance ID's message BODY via `claude-code-notify-function'.
-Silent for an instance that has left the registry, and for one the user can
-already see."
-  (let ((buffer (and claude-code-notify-function
-                     (claude-code--managed-buffer id))))
-    (when (and buffer (not (claude-code--on-screen-p buffer)))
-      (funcall claude-code-notify-function
-               (claude-code--session-by-id id buffer)
-               body))))
+(defun claude-code--notify (buffer body)
+  "Announce BODY from BUFFER's instance via `claude-code-notify-function'.
+Silent for an instance that has exited, and for one the user can already see."
+  (when (and claude-code-notify-function
+             (claude-code--session-process buffer)
+             (not (claude-code--on-screen-p buffer)))
+    (funcall claude-code-notify-function
+             (claude-code--instance-session buffer)
+             body)))
 
 (defvar claude-code--notify-settle 0.5
   "Seconds a reported state must hold before it is announced.
@@ -1358,8 +1360,8 @@ what tells a finished turn from one a background shell command keeps going.")
 (defvar-local claude-code--pending nil
   "The timer announcing the root state of this buffer's instance, or nil.")
 
-(defun claude-code--install-notifications (id buffer)
-  "Announce instance ID from the status reports BUFFER's terminal receives.
+(defun claude-code--install-notifications (buffer)
+  "Announce BUFFER's instance from the status reports its terminal receives.
 Ghostel's own announcement of them and every OSC 9 or OSC 777 notification
 are silenced, while its mode-line indicator stays.  The bindings are
 buffer-local, so Ghostel terminals this package does not manage keep the
@@ -1368,17 +1370,14 @@ instance runs, close the notifications of an instance that comes into sight."
   (with-current-buffer buffer
     (setq-local ghostel-notification-functions nil)
     (setq-local ghostel-status-notify-states nil)
-    (add-hook 'ghostel-program-status-functions
-              (lambda (record-id old new)
-                (claude-code--on-status id record-id old new))
-              nil t)
+    (add-hook 'ghostel-program-status-functions #'claude-code--on-status nil t)
     (add-hook 'window-buffer-change-functions #'claude-code--schedule-seen
               nil t))
   (add-function :after after-focus-change-function
                 #'claude-code--schedule-seen))
 
-(defun claude-code--on-status (id record-id old new)
-  "Track instance ID's status record RECORD-ID changing from OLD to NEW.
+(defun claude-code--on-status (record-id old new)
+  "Track the current buffer's status record RECORD-ID changing from OLD to NEW.
 Only the root record, \"\", speaks for the session; the others are its
 subagents.  A change of the root's state closes the notifications announcing
 the one it left, and entering `done', `blocked' or `error' is announced once
@@ -1396,30 +1395,31 @@ a record the user acknowledged, or an announced `done' or `error'."
           (cancel-timer claude-code--pending))
         (setq claude-code--pending
               (when (memq state '(done blocked error))
-                (let ((reported (float-time)))
+                (let ((buffer (current-buffer))
+                      (reported (float-time)))
                   (run-at-time claude-code--notify-settle nil
                                (lambda ()
-                                 (claude-code--announce id state
+                                 (claude-code--announce buffer state
                                                         reported))))))
         (claude-code--close-posted)))))
 
-(defun claude-code--announce (id state reported)
-  "Announce instance ID's root STATE, reported at time REPORTED.
+(defun claude-code--announce (buffer state reported)
+  "Announce BUFFER's instance entering root STATE, reported at time REPORTED.
 A `done' while a background shell command the instance started still runs is
 a turn the command keeps going -- its completion starts the next one -- so it
 neither ends the stretch of work nor announces anything."
-  (when-let* ((buffer (claude-code--managed-buffer id))
-              ((not (and (eq state 'done)
-                         (plist-get (claude-code--pid-info
-                                     (claude-code--instance-pid buffer))
-                                    :shell-p)))))
+  (when (and (claude-code--session-process buffer)
+             (not (and (eq state 'done)
+                       (plist-get (claude-code--pid-info
+                                   (claude-code--instance-pid buffer))
+                                  :shell-p))))
     (with-current-buffer buffer
       (let ((since claude-code--working-since))
         (unless (eq state 'blocked)
           (setq claude-code--working-since nil))
         (claude-code--notify
-         id (or (cdr (claude-code--root-status buffer))
-                (claude-code--status-message state since reported)))))))
+         buffer (or (cdr (claude-code--root-status buffer))
+                    (claude-code--status-message state since reported)))))))
 
 (defun claude-code--status-message (state since reported)
   "Return the body announcing root STATE, reported at time REPORTED.
@@ -1515,17 +1515,17 @@ notification is no reason to take a sessions view's window."
        (pop-to-buffer buffer)))
     (_ (pop-to-buffer buffer))))
 
-(defun claude-code--notify-show (id)
-  "Display managed instance ID, resolved now rather than when it announced.
+(defun claude-code--notify-show (buffer)
+  "Display the instance BUFFER hosts, unless it has exited by then.
 The display runs from a timer so that it does not rearrange windows inside
 the D-Bus handler or focus hook that asked for it."
   (run-at-time 0 nil
                (lambda ()
-                 (when-let* ((buffer (claude-code--managed-buffer id)))
+                 (when (buffer-live-p buffer)
                    (claude-code--jump-to buffer)))))
 
-(defun claude-code--notify-follow (id)
-  "Display instance ID if the notification announcing it was the one clicked.
+(defun claude-code--notify-follow (buffer)
+  "Display BUFFER's instance if its notification was the one clicked.
 The first close of a burst is the clicked one, and it claims
 `claude-code--notify-activation-window' seconds.  Within that window the
 closes of the notifications dismissed alongside it are ignored, and a raise --
@@ -1537,7 +1537,7 @@ Emacs has no raise coming, so it displays at once."
       (if (claude-code--focused-p)
           (progn
             (setq claude-code--notify-claim (cons nil expiry))
-            (claude-code--notify-show id))
+            (claude-code--notify-show buffer))
         (let (watch)
           ;; Only the watch is dropped once the raise lands; the claim stands
           ;; until it expires, so a close arriving behind the raise is still
@@ -1545,7 +1545,7 @@ Emacs has no raise coming, so it displays at once."
           (setq watch (lambda ()
                         (when (claude-code--focused-p)
                           (remove-function after-focus-change-function watch)
-                          (claude-code--notify-show id))))
+                          (claude-code--notify-show buffer))))
           (setq claude-code--notify-claim (cons watch expiry))
           (add-function :after after-focus-change-function watch))))))
 
@@ -1608,8 +1608,7 @@ The notification declares no actions: a desktop with one to invoke hands the
 click to Emacs instead of raising it, and the raise is what the jump needs.
 It is remembered in SESSION's buffer, for `claude-code--close-posted'."
   (require 'notifications)
-  (let* ((id (claude-code-session-id session))
-         (buffer (claude-code-session-buffer session))
+  (let* ((buffer (claude-code-session-buffer session))
          (live (buffer-live-p buffer))
          (count (and live (buffer-local-value 'claude-code--close-count buffer)))
          (posted
@@ -1624,7 +1623,7 @@ It is remembered in SESSION's buffer, for `claude-code--close-posted'."
                            (setq claude-code--posted
                                  (delq notification claude-code--posted))))
                        (when (eq reason 'dismissed)
-                         (claude-code--notify-follow id))))))
+                         (claude-code--notify-follow buffer))))))
     ;; Posting waits on D-Bus, where the buffer's notifications can be closed,
     ;; or the buffer killed, before this one is up.
     (when live
