@@ -207,8 +207,8 @@ every buffer a launch hosted is killed afterwards, however BODY exits."
        (claude-code-tests--without-requiring '(ghostel claude-code-mcp)
          (cl-letf ((after-focus-change-function after-focus-change-function)
                    ((symbol-function 'claude-code--mcp-cli-args) #'ignore)
-                   ((symbol-function 'claude-code--cli-program)
-                    (lambda () claude-code-cli))
+                   ((symbol-function 'ghostel--resolve-local-executable)
+                    #'identity)
                    ((symbol-function 'ghostel-exec)
                     (lambda (buffer program args)
                       (push buffer ,hosted)
@@ -1371,27 +1371,6 @@ in, the CLI is launched directly."
             (should (equal (nth 3 (car execs)) "claude"))
             (should (equal (nth 1 (car execs)) '("--resume=given-id")))))))))
 
-(ert-deftest claude-code-test-cli-program ()
-  "The CLI is found the way Ghostel finds a program, not on the shell's `$PATH'.
-A bare name is searched for on `exec-path', a relative path is taken against
-`default-directory', and a CLI that is not there is an error."
-  (let* ((dir (make-temp-file "cc-bin" t))
-         (cli (expand-file-name "fakeclaude" dir)))
-    (unwind-protect
-        (progn
-          (with-temp-file cli (insert "#!/bin/sh\n"))
-          (set-file-modes cli #o755)
-          (let ((exec-path (list dir))
-                (claude-code-cli "fakeclaude"))
-            (should (equal (claude-code--cli-program) cli)))
-          (let ((default-directory (file-name-as-directory dir))
-                (claude-code-cli "./fakeclaude"))
-            (should (equal (claude-code--cli-program) cli)))
-          (let ((exec-path (list dir))
-                (claude-code-cli "no-such-claude"))
-            (should-error (claude-code--cli-program) :type 'user-error)))
-      (delete-directory dir t))))
-
 (ert-deftest claude-code-test-launch-refuses-a-missing-cli ()
   "A CLI that cannot be found stops the launch before it starts anything.
 The shell would otherwise exit at once in a buffer that dies with it, leaving
@@ -1403,9 +1382,11 @@ the caller an id for an instance that never ran."
       (claude-code-tests--recording-launch execs
         (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
                    (lambda () (cl-incf mcp-calls) '()))
-                  ((symbol-function 'claude-code--cli-program)
-                   (lambda () (user-error "Cannot find the Claude CLI"))))
-          (should-error (claude-code-spawn "/r") :type 'user-error))
+                  ((symbol-function 'ghostel--resolve-local-executable)
+                   (lambda (program)
+                     (error "Searching for program: No such file or directory, %s"
+                            program))))
+          (should-error (claude-code-spawn "/r")))
         (should (null execs))
         (should (zerop mcp-calls))
         (should-not (seq-difference (buffer-list) buffers))))))

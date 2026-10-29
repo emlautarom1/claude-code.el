@@ -44,6 +44,7 @@
 (declare-function ghostel-paste-string "ghostel" (string))
 (declare-function ghostel-send-C-c "ghostel" ())
 (declare-function ghostel--update-directory "ghostel" (dir))
+(declare-function ghostel--resolve-local-executable "ghostel" (program))
 (defvar ghostel--pid)
 (defvar ghostel--process)
 (defvar ghostel-kill-buffer-on-exit)
@@ -952,17 +953,6 @@ Ghostel binds `process-environment' around the hook."
   (dolist (cell cells)
     (setenv (car cell) (cdr cell))))
 
-(defun claude-code--cli-program ()
-  "Return the absolute path of `claude-code-cli', or signal a `user-error'.
-A bare name is searched for on variable `exec-path' and any other is expanded
-against `default-directory', as Ghostel resolves a program it runs."
-  (let ((program (if (file-name-directory claude-code-cli)
-                     (expand-file-name claude-code-cli)
-                   (executable-find claude-code-cli))))
-    (unless (and program (file-executable-p program))
-      (user-error "Cannot find the Claude CLI `%s'" claude-code-cli))
-    program))
-
 (defconst claude-code--pid-exec "a=$1$$$2; shift 2; exec \"$0\" \"$a\" \"$@\""
   "Script `/bin/sh' runs to hand the CLI its own PID in its first argument.
 Run as `sh -c SCRIPT CLI PREFIX SUFFIX ARGS...', it execs CLI with PREFIX, the
@@ -986,7 +976,9 @@ CLI through `claude-code--pid-exec'."
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
-         (program (claude-code--cli-program))
+         ;; Resolved as Ghostel resolves what it runs, where `/bin/sh' would
+         ;; search `$PATH'.
+         (program (ghostel--resolve-local-executable claude-code-cli))
          (args (append (claude-code--mcp-cli-args)
                        (apply #'claude-code--build-args :session-id id opts)))
          (buffer (generate-new-buffer
