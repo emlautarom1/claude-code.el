@@ -1994,15 +1994,20 @@ the group's header."
 (defun claude-code--visit-session (session display)
   "Show SESSION's instance buffer through DISPLAY, resuming SESSION if it has none.
 The instance the row was drawn for is shown while it runs, even once a
-`/clear' has moved it onto another session."
-  (let ((buffer (if (claude-code--session-process
-                     (claude-code-session-buffer session))
-                    (claude-code-session-buffer session)
-                  (claude-code--resume
-                   claude-code--project
-                   (claude-code-session-id session)
-                   (claude-code-session-worktree-binding session)))))
-    (unless (eq buffer (claude-code-session-buffer session))
+`/clear' has moved it onto another session, which refreshes the views."
+  (let* ((drawn (claude-code-session-buffer session))
+         (pid (claude-code-session-pid session))
+         (buffer (if (claude-code--session-process drawn)
+                     drawn
+                   (claude-code--resume
+                    claude-code--project
+                    (claude-code-session-id session)
+                    (claude-code-session-worktree-binding session)))))
+    (unless (and (eq buffer drawn)
+                 (equal (plist-get (claude-code--instance-entry
+                                    pid (claude-code--pid-info pid))
+                                   :session)
+                        (claude-code-session-id session)))
       (claude-code--refresh-views))
     (funcall display buffer)))
 

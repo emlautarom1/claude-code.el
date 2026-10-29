@@ -3370,7 +3370,10 @@ never hands one to an operation that would only refuse it."
 An external row is refused by the model alone
 \(`claude-code-test-resume-refuses-external')."
   (let* ((binding '(:name "feat" :path "/r/.claude/worktrees/feat" :bound nil))
-         (alive (claude-code-session--create :id "a" :alive-p t :buffer 'terminal))
+         (alive (claude-code-session--create :id "a" :alive-p t :pid 70
+                                             :buffer 'terminal))
+         (moved (claude-code-session--create :id "m" :alive-p t :pid 70
+                                             :buffer 'terminal))
          (stale (claude-code-session--create :id "s" :alive-p t :buffer 'exited))
          (external (claude-code-session--create :id "e" :external-p t))
          (dead (claude-code-session--create :id "d" :worktree-binding binding))
@@ -3388,35 +3391,43 @@ An external row is refused by the model alone
                (lambda () (push '(refresh) calls)))
               ((symbol-function 'claude-code-sessions-toggle-group)
                (lambda () (push '(toggle) calls))))
-      (claude-code-tests--in-view
-        (setq-local claude-code--project "/r")
-        ;; A group header (no session at point) toggles.
-        (claude-code-sessions-visit)
-        (should (equal calls '((toggle))))
-        ;; An alive row shows the instance it was drawn for while that runs,
-        ;; even once a `/clear' has moved it onto another session, and
-        ;; nothing needs a redraw.
-        (setq at-point alive calls nil)
-        (claude-code-sessions-visit)
-        (should (equal calls '((show terminal))))
-        ;; A row still drawn alive whose instance has since exited displays
-        ;; what the model returns, and the views catch up.
-        (setq at-point stale calls nil)
-        (claude-code-sessions-visit)
-        (should (equal (reverse calls)
-                       '((resume "/r" "s" nil) (refresh) (show terminal))))
-        ;; An external row goes to the model like any other.
-        (setq at-point external calls nil)
-        (claude-code-sessions-visit)
-        (should (equal (car (last calls)) '(resume "/r" "e" nil)))
-        ;; A dead row resumes, refreshes and displays.
-        (setq at-point dead calls nil)
-        (claude-code-sessions-visit)
-        (should (equal (reverse calls)
-                       ;; The binding comes off the struct the view already
-                       ;; built, so a resume costs no second read of disk.
-                       (list (list 'resume "/r" "d" binding)
-                             '(refresh) '(show terminal))))))))
+      (claude-code-tests--with-config
+        (claude-code-tests--with-registry
+          (puthash 70 (list :buffer 'terminal :session "a") claude-code--managed)
+          (claude-code-tests--in-view
+            (setq-local claude-code--project "/r")
+            ;; A group header (no session at point) toggles.
+            (claude-code-sessions-visit)
+            (should (equal calls '((toggle))))
+            ;; An alive row shows the instance it was drawn for while that
+            ;; runs, and nothing needs a redraw.
+            (setq at-point alive calls nil)
+            (claude-code-sessions-visit)
+            (should (equal calls '((show terminal))))
+            ;; It still does once a `/clear' has moved the instance onto
+            ;; another session, and the views catch up.
+            (setq at-point moved calls nil)
+            (claude-code-sessions-visit)
+            (should (equal (reverse calls) '((refresh) (show terminal))))
+            ;; A row still drawn alive whose instance has since exited displays
+            ;; what the model returns, and the views catch up.
+            (setq at-point stale calls nil)
+            (claude-code-sessions-visit)
+            (should (equal (reverse calls)
+                           '((resume "/r" "s" nil) (refresh) (show terminal))))
+            ;; An external row goes to the model like any other.
+            (setq at-point external calls nil)
+            (claude-code-sessions-visit)
+            (should (equal (car (last calls)) '(resume "/r" "e" nil)))
+            ;; A dead row resumes, refreshes and displays.
+            (setq at-point dead calls nil)
+            (claude-code-sessions-visit)
+            (should (equal (reverse calls)
+                           ;; The binding comes off the struct the view
+                           ;; already built, so a resume costs no second read
+                           ;; of disk.
+                           (list (list 'resume "/r" "d" binding)
+                                 '(refresh) '(show terminal))))))))))
 
 (ert-deftest claude-code-test-sessions-visit-other-window ()
   "`o' shows the row's buffer in another window; a header line is refused.
