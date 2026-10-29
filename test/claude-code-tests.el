@@ -2374,8 +2374,8 @@ A permission the user granted in the terminal, or a `done' acknowledged there,
 leaves a banner that asks for nothing."
   (claude-code-tests--with-managed-buffer buf
     (let ((log '()) (now 1000.0) (closed '()))
-      (cl-letf (((symbol-function 'notifications-close-notification)
-                 (lambda (id &rest _) (push id closed))))
+      (cl-letf (((symbol-function 'claude-code--close-notification)
+                 (lambda (id) (push id closed))))
         (claude-code-tests--reporting buf log now
           (claude-code-tests--status buf 'blocked :kind 'permission)
           (setq claude-code--posted (list 7))
@@ -2385,35 +2385,6 @@ leaves a banner that asks for nothing."
           (claude-code-tests--status buf 'working)
           (should (equal closed '(7)))
           (should (null claude-code--posted)))))))
-
-(ert-deftest claude-code-test-on-status-heeds-reports-inside-its-close ()
-  "A report arriving while a state change's close waits on D-Bus is not lost.
-Process filters still run during that wait, so the root can move on before
-the change that closed the notification returns.  Only the state it ends up
-in is announced, and only once."
-  (claude-code-tests--with-managed-buffer buf
-    (let ((log '()) (seen '()) (now 1000.0) (shell nil) (inside nil))
-      (claude-code-tests--announcing buf shell seen
-        (claude-code-tests--reporting buf log now
-          (cl-letf (((symbol-function 'notifications-close-notification)
-                     (lambda (&rest _)
-                       (dolist (state (prog1 inside (setq inside nil)))
-                         (claude-code-tests--status buf state)))))
-            (claude-code-tests--status buf 'working)
-            (claude-code-tests--status buf 'blocked :kind 'permission)
-            ;; The instance is back at work before `done' closes the banner.
-            (setq claude-code--posted (list 7) inside '(working))
-            (claude-code-tests--status buf 'done)
-            (mapc #'funcall (claude-code-tests--live-timers log))
-            (should (null seen))
-            (should (= claude-code--working-since 1000.0))
-            ;; It works through a whole turn inside the close.
-            (setq log '())
-            (claude-code-tests--status buf 'blocked :kind 'permission)
-            (setq claude-code--posted (list 8) inside '(working done))
-            (claude-code-tests--status buf 'done)
-            (mapc #'funcall (claude-code-tests--live-timers log))
-            (should (equal seen '("Finished")))))))))
 
 (ert-deftest claude-code-test-seeing-an-instance-closes-its-notifications ()
   "Notifications close once their instance is on screen, from a timer.
@@ -2430,8 +2401,8 @@ instances still out of sight."
         (kill-buffer gone)
         (with-current-buffer seen (setq claude-code--posted (list 1 2)))
         (with-current-buffer hidden (setq claude-code--posted (list 3)))
-        (cl-letf (((symbol-function 'notifications-close-notification)
-                   (lambda (id &rest _) (push id closed)))
+        (cl-letf (((symbol-function 'claude-code--close-notification)
+                   (lambda (id) (push id closed)))
                   ((symbol-function 'claude-code--on-screen-p)
                    (lambda (buffer) (eq buffer seen))))
           (claude-code-tests--capturing-timers log
@@ -2458,20 +2429,24 @@ instances still out of sight."
       (should-not (advice-function-member-p #'claude-code--schedule-seen
                                             after-focus-change-function)))))
 
-(ert-deftest claude-code-test-close-posted-closes-each-once ()
-  "A close run while another waits on D-Bus finds nothing left to close.
-Timers and focus events still run during that wait."
-  (claude-code-tests--with-managed-buffer buf
-    (let ((closed '()))
-      (with-current-buffer buf
-        (setq claude-code--posted (list 1 2))
-        (cl-letf (((symbol-function 'notifications-close-notification)
-                   (lambda (id &rest _)
-                     (push id closed)
-                     (when (= (length closed) 1)
-                       (claude-code--close-posted)))))
-          (claude-code--close-posted)))
-      (should (equal (sort closed #'<) '(1 2))))))
+(ert-deftest claude-code-test-close-notification-does-not-wait ()
+  "A close asks for no answer, so nothing waits on D-Bus for one.
+A close that cannot be sent is only reported."
+  (skip-unless (featurep 'dbusbind))
+  (require 'notifications)
+  (let ((sent '()))
+    (cl-letf (((symbol-function 'dbus-call-method-asynchronously)
+               (lambda (&rest args)
+                 (push args sent)
+                 (signal 'dbus-error '("No connection to bus")))))
+      ;; ERT debugs every error; a session left to run would not.
+      (let ((debug-on-error nil))
+        (claude-code--close-notification 7)))
+    (should (equal sent
+                   `((:session ,notifications-service ,notifications-path
+                      ,notifications-interface
+                      ,notifications-close-notification-method
+                      nil :uint32 7))))))
 
 (ert-deftest claude-code-test-status-message ()
   "A report Claude sent without a message is described by its state.
@@ -2948,17 +2923,14 @@ The follow is handed the session id, so it resolves the instance itself."
 (ert-deftest claude-code-test-notify-desktop-closes-with-the-instance ()
   "Notifications still up when their instance's buffer dies are closed.
 One already closed -- clicked, waved away or expired -- is forgotten as it
-closes, so the kill closes only what is still up.  A close the server
-refuses does not keep the buffer alive."
+closes, so the kill closes only what is still up."
   (claude-code-tests--with-managed-buffer buf
     (let ((posts '())
           (closed '())
           (session (claude-code-session--create :id "id-1" :title "T"
                                                 :buffer buf)))
-      (cl-letf (((symbol-function 'notifications-close-notification)
-                 (lambda (id &rest _)
-                   (push id closed)
-                   (signal 'dbus-error '("No such notification"))))
+      (cl-letf (((symbol-function 'claude-code--close-notification)
+                 (lambda (id) (push id closed)))
                 ((symbol-function 'claude-code--notify-follow) #'ignore))
         (claude-code-tests--recording-notify posts
           (claude-code-notify-desktop session "first")
@@ -2968,9 +2940,7 @@ refuses does not keep the buffer alive."
           (funcall (plist-get (nth 2 posts) :on-close) 1 'dismissed)
           (funcall (plist-get (nth 0 posts) :on-close) 3 'expired)
           (should (null closed))
-          ;; ERT debugs every error; a session left to run would not.
-          (let ((debug-on-error nil))
-            (kill-buffer buf))
+          (kill-buffer buf)
           (should (equal closed '(2)))
           (should-not (buffer-live-p buf)))))))
 
@@ -2978,40 +2948,48 @@ refuses does not keep the buffer alive."
   "A notification its instance is done with before it is up closes once up.
 Posting waits on D-Bus, where a change of the root's state, the instance
 coming into sight and its buffer's kill all close the notifications up for
-it -- which the one being posted is not yet."
+it -- which the one being posted is not yet.  Another instance coming into
+sight leaves it up."
   (claude-code-tests--with-managed-buffer buf
-    (let ((log '()) (now 1000.0) (closed '()) (posted 0) (inside nil)
-          (claude-code--seen-timer nil)
-          (session (claude-code-session--create :id "id-1" :title "T"
-                                                :buffer buf)))
-      (claude-code--register "id-1" buf "/home/test/proj" nil)
-      (cl-letf (((symbol-function 'notifications-notify)
-                 (lambda (&rest _)
-                   (when inside (funcall (prog1 inside (setq inside nil))))
-                   (cl-incf posted)))
-                ((symbol-function 'notifications-close-notification)
-                 (lambda (id &rest _) (push id closed)))
-                ((symbol-function 'claude-code--on-screen-p) #'always))
-        (claude-code-tests--without-requiring '(notifications)
-          (claude-code-tests--reporting buf log now
-            ;; Undisturbed, it is remembered for the close to come.
-            (claude-code-tests--status buf 'done)
-            (claude-code-notify-desktop session "Finished")
-            (should (equal claude-code--posted '(1)))
-            (claude-code-tests--status buf 'working)
-            (should (equal closed '(1)))
-            (claude-code-tests--status buf 'done)
-            (setq inside (lambda () (claude-code-tests--status buf 'working)))
-            (claude-code-notify-desktop session "Finished")
-            (should (equal closed '(2 1)))
-            (should (null claude-code--posted))
-            (setq inside #'claude-code--close-seen)
-            (claude-code-notify-desktop session "Finished")
-            (should (equal closed '(3 2 1)))
-            (should (null claude-code--posted))
-            (setq inside (lambda () (kill-buffer buf)))
-            (claude-code-notify-desktop session "Finished")
-            (should (equal closed '(4 3 2 1)))))))))
+    (claude-code-tests--with-managed-buffer other
+      (let ((log '()) (now 1000.0) (closed '()) (posted 0) (inside nil)
+            (in-sight buf) (claude-code--seen-timer nil)
+            (session (claude-code-session--create :id "id-1" :title "T"
+                                                  :buffer buf)))
+        (claude-code--register "id-1" buf "/home/test/proj" nil)
+        (claude-code--register "id-2" other "/home/test/proj" nil)
+        (cl-letf (((symbol-function 'notifications-notify)
+                   (lambda (&rest _)
+                     (when inside (funcall (prog1 inside (setq inside nil))))
+                     (cl-incf posted)))
+                  ((symbol-function 'claude-code--close-notification)
+                   (lambda (id) (push id closed)))
+                  ((symbol-function 'claude-code--on-screen-p)
+                   (lambda (buffer) (eq buffer in-sight))))
+          (claude-code-tests--without-requiring '(notifications)
+            (claude-code-tests--reporting buf log now
+              ;; Undisturbed, it is remembered for the close to come.
+              (claude-code-tests--status buf 'done)
+              (claude-code-notify-desktop session "Finished")
+              (should (equal claude-code--posted '(1)))
+              (claude-code-tests--status buf 'working)
+              (should (equal closed '(1)))
+              (claude-code-tests--status buf 'done)
+              (setq inside (lambda () (claude-code-tests--status buf 'working)))
+              (claude-code-notify-desktop session "Finished")
+              (should (equal closed '(2 1)))
+              (should (null claude-code--posted))
+              (setq inside #'claude-code--close-seen)
+              (claude-code-notify-desktop session "Finished")
+              (should (equal closed '(3 2 1)))
+              (should (null claude-code--posted))
+              (setq in-sight other inside #'claude-code--close-seen)
+              (claude-code-notify-desktop session "Finished")
+              (should (equal claude-code--posted '(4)))
+              (should (equal closed '(3 2 1)))
+              (setq inside (lambda () (kill-buffer buf)))
+              (claude-code-notify-desktop session "Finished")
+              (should (equal closed '(5 4 3 2 1))))))))))
 
 ;;;; View
 

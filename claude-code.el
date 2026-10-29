@@ -1249,8 +1249,12 @@ in."
 ;; `notifications' ships with Emacs but needs a D-Bus build, so it is required
 ;; where it is used rather than at the top level.
 (declare-function notifications-notify "notifications" (&rest params))
-(declare-function notifications-close-notification "notifications"
-                  (id &optional bus))
+(declare-function dbus-call-method-asynchronously "dbus"
+                  (bus service path interface method handler &rest args))
+(defvar notifications-service)
+(defvar notifications-path)
+(defvar notifications-interface)
+(defvar notifications-close-notification-method)
 
 (defcustom claude-code-notify-function #'claude-code-notify-desktop
   "Function announcing that an instance wants the user's attention.
@@ -1353,8 +1357,7 @@ subagents.  A change of the root's state closes the notifications announcing
 the one it left, and entering `done', `blocked' or `error' is announced once
 it has held for `claude-code--notify-settle' seconds.  A stretch of work
 starts when the root sets to work after resting, and ends with an interrupt,
-a record the user acknowledged, or an announced `done' or `error'.  The close
-comes last: it waits on D-Bus, where the next report can run this again."
+a record the user acknowledged, or an announced `done' or `error'."
   (when (string-empty-p record-id)
     (let ((state (plist-get new :state)))
       (unless (eq state (plist-get old :state))
@@ -1520,25 +1523,29 @@ Emacs has no raise coming, so it displays at once."
 (defvar-local claude-code--posted nil
   "Desktop notifications posted for the instance in this buffer, still up.")
 
-(defvar-local claude-code--closes 0
+(defvar-local claude-code--close-count 0
   "How many times `claude-code--close-posted' has run in this buffer.
 `claude-code-notify-desktop' compares it across a post.")
+
+(defun claude-code--close-notification (notification)
+  "Ask the desktop to close NOTIFICATION, without waiting for its answer.
+A state change closes from inside Ghostel's status hook, where a wait would
+let Ghostel handle newer terminal events ahead of older ones still queued.
+A close that cannot be sent is only reported, since an error escaping
+`kill-buffer-hook' would keep the buffer alive."
+  (with-demoted-errors "claude-code: closing a notification: %S"
+    (dbus-call-method-asynchronously
+     :session notifications-service notifications-path notifications-interface
+     notifications-close-notification-method nil :uint32 notification)))
 
 (defun claude-code--close-posted ()
   "Close the desktop notifications still up for this buffer's instance.
 Run when the state they announced ends, when the instance comes into sight,
 and from the buffer's `kill-buffer-hook', since a click on what a dead
-instance left behind would have nothing to open.  A failed close is only
-reported: the specification lets a server answer one for a notification
-already gone with an error, and an error escaping `kill-buffer-hook' would
-keep the buffer alive.  The list is emptied first, since a close waits on
-D-Bus, where a timer or focus change can run this again."
-  (let ((posted claude-code--posted))
-    (setq claude-code--posted nil)
-    (cl-incf claude-code--closes)
-    (dolist (notification posted)
-      (with-demoted-errors "claude-code: closing a notification: %S"
-        (notifications-close-notification notification)))))
+instance left behind would have nothing to open."
+  (cl-incf claude-code--close-count)
+  (mapc #'claude-code--close-notification claude-code--posted)
+  (setq claude-code--posted nil))
 
 (defvar claude-code--seen-timer nil
   "The timer about to close the notifications of instances in sight, or nil.")
@@ -1546,17 +1553,13 @@ D-Bus, where a timer or focus change can run this again."
 (defun claude-code--schedule-seen (&rest _)
   "Close the notifications of every instance in sight, from a timer.
 An instance buffer's `window-buffer-change-functions' member and an
-`after-focus-change-function' advice.  A close waits on D-Bus, which
-neither redisplay nor a focus change should, and one timer serves a burst
-of changes."
+`after-focus-change-function' advice.  One timer serves a burst of changes."
   (unless claude-code--seen-timer
     (setq claude-code--seen-timer
           (run-at-time 0 nil #'claude-code--close-seen))))
 
 (defun claude-code--close-seen ()
-  "Close the notifications of every managed instance now on screen.
-The buffers are collected first: a close waits on D-Bus, where an instance
-can exit and leave the registry."
+  "Close the notifications of every managed instance now on screen."
   (setq claude-code--seen-timer nil)
   (dolist (buffer (cl-loop for plist being the hash-values of claude-code--managed
                            collect (plist-get plist :buffer)))
@@ -1574,14 +1577,12 @@ can exit and leave the registry."
   "Post BODY as a desktop notification that jumps to SESSION when clicked.
 The notification declares no actions: a desktop with one to invoke hands the
 click to Emacs instead of raising it, and the raise is what the jump needs.
-It is remembered in SESSION's buffer, for `claude-code--close-posted'.
-Posting waits on D-Bus, where that close or the buffer's kill can run before
-the notification is up; it is then closed as soon as it is."
+It is remembered in SESSION's buffer, for `claude-code--close-posted'."
   (require 'notifications)
   (let* ((id (claude-code-session-id session))
          (buffer (claude-code-session-buffer session))
-         (closes (and (buffer-live-p buffer)
-                      (buffer-local-value 'claude-code--closes buffer)))
+         (live (buffer-live-p buffer))
+         (count (and live (buffer-local-value 'claude-code--close-count buffer)))
          (posted
           (notifications-notify
            :title (claude-code--session-display-name session)
@@ -1595,14 +1596,15 @@ the notification is up; it is then closed as soon as it is."
                                  (delq notification claude-code--posted))))
                        (when (eq reason 'dismissed)
                          (claude-code--notify-follow id))))))
-    (cond ((and (buffer-live-p buffer)
-                (eql closes (buffer-local-value 'claude-code--closes buffer)))
-           (with-current-buffer buffer
-             (push posted claude-code--posted)
-             (add-hook 'kill-buffer-hook #'claude-code--close-posted nil t)))
-          (closes
-           (with-demoted-errors "claude-code: closing a notification: %S"
-             (notifications-close-notification posted))))))
+    ;; Posting waits on D-Bus, where the buffer's notifications can be closed,
+    ;; or the buffer killed, before this one is up.
+    (when live
+      (if (and (buffer-live-p buffer)
+               (= count (buffer-local-value 'claude-code--close-count buffer)))
+          (with-current-buffer buffer
+            (push posted claude-code--posted)
+            (add-hook 'kill-buffer-hook #'claude-code--close-posted nil t))
+        (claude-code--close-notification posted)))))
 
 
 ;;;; View
