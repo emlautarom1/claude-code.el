@@ -1356,29 +1356,19 @@ is on disk -- the one the Worktree column shows -- and the root otherwise."
   (should (equal (claude-code--build-args :resume "ID" :worktree t)
                  '("--resume=ID"))))
 
-(ert-deftest claude-code-test-launch-hands-the-cli-its-pid ()
-  "A first MCP argument split around the PID launches the CLI through a shell.
-The shell fills in the PID only the started process knows, and the MCP
-arguments lead because the split one has to come first.  With no PID to fill
-in, the CLI is launched directly."
-  (claude-code-tests--with-fixtures
-    (claude-code-tests--with-registry
-      (let ((execs '())
-            (claude-code-cli "claude"))
-        (claude-code-tests--recording-launch execs
-          (cl-letf (((symbol-function 'claude-code--mcp-wiring)
-                     (lambda (_buffer)
-                       '((("--mcp-config=<" . ">") "--allowedTools" "x")))))
-            (let ((id (car (claude-code-spawn "/r" :prompt "hi"))))
-              (should (equal (nth 3 (car execs)) "/bin/sh"))
-              (should (equal (nth 1 (car execs))
-                             (list "-c" claude-code--pid-exec "claude"
-                                   "--mcp-config=<" ">" "--allowedTools" "x"
-                                   "--session-id" id "--" "hi")))))
-          (cl-letf (((symbol-function 'claude-code--mcp-wiring) #'ignore))
-            (claude-code-resume "/r" "given-id")
+(ert-deftest claude-code-test-launch-passes-the-mcp-arguments ()
+  "The MCP arguments reach the CLI ahead of the session's own."
+  (claude-code-tests--with-registry
+    (let ((execs '())
+          (claude-code-cli "claude"))
+      (claude-code-tests--recording-launch execs
+        (cl-letf (((symbol-function 'claude-code--mcp-wiring)
+                   (lambda (_buffer) '(("--mcp-config=x" "--allowedTools" "y")))))
+          (let ((id (car (claude-code-spawn "/r" :prompt "hi"))))
             (should (equal (nth 3 (car execs)) "claude"))
-            (should (equal (nth 1 (car execs)) '("--resume=given-id")))))))))
+            (should (equal (nth 1 (car execs))
+                           (list "--mcp-config=x" "--allowedTools" "y"
+                                 "--session-id" id "--" "hi")))))))))
 
 (ert-deftest claude-code-test-launch-refuses-a-missing-cli ()
   "A CLI that cannot be found stops the launch before it starts anything.
@@ -1399,25 +1389,6 @@ the caller an id for an instance that never ran."
         (should (null execs))
         (should (zerop mcp-calls))
         (should-not (seq-difference (buffer-list) buffers))))))
-
-(ert-deftest claude-code-test-pid-exec ()
-  "The launch script hands the CLI its own PID, and every argument verbatim.
-The halves around the PID are verbatim too, so the `${...}' the CLI expands
-in the MCP config reaches it unexpanded."
-  (with-temp-buffer
-    (let ((proc (make-process
-                 :name "cc-pid-exec" :buffer (current-buffer)
-                 :connection-type 'pipe :sentinel #'ignore
-                 :command (list "/bin/sh" "-c" claude-code--pid-exec "/bin/echo"
-                                "--x=<" ">${HOME}" "it's $HOME" "\"q\" `x` $$"))))
-      (unwind-protect
-          (progn
-            (should (claude-code-tests--await
-                     (lambda () (not (process-live-p proc))) 10))
-            (should (equal (buffer-string)
-                           (format "--x=<%d>${HOME} it's $HOME \"q\" `x` $$\n"
-                                   (process-id proc)))))
-        (delete-process proc)))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."

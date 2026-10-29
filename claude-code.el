@@ -953,12 +953,6 @@ Ghostel binds `process-environment' around the hook."
   (dolist (cell cells)
     (setenv (car cell) (cdr cell))))
 
-(defconst claude-code--pid-exec "a=$1$$$2; shift 2; exec \"$0\" \"$a\" \"$@\""
-  "Script `/bin/sh' runs to hand the CLI its own PID in its first argument.
-Run as `sh -c SCRIPT CLI PREFIX SUFFIX ARGS...', it execs CLI with PREFIX, the
-PID and SUFFIX joined ahead of ARGS.  `exec' keeps the shell's PID, so `$$' is
-the PID the CLI runs under.")
-
 (defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
@@ -967,8 +961,7 @@ origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
 rather than start it, which `:worktree' may accompany; the `:worktree' request
 is also recorded in the registry.
 The instance is launched on `claude-code-renderer' when it names one, and with
-the environment `claude-code--mcp-wiring' asks for.  A (PREFIX . SUFFIX) first
-argument from it launches the CLI through `claude-code--pid-exec'."
+the arguments and environment `claude-code--mcp-wiring' asks for."
   (require 'ghostel)
   (require 'claude-code-mcp)
   (let* (;; Resolved first so a bad value aborts before a buffer is created or
@@ -976,8 +969,8 @@ argument from it launches the CLI through `claude-code--pid-exec'."
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
-         ;; Resolved as Ghostel resolves what it runs, where `/bin/sh' would
-         ;; search `$PATH'.
+         ;; Resolved as Ghostel resolves what it runs, so a CLI that cannot be
+         ;; found aborts before a buffer is created.
          (program (ghostel--resolve-local-executable claude-code-cli))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
@@ -994,12 +987,7 @@ argument from it launches the CLI through `claude-code--pid-exec'."
       (set-default 'ghostel-pre-spawn-hook
                    (cons env-hook (default-value 'ghostel-pre-spawn-hook))))
     (unwind-protect
-        (pcase args
-          (`((,prefix . ,suffix) . ,rest)
-           (ghostel-exec buffer "/bin/sh"
-                         `("-c" ,claude-code--pid-exec ,program
-                           ,prefix ,suffix ,@rest)))
-          (_ (ghostel-exec buffer program args)))
+        (ghostel-exec buffer program args)
       (when env
         (set-default 'ghostel-pre-spawn-hook
                      (delq env-hook (default-value 'ghostel-pre-spawn-hook)))))
