@@ -928,6 +928,17 @@ Ghostel binds `process-environment' around the hook."
   (dolist (cell cells)
     (setenv (car cell) (cdr cell))))
 
+(defun claude-code--cli-program ()
+  "Return the absolute path of `claude-code-cli', or signal a `user-error'.
+A bare name is searched for on variable `exec-path' and any other is expanded
+against `default-directory', as Ghostel resolves a program it runs."
+  (let ((program (if (file-name-directory claude-code-cli)
+                     (expand-file-name claude-code-cli)
+                   (executable-find claude-code-cli))))
+    (unless (and program (file-executable-p program))
+      (user-error "Cannot find the Claude CLI `%s'" claude-code-cli))
+    program))
+
 (defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
@@ -942,11 +953,12 @@ The instance is launched on `claude-code-renderer' when it names one."
          ;; started or a buffer created.
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
+         (default-directory (file-name-as-directory root))
+         (program (claude-code--cli-program))
          (args (apply #'claude-code--build-args
                       :session-id id
                       :mcp-args (claude-code--mcp-cli-args id)
                       opts))
-         (default-directory (file-name-as-directory root))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
          (renderer-hook
@@ -960,7 +972,7 @@ The instance is launched on `claude-code-renderer' when it names one."
                    (cons renderer-hook
                          (default-value 'ghostel-pre-spawn-hook))))
     (unwind-protect
-        (ghostel-exec buffer claude-code-cli args)
+        (ghostel-exec buffer program args)
       (when renderer-env
         (set-default 'ghostel-pre-spawn-hook
                      (delq renderer-hook

@@ -163,28 +163,33 @@ under test, so requiring it is a no-op."
        ,@body)))
 
 (defmacro claude-code-tests--recording-launch (execs &rest body)
-  "Run BODY with the launch path stubbed, pushing (BUFFER ARGS ENV) onto EXECS.
-ENV is what the instance would have inherited, modelling only the two things
-that decide it: the pre-spawn hook runs in the instance's buffer, over a
-`process-environment' sharing its tail with Emacs's own.
+  "Run BODY with the launch path stubbed, pushing (BUFFER ARGS ENV PROGRAM).
+Each launch is pushed onto EXECS.  ENV is what the instance would have
+inherited, modelling only the two things that decide it: the pre-spawn hook
+runs in the instance's buffer, over a `process-environment' sharing its tail
+with Emacs's own.
 Neither Ghostel's native module nor the MCP server is wanted under test, so
-requiring either is a no-op and the MCP CLI arguments are a fixed stand-in.
-The focus hook a launch watches is bound around BODY, and every buffer a
-launch hosted is killed afterwards, however BODY exits."
+requiring either is a no-op, the MCP CLI arguments are a fixed stand-in, and
+`claude-code-cli' is launched as named.  The focus hook a launch watches is
+bound around BODY, and every buffer a launch hosted is killed afterwards,
+however BODY exits."
   (declare (indent 1))
   `(claude-code-tests--without-requiring '(ghostel claude-code-mcp)
      (cl-letf ((after-focus-change-function after-focus-change-function)
                ((symbol-function 'claude-code--mcp-cli-args)
                 (lambda (_id) '("--mcp-config" "{}")))
+               ((symbol-function 'claude-code--cli-program)
+                (lambda () claude-code-cli))
                ((symbol-function 'ghostel-exec)
-                (lambda (buffer _program args)
+                (lambda (buffer program args)
                   (push (list buffer args
                               (with-current-buffer buffer
                                 (let ((process-environment
                                        (append '("INSIDE_EMACS=ghostel")
                                                process-environment)))
                                   (run-hooks 'ghostel-pre-spawn-hook)
-                                  process-environment)))
+                                  process-environment))
+                              program)
                         ,execs))))
        (unwind-protect (progn ,@body)
          (dolist (call ,execs)
@@ -1225,6 +1230,45 @@ Worktree column shows -- and the root otherwise."
   (should (equal (claude-code--build-args
                   :resume "ID" :mcp-args '("--mcp-config" "{}"))
                  '("--resume=ID" "--mcp-config" "{}"))))
+
+(ert-deftest claude-code-test-cli-program ()
+  "The CLI is found the way Ghostel finds a program, not on the shell's `$PATH'.
+A bare name is searched for on `exec-path', a relative path is taken against
+`default-directory', and a CLI that is not there is an error."
+  (let* ((dir (make-temp-file "cc-bin" t))
+         (cli (expand-file-name "fakeclaude" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file cli (insert "#!/bin/sh\n"))
+          (set-file-modes cli #o755)
+          (let ((exec-path (list dir))
+                (claude-code-cli "fakeclaude"))
+            (should (equal (claude-code--cli-program) cli)))
+          (let ((default-directory (file-name-as-directory dir))
+                (claude-code-cli "./fakeclaude"))
+            (should (equal (claude-code--cli-program) cli)))
+          (let ((exec-path (list dir))
+                (claude-code-cli "no-such-claude"))
+            (should-error (claude-code--cli-program) :type 'user-error)))
+      (delete-directory dir t))))
+
+(ert-deftest claude-code-test-launch-refuses-a-missing-cli ()
+  "A CLI that cannot be found stops the launch before it starts anything.
+Ghostel would find it missing only once the MCP server was up and the buffer
+made, leaving both behind."
+  (claude-code-tests--with-registry
+    (let ((execs '())
+          (mcp-calls 0)
+          (buffers (buffer-list)))
+      (claude-code-tests--recording-launch execs
+        (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
+                   (lambda (_id) (cl-incf mcp-calls) '()))
+                  ((symbol-function 'claude-code--cli-program)
+                   (lambda () (user-error "Cannot find the Claude CLI"))))
+          (should-error (claude-code-spawn "/r") :type 'user-error))
+        (should (null execs))
+        (should (zerop mcp-calls))
+        (should-not (seq-difference (buffer-list) buffers))))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."
