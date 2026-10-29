@@ -147,13 +147,13 @@ The name must also **round-trip**. `--worktree=NAME` always resolves to `<root>/
 
 ## MCP configuration
 
-The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. Each spawned instance is wired to the server entirely through the command line: `claude` is passed `--mcp-config` with an inline JSON blob
+The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. Each spawned instance is wired to the server entirely through its command line and environment: `claude` is passed `--mcp-config` with an inline JSON blob
 
 ```json
-{"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp/<pid>"}}}
+{"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp/<pid>","headers":{"X-Claude-Code-Token":"${CLAUDE_CODE_EL_MCP_TOKEN}"}}}}
 ```
 
-(plus `--allowedTools` listing every registered tool when auto-approve is on). No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has.
+(plus `--allowedTools` listing every registered tool when auto-approve is on), and its environment carries `CLAUDE_CODE_EL_MCP_TOKEN`. The CLI expands `${VAR}` in a server's `headers` from its own environment once, as it parses `--mcp-config` at startup, and sends the header on every request, GET included. No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has.
 
 The one piece of on-disk state the server *reads* is the calling instance's real cwd: `claude-code--instance-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root in the brief window before that file exists.
 

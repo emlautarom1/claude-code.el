@@ -60,7 +60,7 @@
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
 ;; the byte-compiler happy without pulling the MCP file (and its `web-server'
 ;; dependency) in eagerly, and avoids a load cycle.
-(declare-function claude-code--mcp-cli-args "claude-code-mcp" ())
+(declare-function claude-code--mcp-wiring "claude-code-mcp" (buffer))
 
 
 ;;;; Customization
@@ -943,7 +943,7 @@ valid renderer option."
                    ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")))
     (other (user-error "Unknown `claude-code-renderer': %S" other))))
 
-(defun claude-code--apply-renderer-env (cells)
+(defun claude-code--apply-env (cells)
   "Set the (NAME . VALUE) CELLS in the environment Ghostel will spawn into.
 A `ghostel-pre-spawn-hook' function: the `setq' below is safe only because
 Ghostel binds `process-environment' around the hook."
@@ -966,33 +966,33 @@ origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
 rather than start it, which `:worktree' may accompany; the `:worktree' request
 is also recorded in the registry.
-The instance is launched on `claude-code-renderer' when it names one.  A
-\(PREFIX . SUFFIX) first argument from `claude-code--mcp-cli-args' launches the
-CLI through `claude-code--pid-exec'."
+The instance is launched on `claude-code-renderer' when it names one, and with
+the environment `claude-code--mcp-wiring' asks for.  A (PREFIX . SUFFIX) first
+argument from it launches the CLI through `claude-code--pid-exec'."
   (require 'ghostel)
   (require 'claude-code-mcp)
-  (let* (;; Resolved first so a bad value aborts before the MCP server is
-         ;; started or a buffer created.
+  (let* (;; Resolved first so a bad value aborts before a buffer is created or
+         ;; the MCP server started.
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
          ;; Resolved as Ghostel resolves what it runs, where `/bin/sh' would
          ;; search `$PATH'.
          (program (ghostel--resolve-local-executable claude-code-cli))
-         (args (append (claude-code--mcp-cli-args)
-                       (apply #'claude-code--build-args :session-id id opts)))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
-         (renderer-hook
-          (lambda () (claude-code--apply-renderer-env renderer-env))))
+         (mcp (claude-code--mcp-wiring buffer))
+         (args (append (car mcp)
+                       (apply #'claude-code--build-args :session-id id opts)))
+         (env (append renderer-env (cdr mcp)))
+         (env-hook (lambda () (claude-code--apply-env env))))
     ;; Ahead of the spawn: Ghostel refuses a mode change once the terminal
     ;; process is live.
     (with-current-buffer buffer (claude-code-instance-mode))
     ;; The default value is the one Ghostel reads in the instance's own buffer.
-    (when renderer-env
+    (when env
       (set-default 'ghostel-pre-spawn-hook
-                   (cons renderer-hook
-                         (default-value 'ghostel-pre-spawn-hook))))
+                   (cons env-hook (default-value 'ghostel-pre-spawn-hook))))
     (unwind-protect
         (pcase args
           (`((,prefix . ,suffix) . ,rest)
@@ -1000,10 +1000,9 @@ CLI through `claude-code--pid-exec'."
                          `("-c" ,claude-code--pid-exec ,program
                            ,prefix ,suffix ,@rest)))
           (_ (ghostel-exec buffer program args)))
-      (when renderer-env
+      (when env
         (set-default 'ghostel-pre-spawn-hook
-                     (delq renderer-hook
-                           (default-value 'ghostel-pre-spawn-hook)))))
+                     (delq env-hook (default-value 'ghostel-pre-spawn-hook)))))
     (claude-code--install-notifications buffer)
     (claude-code--register id buffer root (plist-get opts :worktree))
     buffer))

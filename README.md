@@ -113,7 +113,7 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 
 Spawned sessions are pointed at one loopback [MCP](https://modelcontextprotocol.io) server inside Emacs — one per Emacs, shared by every session — so Claude can act on the editor it is running under. Every tool runs with `default-directory` bound to the calling session's working directory, and the catalog is documented tool by tool in [`docs/mcp-tools.md`](docs/mcp-tools.md).
 
-> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. What protects you is the loopback bind plus single-user trust — read the [threat model](docs/architecture.md#decisions) before relying on it.
+> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. The server answers only requests carrying an instance's own token, which web pages and other users cannot read but every process running as you can — read the [threat model](docs/architecture.md#decisions) before relying on it.
 
 | Variable                       | Default | Effect                                                 |
 | ------------------------------ | ------- | ------------------------------------------------------ |

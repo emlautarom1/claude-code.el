@@ -198,15 +198,16 @@ runs in the instance's buffer, over a `process-environment' sharing its tail
 with Emacs's own.  Each launch's buffer gets a `ghostel--pid' of its own, as
 Ghostel gives it, and no live process.
 Neither Ghostel's native module nor the MCP server is wanted under test, so
-requiring either is a no-op, MCP adds no arguments, and `claude-code-cli' is
-launched as named.  The focus hook a launch watches is bound around BODY, and
-every buffer a launch hosted is killed afterwards, however BODY exits."
+requiring either is a no-op, MCP adds no arguments and no environment, and
+`claude-code-cli' is launched as named.  The focus hook a launch watches is
+bound around BODY, and every buffer a launch hosted is killed afterwards,
+however BODY exits."
   (declare (indent 1))
   (let ((hosted (gensym "hosted")))
     `(let ((,hosted '()))
        (claude-code-tests--without-requiring '(ghostel claude-code-mcp)
          (cl-letf ((after-focus-change-function after-focus-change-function)
-                   ((symbol-function 'claude-code--mcp-cli-args) #'ignore)
+                   ((symbol-function 'claude-code--mcp-wiring) #'ignore)
                    ((symbol-function 'ghostel--resolve-local-executable)
                     #'identity)
                    ((symbol-function 'ghostel-exec)
@@ -1357,16 +1358,16 @@ in, the CLI is launched directly."
       (let ((execs '())
             (claude-code-cli "claude"))
         (claude-code-tests--recording-launch execs
-          (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
-                     (lambda ()
-                       '(("--mcp-config=<" . ">") "--allowedTools" "x"))))
+          (cl-letf (((symbol-function 'claude-code--mcp-wiring)
+                     (lambda (_buffer)
+                       '((("--mcp-config=<" . ">") "--allowedTools" "x")))))
             (let ((id (car (claude-code-spawn "/r" :prompt "hi"))))
               (should (equal (nth 3 (car execs)) "/bin/sh"))
               (should (equal (nth 1 (car execs))
                              (list "-c" claude-code--pid-exec "claude"
                                    "--mcp-config=<" ">" "--allowedTools" "x"
                                    "--session-id" id "--" "hi")))))
-          (cl-letf (((symbol-function 'claude-code--mcp-cli-args) #'ignore))
+          (cl-letf (((symbol-function 'claude-code--mcp-wiring) #'ignore))
             (claude-code-resume "/r" "given-id")
             (should (equal (nth 3 (car execs)) "claude"))
             (should (equal (nth 1 (car execs)) '("--resume=given-id")))))))))
@@ -1380,8 +1381,8 @@ the caller an id for an instance that never ran."
           (mcp-calls 0)
           (buffers (buffer-list)))
       (claude-code-tests--recording-launch execs
-        (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
-                   (lambda () (cl-incf mcp-calls) '()))
+        (cl-letf (((symbol-function 'claude-code--mcp-wiring)
+                   (lambda (_buffer) (cl-incf mcp-calls) nil))
                   ((symbol-function 'ghostel--resolve-local-executable)
                    (lambda (program)
                      (error "Searching for program: No such file or directory, %s"
@@ -1392,19 +1393,21 @@ the caller an id for an instance that never ran."
         (should-not (seq-difference (buffer-list) buffers))))))
 
 (ert-deftest claude-code-test-pid-exec ()
-  "The launch script hands the CLI its own PID, and every argument verbatim."
+  "The launch script hands the CLI its own PID, and every argument verbatim.
+The halves around the PID are verbatim too, so the `${...}' the CLI expands
+in the MCP config reaches it unexpanded."
   (with-temp-buffer
     (let ((proc (make-process
                  :name "cc-pid-exec" :buffer (current-buffer)
                  :connection-type 'pipe :sentinel #'ignore
                  :command (list "/bin/sh" "-c" claude-code--pid-exec "/bin/echo"
-                                "--x=<" ">" "it's $HOME" "\"q\" `x` $$"))))
+                                "--x=<" ">${HOME}" "it's $HOME" "\"q\" `x` $$"))))
       (unwind-protect
           (progn
             (should (claude-code-tests--await
                      (lambda () (not (process-live-p proc))) 10))
             (should (equal (buffer-string)
-                           (format "--x=<%d> it's $HOME \"q\" `x` $$\n"
+                           (format "--x=<%d>${HOME} it's $HOME \"q\" `x` $$\n"
                                    (process-id proc)))))
         (delete-process proc)))))
 
@@ -1804,6 +1807,26 @@ of `ghostel-pre-spawn-hook' when one exists without the `t' marker, where
           ;; Delivered through the default value, leaving the local alone.
           (should (equal ghostel-pre-spawn-hook local)))))))
 
+(ert-deftest claude-code-test-launch-hands-the-mcp-environment-to-the-instance ()
+  "The environment the MCP wiring asks for reaches the instance and only it.
+It travels the renderer's route, so it arrives alongside a renderer's and
+Emacs's own environment never sees it."
+  (claude-code-tests--with-renderer-launch child-env
+    (let ((wired nil))
+      (cl-letf (((symbol-function 'claude-code--mcp-wiring)
+                 (lambda (buffer)
+                   (setq wired buffer)
+                   (cons nil (list (cons "CC_TEST_MCP_TOKEN" "t0k"))))))
+        (dolist (renderer '(nil inline))
+          (let ((claude-code-renderer renderer))
+            ;; The token is minted for the buffer that hosts the instance.
+            (should (eq (cdr (claude-code-spawn "/r")) wired))
+            (should (equal (child-env "CC_TEST_MCP_TOKEN") "t0k"))
+            (should (equal (child-env claude-code-tests--alt-screen)
+                           (if renderer "1" "0")))
+            (should-not (getenv "CC_TEST_MCP_TOKEN"))
+            (should-not (default-value 'ghostel-pre-spawn-hook))))))))
+
 (ert-deftest claude-code-test-launch-rejects-an-unknown-renderer ()
   "A `claude-code-renderer' naming no renderer stops the launch building anything.
 Its `defcustom' type only guards `setopt' and Customize, so a `setq' still
@@ -1814,8 +1837,8 @@ shutdown."
           (mcp-calls 0)
           (buffers (buffer-list)))
       (claude-code-tests--recording-launch execs
-        (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
-                   (lambda () (cl-incf mcp-calls) '())))
+        (cl-letf (((symbol-function 'claude-code--mcp-wiring)
+                   (lambda (_buffer) (cl-incf mcp-calls) nil)))
           (let ((claude-code-renderer 'tui))
             (should-error (claude-code-spawn "/r") :type 'user-error)))
         (should (null execs))

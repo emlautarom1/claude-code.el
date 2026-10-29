@@ -30,14 +30,18 @@
 ;;     data describing every advertised tool.
 ;;   * Session context -- what a tool call knows about the instance that made
 ;;     it: `claude-code--mcp-with-session' binds its real working directory.
+;;   * Request authorization -- `claude-code--mcp-authorized-p', which every
+;;     request passes before any handler sees it: no `Origin', and the token
+;;     minted for the live instance its path names.
 ;;
 ;; Session state is reached ONLY through the `claude-code.el' model
-;; (`claude-code--instance-cwd'); this file never re-parses `~/.claude'.  A tool
-;; that acts on sessions does so through the public operations API.
+;; (`claude-code--instance-cwd', and `claude-code--managed-buffer' for the token
+;; check); this file never re-parses `~/.claude'.  A tool that acts on sessions
+;; does so through the public operations API.
 ;;
-;; SECURITY.  This server executes arbitrary Elisp on behalf of a local process
-;; and its only real boundary is the loopback bind.  Read the threat model in
-;; docs/architecture.md before changing anything here.
+;; SECURITY.  This server executes arbitrary Elisp for whoever presents an
+;; instance's token, and every process running as the user can read one.  Read
+;; the threat model in docs/architecture.md before changing anything here.
 
 ;;; Code:
 
@@ -84,6 +88,16 @@ a CPU-bound infinite loop is not stopped by it."
   "The name spawned `claude' instances know this MCP server by.
 Used as the `mcpServers' key in the `--mcp-config' blob and as the
 `mcp__<name>__<tool>' prefix when auto-approving tools; the two must agree.")
+
+(defconst claude-code--mcp-token-header "X-Claude-Code-Token"
+  "The HTTP header an instance presents its token in.
+Not `Authorization': `web-server' answers any scheme there but Basic with a
+500 before a handler runs.")
+
+(defconst claude-code--mcp-token-variable "CLAUDE_CODE_EL_MCP_TOKEN"
+  "The environment variable an instance receives its token in.
+The `--mcp-config' blob names it as `${...}' in the token header, and the CLI
+expands that from its own environment as it starts.")
 
 (define-error 'claude-code--mcp-rpc-error
               "MCP JSON-RPC error carrying (CODE MESSAGE)")
@@ -473,6 +487,48 @@ only for the parse."
       (json-error (claude-code--mcp-error :null -32700 "Parse error")))))
 
 
+;;;; Request authorization
+
+(defvar claude-code--mcp-tokens (make-hash-table :test 'eq :weakness 'key)
+  "Hash of instance buffer to the token its instance was launched with.")
+
+(defun claude-code--mcp-new-token ()
+  "Return a fresh token: 32 bytes from the system's CSPRNG, in hex."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally "/dev/urandom" nil nil 32)
+    (mapconcat (lambda (byte) (format "%02x" byte)) (buffer-string) "")))
+
+(defun claude-code--mcp-pid (headers)
+  "Return the PID the `/mcp/<pid>' path of a request names, or nil.
+HEADERS is the alist `web-server' parses the request into.  A path whose token
+is not all digits names no instance.  The guard and the POST handler both read
+the PID here, so they cannot disagree on it."
+  (let ((path (or (cdr (assoc :POST headers)) (cdr (assoc :GET headers)))))
+    (and path
+         (string-match "\\`/mcp/\\([0-9]+\\)\\'" path)
+         (string-to-number (match-string 1 path)))))
+
+(defun claude-code--mcp-authorized-p (headers)
+  "Return non-nil when the request carrying HEADERS may reach the endpoint.
+It must carry no `Origin', which only a browser sends, and its path must name
+a live managed instance whose token it presents in
+`claude-code--mcp-token-header'."
+  (let* ((pid (claude-code--mcp-pid headers))
+         (buffer (and pid (claude-code--managed-buffer pid)))
+         (expected (and buffer (gethash buffer claude-code--mcp-tokens)))
+         ;; `web-server' keys a header by its upcased name, as a keyword.
+         (key (intern (concat ":" (upcase claude-code--mcp-token-header))))
+         (presented (cdr (assoc key headers))))
+    (and (not (assoc :ORIGIN headers))
+         expected
+         (stringp presented)
+         ;; Digests, so the comparison's timing says nothing about how much of
+         ;; a guess was right.
+         (string= (secure-hash 'sha256 presented)
+                  (secure-hash 'sha256 expected)))))
+
+
 ;;;; Transport (web-server glue)
 
 (defvar claude-code--mcp-server nil
@@ -498,17 +554,25 @@ only for the parse."
   (ws-response-header process 202)
   (throw 'close-connection nil))
 
+(defun claude-code--mcp-forbidden-p (request)
+  "Return non-nil when REQUEST fails `claude-code--mcp-authorized-p'.
+The `ws-start' matcher tried ahead of every handler."
+  (not (claude-code--mcp-authorized-p (ws-headers request))))
+
+(defun claude-code--mcp-forbid (request)
+  "Refuse REQUEST with an empty HTTP 403 and close it.
+Not 401, which sends the CLI looking for an OAuth server to log in to."
+  (with-slots (process) request
+    (ws-response-header process 403 '("Content-Length" . "0"))
+    (throw 'close-connection nil)))
+
 (defun claude-code--mcp-handle (request)
   "Handle one MCP HTTP POST REQUEST from the `web-server' transport.
 Reads the PID, body and declared Content-Length off REQUEST, maps them to a
 response through `claude-code--mcp-response-for-body', and writes it back --
-an empty 202 when there is none (a notification).  A path whose token is not
-all digits names no instance."
+an empty 202 when there is none (a notification)."
   (with-slots (process headers body) request
-    (let* ((path (cdr (assoc :POST headers)))
-           (pid (and path
-                     (string-match "\\`/mcp/\\([0-9]+\\)\\'" path)
-                     (string-to-number (match-string 1 path))))
+    (let* ((pid (claude-code--mcp-pid headers))
            (response (claude-code--mcp-response-for-body
                       pid body
                       (cdr (assoc :CONTENT-LENGTH headers)))))
@@ -534,7 +598,8 @@ live server's port is returned without opening a second listener."
                  (process-live-p (ws-process claude-code--mcp-server)))
       (setq claude-code--mcp-server
             (ws-start
-             (list (cons (cons :GET "^/mcp/") #'claude-code--mcp-handle-get)
+             (list (cons #'claude-code--mcp-forbidden-p #'claude-code--mcp-forbid)
+                   (cons (cons :GET "^/mcp/") #'claude-code--mcp-handle-get)
                    (cons (cons :POST "^/mcp/") #'claude-code--mcp-handle))
              0 nil :host "127.0.0.1")))
     (claude-code--mcp-port)))
@@ -549,38 +614,48 @@ prefix is `claude-code--mcp-server-name'."
   (cl-loop for name being the hash-keys of claude-code--mcp-tools
            collect (format "mcp__%s__%s" claude-code--mcp-server-name name)))
 
-(defun claude-code--mcp-cli-args ()
-  "Return CLI arguments connecting an instance to the MCP server, or nil.
-Starts the server if needed.  Returns nil when MCP is disabled or the server
-could not start.  Otherwise the first argument is `--mcp-config=' with an
-inline JSON blob pointing at `/mcp/<pid>', given as the (PREFIX . SUFFIX)
-either side of the PID, which `claude-code--launch' fills in.  An
-`--allowedTools' entry for every registered tool follows when
-`claude-code-mcp-auto-approve' is non-nil."
+(defun claude-code--mcp-wiring (buffer)
+  "Return what connects the instance BUFFER hosts to the MCP server, or nil.
+Starts the server if needed and mints BUFFER a fresh token.  Returns nil when
+MCP is disabled or the server could not start.  Otherwise returns (ARGS . ENV).
+The first of ARGS is `--mcp-config=' with an inline JSON blob pointing at
+`/mcp/<pid>', given as the (PREFIX . SUFFIX) either side of the PID, which
+`claude-code--launch' fills in.  An `--allowedTools' entry for every registered
+tool follows when `claude-code-mcp-auto-approve' is non-nil.  ENV holds the
+\(NAME . VALUE) cell carrying the token, which the blob names only as
+`${NAME}': the command line is readable by every local user, the environment
+by the user's own processes alone."
   (when-let* ((port (claude-code--mcp-ensure-server)))
-    (let* ((marker "<pid>")
+    (let* ((token (claude-code--mcp-new-token))
+           (marker "<pid>")
+           (server
+            (list (cons 'type "http")
+                  (cons 'url (format "http://127.0.0.1:%d/mcp/%s" port marker))
+                  (cons 'headers
+                        (list (cons (intern claude-code--mcp-token-header)
+                                    (format "${%s}"
+                                            claude-code--mcp-token-variable))))))
            (config
             (concat "--mcp-config="
                     (json-serialize
                      (list (cons 'mcpServers
                                  (list (cons (intern claude-code--mcp-server-name)
-                                             (list (cons 'type "http")
-                                                   (cons 'url
-                                                         (format
-                                                          "http://127.0.0.1:%d/mcp/%s"
-                                                          port marker))))))))))
+                                             server)))))))
            (at (string-search marker config)))
-      (cons (cons (substring config 0 at)
-                  (substring config (+ at (length marker))))
-            (when-let* ((allowed (and claude-code-mcp-auto-approve
-                                      (claude-code--mcp-allowed-tools))))
-              (list "--allowedTools" (string-join allowed ",")))))))
+      (puthash buffer token claude-code--mcp-tokens)
+      (cons (cons (cons (substring config 0 at)
+                        (substring config (+ at (length marker))))
+                  (when-let* ((allowed (and claude-code-mcp-auto-approve
+                                            (claude-code--mcp-allowed-tools))))
+                    (list "--allowedTools" (string-join allowed ","))))
+            (list (cons claude-code--mcp-token-variable token))))))
 
 ;;;###autoload
 (defun claude-code-mcp-stop ()
-  "Stop the Emacs MCP server if it is running.
+  "Stop the Emacs MCP server if it is running, revoking every token.
 A no-op when no server is live, so it is safe to call unconditionally."
   (interactive)
+  (clrhash claude-code--mcp-tokens)
   (when claude-code--mcp-server
     (ignore-errors (ws-stop claude-code--mcp-server))
     (setq claude-code--mcp-server nil)))
