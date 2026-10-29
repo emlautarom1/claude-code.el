@@ -1095,8 +1095,6 @@ any handler runs, on every method and path."
                        (claude-code-mcp-tests--client-headers token)))
                      403)))
         (should-not claude-code-mcp-tests--evaluated)
-        ;; GET is refused on the same terms, and so is every other path --
-        ;; a 403 there rather than a 404 tells a prober nothing about OAuth.
         (should (= (claude-code-mcp-tests--status
                     (claude-code-mcp-tests--http-get port "/mcp"))
                    403))

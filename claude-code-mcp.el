@@ -31,16 +31,15 @@
 ;;   * Session context -- what a tool call knows about the instance that made
 ;;     it: `claude-code--mcp-with-session' binds its real working directory.
 ;;   * Request authorization -- `claude-code--mcp-caller', the instance a
-;;     request comes from: none for a request carrying an `Origin', or no live
-;;     instance's token.
+;;     request comes from.
 ;;
 ;; Session state is reached ONLY through the `claude-code.el' model; this file
 ;; never re-parses `~/.claude'.  A tool that acts on sessions does so through
 ;; the public operations API.
 ;;
 ;; SECURITY.  This server executes arbitrary Elisp for whoever presents an
-;; instance's token, and every process running as the user can read one.  Read
-;; the threat model in docs/architecture.md before changing anything here.
+;; instance's token.  Read the threat model in docs/architecture.md before
+;; changing anything here.
 
 ;;; Code:
 
@@ -95,9 +94,7 @@ Not `Authorization': `web-server' answers any scheme there but Basic with a
 500 before a handler runs.")
 
 (defconst claude-code--mcp-token-variable "CLAUDE_CODE_EL_MCP_TOKEN"
-  "The environment variable an instance receives its token in.
-The `--mcp-config' blob names it as `${...}' in the token header, and the CLI
-expands that from its own environment as it starts.")
+  "The environment variable an instance receives its token in.")
 
 (define-error 'claude-code--mcp-rpc-error
               "MCP JSON-RPC error carrying (CODE MESSAGE)")
