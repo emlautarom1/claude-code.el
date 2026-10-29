@@ -1399,11 +1399,14 @@ the caller an id for an instance that never ran."
                  :connection-type 'pipe :sentinel #'ignore
                  :command (list "/bin/sh" "-c" claude-code--pid-exec "/bin/echo"
                                 "--x=<" ">" "it's $HOME" "\"q\" `x` $$"))))
-      (while (process-live-p proc)
-        (accept-process-output proc 0.1))
-      (should (equal (buffer-string)
-                     (format "--x=<%d> it's $HOME \"q\" `x` $$\n"
-                             (process-id proc)))))))
+      (unwind-protect
+          (progn
+            (should (claude-code-tests--await
+                     (lambda () (not (process-live-p proc))) 10))
+            (should (equal (buffer-string)
+                           (format "--x=<%d> it's $HOME \"q\" `x` $$\n"
+                                   (process-id proc)))))
+        (delete-process proc)))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."
@@ -3003,15 +3006,17 @@ reasons of its own must not revive the jump."
         (shown '())
         (log '())
         (raised nil))
-    (cl-letf (((symbol-function 'pop-to-buffer)
-               (lambda (b &rest _) (push b shown))))
-      (claude-code-tests--following raised log
-        (claude-code--notify-follow buf)
-        (setq raised t)
-        (funcall after-focus-change-function)
-        (kill-buffer buf)
-        (funcall (claude-code-tests--thunk-at log 0))
-        (should (null shown))))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pop-to-buffer)
+                   (lambda (b &rest _) (push b shown))))
+          (claude-code-tests--following raised log
+            (claude-code--notify-follow buf)
+            (setq raised t)
+            (funcall after-focus-change-function)
+            (kill-buffer buf)
+            (funcall (claude-code-tests--thunk-at log 0))
+            (should (null shown))))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (ert-deftest claude-code-test-notify-follow-follows-the-first-close ()
   "One click dismisses the whole group, and the clicked notification closes first.
