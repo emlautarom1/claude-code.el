@@ -21,9 +21,9 @@
 
 (defmacro claude-code-mcp-tests--isolated (&rest body)
   "Run BODY with session lookups isolated from the real config dir.
-Points `claude-code-config-dir' at a nonexistent path (so the live status
-table is empty) and rebinds `claude-code--managed' to a fresh table, so
-`claude-code--session-cwd' resolves to nil for any test session id."
+Points `claude-code-config-dir' at a nonexistent path (so sessions/ is empty)
+and rebinds `claude-code--managed' to a fresh table, so
+`claude-code--instance-cwd' resolves to nil for any PID."
   (declare (indent 0))
   `(let ((claude-code-config-dir "/claude-code-mcp-tests-nonexistent"))
      (claude-code-tests--with-registry ,@body)))
@@ -63,7 +63,7 @@ The registry is global, so a tool left behind would leak into every later
   (alist-get 'tools
              (alist-get 'result
                         (claude-code--mcp-handle-request
-                         "sess"
+                         4242
                          (claude-code-mcp-tests--request "tools/list" 1)))))
 
 (defun claude-code-mcp-tests--tool (name)
@@ -75,13 +75,13 @@ The registry is global, so a tool left behind would leak into every later
   "Return the `inputSchema' advertised for the tool called NAME."
   (alist-get 'inputSchema (claude-code-mcp-tests--tool name)))
 
-(defun claude-code-mcp-tests--call-tool (session-id name &rest arguments)
-  "Dispatch a `tools/call' of the tool NAME for SESSION-ID; return the response.
+(defun claude-code-mcp-tests--call-tool (pid name &rest arguments)
+  "Dispatch a `tools/call' of the tool NAME for instance PID; return the response.
 ARGUMENTS are the (NAME . VALUE) pairs of the call's `arguments' object.  The
 caller owns the session state the call runs against, so a test that needs one
 isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   (claude-code--mcp-handle-request
-   session-id
+   pid
    (claude-code-mcp-tests--request
     "tools/call" 7 (list (cons 'name name) (cons 'arguments arguments)))))
 
@@ -89,7 +89,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   "Dispatch a `tools/call' of the `eval' tool for CODE and return the response."
   (claude-code-mcp-tests--isolated
     (claude-code--mcp-handle-request
-     "sess"
+     4242
      (claude-code-mcp-tests--request
       "tools/call" 9
       (list (cons 'name "eval")
@@ -113,7 +113,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   "`initialize' reports the server's own protocol version and capabilities."
   ;; Ignores the client's request for a specific version.
   (let* ((resp (claude-code--mcp-handle-request
-                "sess"
+                4242
                 (claude-code-mcp-tests--request
                  "initialize" 1 (list (cons 'protocolVersion "2024-11-05")))))
          (result (alist-get 'result resp)))
@@ -129,27 +129,27 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   ;; A request carrying no version gets the same server version.
   (let ((result (alist-get 'result
                            (claude-code--mcp-handle-request
-                            "sess"
+                            4242
                             (claude-code-mcp-tests--request "initialize" 2)))))
     (should (equal (alist-get 'protocolVersion result) "2025-06-18"))))
 
 (ert-deftest claude-code-mcp-test-notification-returns-nil ()
   "A request without an `id' is a notification and yields nil (no response)."
   (should (null (claude-code--mcp-handle-request
-                 "sess"
+                 4242
                  (claude-code-mcp-tests--request "notifications/initialized")))))
 
 (ert-deftest claude-code-mcp-test-error-codes-echo-id ()
   "Protocol errors carry the right code and echo the request id."
   ;; Unknown method -> -32601.
   (let ((resp (claude-code--mcp-handle-request
-               "sess" (claude-code-mcp-tests--request "no/such/method" 7))))
+               4242 (claude-code-mcp-tests--request "no/such/method" 7))))
     (should (equal (alist-get 'id resp) 7))
     (should (= (alist-get 'code (alist-get 'error resp)) -32601)))
   ;; Unknown tool -> -32602.
   (let ((resp (claude-code-mcp-tests--isolated
                 (claude-code--mcp-handle-request
-                 "sess"
+                 4242
                  (claude-code-mcp-tests--request
                   "tools/call" 8 (list (cons 'name "nope")
                                        (cons 'arguments nil)))))))
@@ -158,7 +158,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   ;; Missing required argument -> -32602.
   (let ((resp (claude-code-mcp-tests--isolated
                 (claude-code--mcp-handle-request
-                 "sess"
+                 4242
                  (claude-code-mcp-tests--request
                   "tools/call" 10 (list (cons 'name "eval")
                                         (cons 'arguments nil)))))))
@@ -168,7 +168,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
 (ert-deftest claude-code-mcp-test-invalid-request-shape ()
   "A non-object request (array or bare scalar) yields -32600 with a null id."
   (dolist (bad (list [1 2] 5 "x" :null))
-    (let ((resp (claude-code--mcp-handle-request "sess" bad)))
+    (let ((resp (claude-code--mcp-handle-request 4242 bad)))
       (should (eq (alist-get 'id resp) :null))
       (should (= (alist-get 'code (alist-get 'error resp)) -32600)))))
 
@@ -180,26 +180,26 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   (let* ((body (claude-code--mcp-serialize
                 (claude-code-mcp-tests--request "tools/list" 1)))
          (resp (claude-code--mcp-response-for-body
-                "sess" body (number-to-string (string-bytes body)))))
+                4242 body (number-to-string (string-bytes body)))))
     (should (equal (alist-get 'id resp) 1))
     (should (alist-get 'tools (alist-get 'result resp))))
   ;; With no Content-Length header the integrity guard is skipped.
   (let ((resp (claude-code--mcp-response-for-body
-               "sess"
+               4242
                (claude-code--mcp-serialize
                 (claude-code-mcp-tests--request "tools/list" 2))
                nil)))
     (should (equal (alist-get 'id resp) 2)))
   ;; A notification body maps to nil (the transport then sends the empty 202).
   (should (null (claude-code--mcp-response-for-body
-                 "sess"
+                 4242
                  (claude-code--mcp-serialize
                   (claude-code-mcp-tests--request "notifications/initialized"))
                  nil))))
 
 (ert-deftest claude-code-mcp-test-parse-error ()
   "A malformed JSON body is answered with a -32700 error and a null id."
-  (let ((resp (claude-code--mcp-response-for-body "sess" "{not json" nil)))
+  (let ((resp (claude-code--mcp-response-for-body 4242 "{not json" nil)))
     (should (eq (alist-get 'id resp) :null))
     (should (= (alist-get 'code (alist-get 'error resp)) -32700))))
 
@@ -207,18 +207,18 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
   "A Content-Length disagreeing with the body's byte count yields -32700."
   (let* ((body "{\"jsonrpc\":\"2.0\"}")
          (resp (claude-code--mcp-response-for-body
-                "sess" body (number-to-string (+ (string-bytes body) 10)))))
+                4242 body (number-to-string (+ (string-bytes body) 10)))))
     (should (eq (alist-get 'id resp) :null))
     (should (= (alist-get 'code (alist-get 'error resp)) -32700)))
   ;; The guard counts bytes, not characters.  This body is multibyte (é is one
   ;; char, two bytes): its byte count is accepted, its char count is not.
   (let ((body "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"é\"}"))
     (should (equal (alist-get 'id (claude-code--mcp-response-for-body
-                                   "sess" body
+                                   4242 body
                                    (number-to-string (string-bytes body))))
                    4))
     (should (eq (alist-get 'id (claude-code--mcp-response-for-body
-                                "sess" body
+                                4242 body
                                 (number-to-string (length body))))
                 :null))))
 
@@ -273,7 +273,7 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
     (let ((result (alist-get 'result
                              (claude-code-mcp-tests--isolated
                                (claude-code--mcp-handle-request
-                                "sess"
+                                4242
                                 (claude-code-mcp-tests--request
                                  "tools/call" 2
                                  (list (cons 'name "cc-mcp-test-opt")
@@ -326,12 +326,12 @@ other type the contradiction it looks like."
           (setq seen 'unset)
           (let ((error-object
                  (alist-get 'error (apply #'claude-code-mcp-tests--call-tool
-                                          "sess" "cc-mcp-test-schema" arguments))))
+                                          4242 "cc-mcp-test-schema" arguments))))
             (should (equal (alist-get 'code error-object) -32602))
             (should (string-match-p message (alist-get 'message error-object)))
             (should (eq seen 'unset))))
         ;; Both empty strings reach the handler as what they mean there.
-        (claude-code-mcp-tests--call-tool "sess" "cc-mcp-test-schema"
+        (claude-code-mcp-tests--call-tool 4242 "cc-mcp-test-schema"
                                           '(text . "") '(level . ""))
         (should (equal seen '("" nil nil)))))))
 
@@ -350,7 +350,7 @@ able to hear no."
          :handler (lambda (confirm) (setq seen confirm) "ok"))
         (let ((result (alist-get 'result
                                  (claude-code-mcp-tests--call-tool
-                                  "sess" "cc-mcp-test-confirm"
+                                  4242 "cc-mcp-test-confirm"
                                   '(confirm . :false)))))
           (should (eq (alist-get 'isError result) :false))
           (should (null seen)))
@@ -363,7 +363,7 @@ able to hear no."
                    (alist-get 'message
                               (alist-get 'error
                                          (apply #'claude-code-mcp-tests--call-tool
-                                                "sess" "cc-mcp-test-confirm"
+                                                4242 "cc-mcp-test-confirm"
                                                 arguments)))))
           (should (eq seen 'unset)))))))
 
@@ -378,7 +378,7 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
     (claude-code-mcp-tests--isolated
       ;; Null is the absent object: a tool needing nothing still runs.
       (let ((response (claude-code--mcp-handle-request
-                       "sess"
+                       4242
                        (claude-code-mcp-tests--request
                         "tools/call" 1
                         (list (cons 'name "cc-mcp-test-noargs")
@@ -389,7 +389,7 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
       (dolist (arguments (list "code" 42 (vector 1 2)))
         (let ((error-object
                (alist-get 'error (claude-code--mcp-handle-request
-                                  "sess"
+                                  4242
                                   (claude-code-mcp-tests--request
                                    "tools/call" 2
                                    (list (cons 'name "cc-mcp-test-noargs")
@@ -402,7 +402,7 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
       (dolist (params (list "code" 42 (vector 1 2)))
         (let ((error-object
                (alist-get 'error (claude-code--mcp-handle-request
-                                  "sess"
+                                  4242
                                   (claude-code-mcp-tests--request
                                    "tools/call" 3 params)))))
           (should (equal (alist-get 'code error-object) -32602))
@@ -414,28 +414,44 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
                (alist-get 'message
                           (alist-get 'error
                                      (claude-code--mcp-handle-request
-                                      "sess"
+                                      4242
                                       (claude-code-mcp-tests--request
                                        "tools/call" 4 :null)))))))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
-  "A tool sees its caller's cwd for the call, and nil for an id naming nothing.
+  "A tool sees its caller's cwd for the call, and nil for a PID naming nothing.
 The nil is what a tool acting on the caller's project has to check, and it
-must not outlive the call: the next one may come from another session."
+must not outlive the call: the next one may come from another instance."
   (let ((seen 'unset))
     (claude-code-mcp-tests--with-tools '("cc-mcp-test-cwd")
       (claude-code-mcp-make-tool
        :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
        :handler (lambda () (setq seen claude-code--mcp-session-cwd) "ok"))
       (claude-code-mcp-tests--isolated
-        (puthash "sess" (list :buffer nil :origin "/home/test/proj")
-                 claude-code--managed)
-        (pcase-dolist (`(,session-id . ,cwd) '(("sess" . "/home/test/proj")
-                                               ("no-such-session" . nil)))
-          (setq seen 'unset)
-          (claude-code-mcp-tests--call-tool session-id "cc-mcp-test-cwd")
-          (should (equal seen cwd)))))
+        (claude-code-tests--with-managed-buffer buf
+          (puthash "sess" (list :buffer buf :origin "/home/test/proj")
+                   claude-code--managed)
+          (pcase-dolist (`(,pid . ,cwd) '((4242 . "/home/test/proj")
+                                          (999 . nil)
+                                          (nil . nil)))
+            (setq seen 'unset)
+            (claude-code-mcp-tests--call-tool pid "cc-mcp-test-cwd")
+            (should (equal seen cwd))))))
     (should (null claude-code--mcp-session-cwd))))
+
+(ert-deftest claude-code-mcp-test-session-cwd-follows-the-instance ()
+  "A call is answered for the instance whose PID it names, whatever it runs.
+Its cwd is read off its own sessions/ file, which a `/clear' rewrites under a
+new session id while the PID stays."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer (buf 1003)
+      (puthash "launched" (list :buffer buf :origin "/home/test/proj")
+               claude-code--managed)
+      (let ((result (alist-get 'result
+                               (claude-code-mcp-tests--call-tool
+                                1003 "eval" (cons 'code "default-directory")))))
+        (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
+                       "\"/home/test/proj/.claude/worktrees/feat/\""))))))
 
 ;;;; Pure dispatch: tools/call eval happy and error paths
 
@@ -570,25 +586,29 @@ Nothing of that buffer may be read as source, and its point must not move."
 (ert-deftest claude-code-mcp-test-eval-sees-the-session-directory ()
   "The evaluated form runs in the calling session's own working directory."
   (claude-code-mcp-tests--isolated
-    (puthash "sess" (list :buffer nil :origin "/home/test/proj")
-             claude-code--managed)
-    (let ((result (alist-get 'result
-                             (claude-code-mcp-tests--call-tool
-                              "sess" "eval" (cons 'code "default-directory")))))
-      (should (eq (alist-get 'isError result) :false))
-      (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
-                     "\"/home/test/proj/\"")))))
+    (claude-code-tests--with-managed-buffer buf
+      (puthash "sess" (list :buffer buf :origin "/home/test/proj")
+               claude-code--managed)
+      (let ((result (alist-get 'result
+                               (claude-code-mcp-tests--call-tool
+                                4242 "eval" (cons 'code "default-directory")))))
+        (should (eq (alist-get 'isError result) :false))
+        (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
+                       "\"/home/test/proj/\""))))))
 
 ;;;; Pure dispatch: tools/call spawn
 
 (defmacro claude-code-mcp-tests--with-caller (cwd execs &rest body)
-  "Run BODY with session \"sess\" managed from CWD and the launch path stubbed.
+  "Run BODY with instance 4242 managed from CWD and the launch path stubbed.
 EXECS collects the (BUFFER ARGS) of every launch, so a test asserts what
 reached the CLI without a `claude' ever running."
   (declare (indent 2))
-  `(claude-code-mcp-tests--isolated
-     (puthash "sess" (list :buffer nil :origin ,cwd) claude-code--managed)
-     (claude-code-tests--recording-launch ,execs ,@body)))
+  (let ((caller (gensym "caller")))
+    `(claude-code-mcp-tests--isolated
+       (claude-code-tests--with-managed-buffer ,caller
+         (puthash "caller" (list :buffer ,caller :origin ,cwd)
+                  claude-code--managed)
+         (claude-code-tests--recording-launch ,execs ,@body)))))
 
 (defun claude-code-mcp-tests--result-text (response)
   "Return the text payload of RESPONSE's tool result."
@@ -600,7 +620,7 @@ The directory is the server's to resolve -- the tool takes no path argument --
 and the id is what the caller has to find the session by afterwards."
   (let ((execs '()))
     (claude-code-mcp-tests--with-caller "/home/test/proj" execs
-      (let* ((response (claude-code-mcp-tests--call-tool "sess" "spawn"))
+      (let* ((response (claude-code-mcp-tests--call-tool 4242 "spawn"))
              (id (claude-code-mcp-tests--result-text response)))
         (should (eq (alist-get 'isError (alist-get 'result response))
                     :false))
@@ -611,7 +631,7 @@ and the id is what the caller has to find the session by afterwards."
         (should (equal (plist-get (gethash id claude-code--managed) :origin)
                        (claude-code--normalize-root "/home/test/proj")))
         (should (equal (nth 1 (car execs))
-                       (list "--session-id" id "--mcp-config" "{}")))))))
+                       (list "--session-id" id)))))))
 
 (ert-deftest claude-code-mcp-test-spawn-options ()
   "Every option reaches the CLI, and a worktree is asked for by name."
@@ -619,31 +639,31 @@ and the id is what the caller has to find the session by afterwards."
     (claude-code-mcp-tests--with-caller "/home/test/proj" execs
       (let ((id (claude-code-mcp-tests--result-text
                  (claude-code-mcp-tests--call-tool
-                  "sess" "spawn" '(prompt . "do the thing") '(model . "opus")
+                  4242 "spawn" '(prompt . "do the thing") '(model . "opus")
                   '(effort . "xhigh") '(worktree . "feat")
                   '(name . "a long name")))))
         (should (equal (nth 1 (car execs))
                        (list "--session-id" id "--name=a long name"
                              "--worktree=feat"
                              "--model" "opus" "--effort" "xhigh"
-                             "--mcp-config" "{}" "--" "do the thing"))))
+                             "--" "do the thing"))))
       ;; A name on its own is the whole request.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(worktree . "solo"))
+      (claude-code-mcp-tests--call-tool 4242 "spawn" '(worktree . "solo"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree=solo" "--mcp-config" "{}")))
+                     (list "--worktree=solo")))
       ;; The name joins the flag in one argument, so a caller-chosen name the
       ;; CLI would otherwise take for a flag of its own cannot become one.
-      (claude-code-mcp-tests--call-tool "sess" "spawn"
+      (claude-code-mcp-tests--call-tool 4242 "spawn"
                                         '(worktree . "--ax-screen-reader"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree=--ax-screen-reader" "--mcp-config" "{}")))
+                     (list "--worktree=--ax-screen-reader")))
       ;; A worktree is asked for by name, so a value that is not one is
       ;; refused, and refused before anything is launched.
       (dolist (value '(t :false))
         (let* ((launched (length execs))
                (error-object
                 (alist-get 'error (claude-code-mcp-tests--call-tool
-                                   "sess" "spawn" (cons 'worktree value)))))
+                                   4242 "spawn" (cons 'worktree value)))))
           (should (equal (alist-get 'code error-object) -32602))
           (should (string-match-p "must be of type string"
                                   (alist-get 'message error-object)))
@@ -652,23 +672,22 @@ and the id is what the caller has to find the session by afterwards."
       ;; would reach the CLI and kill the instance at startup, and an unnamed
       ;; worktree is no worktree.
       (claude-code-mcp-tests--call-tool
-       "sess" "spawn" '(prompt . "") '(model . "") '(effort . "")
+       4242 "spawn" '(prompt . "") '(model . "") '(effort . "")
        '(worktree . "") '(name . ""))
-      (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--mcp-config" "{}")))
+      (should (null (nthcdr 2 (nth 1 (car execs)))))
       ;; Neither the model nor the effort is held to a set of values: an unknown
       ;; one reaches the CLI, whose error it is to report.
-      (claude-code-mcp-tests--call-tool "sess" "spawn" '(effort . "turbo"))
+      (claude-code-mcp-tests--call-tool 4242 "spawn" '(effort . "turbo"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--effort" "turbo" "--mcp-config" "{}"))))))
+                     (list "--effort" "turbo"))))))
 
 (ert-deftest claude-code-mcp-test-spawn-refuses-an-unknown-caller ()
-  "A call from a session with no known directory launches nothing.
+  "A call from an instance with no known directory launches nothing.
 Falling back to whatever `default-directory' the server happens to hold would
 start an instance in an unrelated project."
   (let ((execs '()))
     (claude-code-mcp-tests--with-caller "/home/test/proj" execs
-      (let ((response (claude-code-mcp-tests--call-tool "no-such-session"
+      (let ((response (claude-code-mcp-tests--call-tool 999
                                                         "spawn")))
         (should (eq (alist-get 'isError (alist-get 'result response)) t))
         (should (string-match-p "No working directory"
@@ -693,7 +712,7 @@ start an instance in an unrelated project."
   "An `id' the parser produced serializes without translation on the way back."
   (let* ((body (concat "{\"jsonrpc\":\"2.0\",\"id\":false,"
                        "\"method\":\"initialize\"}"))
-         (response (claude-code--mcp-response-for-body "sess" body nil)))
+         (response (claude-code--mcp-response-for-body 4242 body nil)))
     (should (eq (alist-get 'id response) :false))
     (should (string-match-p "\"id\":false"
                             (claude-code--mcp-serialize response)))))
@@ -749,7 +768,7 @@ Lisp, so each must reach the handler as nil."
         (setq seen 'unset)
         (claude-code-mcp-tests--isolated
           (claude-code--mcp-handle-request
-           "sess"
+           4242
            (claude-code-mcp-tests--request
             "tools/call" 2
             (list (cons 'name "cc-mcp-test-bool")
@@ -759,25 +778,26 @@ Lisp, so each must reach the handler as nil."
 ;;;; CLI arg / config builder
 
 (ert-deftest claude-code-mcp-test-cli-args ()
-  "The CLI-arg builder emits `--mcp-config' and, when enabled, `--allowedTools'."
+  "The CLI-arg builder emits `--mcp-config' and, when enabled, `--allowedTools'.
+The config is split around the PID the launch fills in."
   (cl-letf (((symbol-function 'claude-code--mcp-ensure-server) (lambda () 7777)))
-    ;; With auto-approve, both flags are present and the config points at the id.
+    ;; With auto-approve, both flags are present and the config points at the
+    ;; PID filled in between the two halves.
     (let* ((claude-code-mcp-auto-approve t)
-           (args (claude-code--mcp-cli-args "the-id"))
+           (args (claude-code--mcp-cli-args))
            (allowed (split-string (cadr (member "--allowedTools" args)) ",")))
-      (should (equal (nth 0 args) "--mcp-config"))
-      (should (member "--allowedTools" args))
+      (should (consp (car args)))
       ;; The allow-list is the comma-joined identifier of every registered tool.
       (should (member "mcp__emacs__eval" allowed))
-      (let ((config (json-parse-string (nth 1 args) :object-type 'alist)))
-        (should (equal (alist-get 'url
-                                  (alist-get 'emacs
-                                             (alist-get 'mcpServers config)))
-                       "http://127.0.0.1:7777/mcp/the-id"))
-        (should (equal (alist-get 'type
-                                  (alist-get 'emacs
-                                             (alist-get 'mcpServers config)))
-                       "http"))))
+      (let* ((arg (concat (caar args) "4242" (cdar args)))
+             (config (progn
+                       (should (string-prefix-p "--mcp-config=" arg))
+                       (json-parse-string
+                        (string-remove-prefix "--mcp-config=" arg)
+                        :object-type 'alist)))
+             (server (alist-get 'emacs (alist-get 'mcpServers config))))
+        (should (equal (alist-get 'url server) "http://127.0.0.1:7777/mcp/4242"))
+        (should (equal (alist-get 'type server) "http"))))
     ;; Every registered tool lands in the allow-list, not just a fixed set.
     (claude-code-mcp-tests--with-tools '("cc-mcp-test-noop")
       (claude-code-mcp-make-tool
@@ -785,18 +805,18 @@ Lisp, so each must reach the handler as nil."
       (let* ((claude-code-mcp-auto-approve t)
              (allowed (split-string
                        (cadr (member "--allowedTools"
-                                     (claude-code--mcp-cli-args "the-id")))
+                                     (claude-code--mcp-cli-args)))
                        ",")))
         (should (member "mcp__emacs__eval" allowed))
         (should (member "mcp__emacs__cc-mcp-test-noop" allowed))))
     ;; Without auto-approve, only `--mcp-config' is emitted.
     (let* ((claude-code-mcp-auto-approve nil)
-           (args (claude-code--mcp-cli-args "the-id")))
-      (should (equal (nth 0 args) "--mcp-config"))
-      (should-not (member "--allowedTools" args))))
+           (args (claude-code--mcp-cli-args)))
+      (should (= (length args) 1))
+      (should (consp (car args)))))
   ;; When the server is unavailable (disabled), the builder returns nil.
   (cl-letf (((symbol-function 'claude-code--mcp-ensure-server) (lambda () nil)))
-    (should (null (claude-code--mcp-cli-args "the-id")))))
+    (should (null (claude-code--mcp-cli-args)))))
 
 (ert-deftest claude-code-mcp-test-ensure-server-disabled ()
   "`claude-code--mcp-ensure-server' returns nil and starts nothing when off."
@@ -820,8 +840,8 @@ Lisp, so each must reach the handler as nil."
   (claude-code-tests--with-managed-buffer buf
     (claude-code-tests--with-managed-buffer other
       (claude-code-mcp-tests--with-server port
-        (puthash "a" (list :buffer buf) claude-code--managed)
-        (puthash "b" (list :buffer other) claude-code--managed)
+        (puthash 1 (list :buffer buf) claude-code--managed)
+        (puthash 2 (list :buffer other) claude-code--managed)
         ;; One of two exiting leaves the server up for the survivor.
         (with-current-buffer buf (claude-code--on-buffer-kill))
         (should (= (hash-table-count claude-code--managed) 1))
@@ -917,7 +937,7 @@ tries to open a server-to-client SSE stream."
   (claude-code-mcp-tests--with-server port
     (should (string-match-p
              "\\`HTTP/1\\.[01] 405 "
-             (claude-code-mcp-tests--http-get port "/mcp/sess")))))
+             (claude-code-mcp-tests--http-get port "/mcp/4242")))))
 
 (defun claude-code-mcp-tests--raw-body (raw)
   "Return the body of raw HTTP response RAW, past the header blank line."
@@ -931,20 +951,39 @@ Returns nil for a reply that carries no body (an empty 202)."
     (when (and body (not (string-empty-p body)))
       (json-parse-string body :object-type 'alist))))
 
-(defun claude-code-mcp-tests--rpc (port session-id request)
-  "Send REQUEST alist to SESSION-ID on PORT; return the parsed response alist.
+(defun claude-code-mcp-tests--rpc (port token request)
+  "Send REQUEST alist to path TOKEN on PORT; return the parsed response alist.
 Returns nil for an empty (notification) reply that carries no body."
   (claude-code-mcp-tests--response-body
    (claude-code-mcp-tests--http-post
-    port (format "/mcp/%s" session-id)
+    port (format "/mcp/%s" token)
     (claude-code--mcp-serialize request))))
+
+(ert-deftest claude-code-mcp-test-path-names-the-instance ()
+  "The request path names the calling instance by PID, in digits and nothing else.
+Any other token is answered as from no instance at all."
+  (let ((seen '()))
+    (claude-code-mcp-tests--with-tools '("cc-mcp-test-cwd")
+      (claude-code-mcp-make-tool
+       :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
+       :handler (lambda () (push claude-code--mcp-session-cwd seen) "ok"))
+      (claude-code-mcp-tests--with-server port
+        (claude-code-tests--with-managed-buffer buf
+          (puthash "sess" (list :buffer buf :origin "/home/test/proj")
+                   claude-code--managed)
+          (dolist (token '("4242" "4242x" "x4242" "4242/extra" "sess"))
+            (claude-code-mcp-tests--rpc
+             port token
+             (claude-code-mcp-tests--request
+              "tools/call" 1 (list (cons 'name "cc-mcp-test-cwd"))))))))
+    (should (equal (nreverse seen) '("/home/test/proj" nil nil nil nil)))))
 
 (ert-deftest claude-code-mcp-test-socket-e2e ()
   "Drive the real loopback server through initialize/list/call over a socket."
   (claude-code-mcp-tests--with-server port
     ;; initialize
     (let ((resp (claude-code-mcp-tests--rpc
-                 port "sess"
+                 port 4242
                  (claude-code-mcp-tests--request
                   "initialize" 1
                   (list (cons 'protocolVersion "2025-06-18"))))))
@@ -955,7 +994,7 @@ Returns nil for an empty (notification) reply that carries no body."
     ;; JSON body.  Assert the 202 status line on the wire, so this is not
     ;; satisfied by a silent no-reply (which also parses to nil).
     (let ((raw (claude-code-mcp-tests--http-post
-                port "/mcp/sess"
+                port "/mcp/4242"
                 (claude-code--mcp-serialize
                  (claude-code-mcp-tests--request
                   "notifications/initialized")))))
@@ -963,7 +1002,7 @@ Returns nil for an empty (notification) reply that carries no body."
       (should (equal (claude-code-mcp-tests--raw-body raw) "")))
     ;; tools/list
     (let* ((resp (claude-code-mcp-tests--rpc
-                  port "sess"
+                  port 4242
                   (claude-code-mcp-tests--request "tools/list" 2)))
            (tools (alist-get 'tools (alist-get 'result resp))))
       (should (vectorp tools))
@@ -971,7 +1010,7 @@ Returns nil for an empty (notification) reply that carries no body."
                         tools)))
     ;; tools/call eval
     (let* ((resp (claude-code-mcp-tests--rpc
-                  port "sess"
+                  port 4242
                   (claude-code-mcp-tests--request
                    "tools/call" 3
                    (list (cons 'name "eval")
@@ -986,7 +1025,7 @@ Returns nil for an empty (notification) reply that carries no body."
     (let* ((body "{\"jsonrpc\":\"2.0\"}")
            (resp (claude-code-mcp-tests--response-body
                   (claude-code-mcp-tests--http-post
-                   port "/mcp/sess" body (+ (string-bytes body) 10)))))
+                   port "/mcp/4242" body (+ (string-bytes body) 10)))))
       (should (= (alist-get 'code (alist-get 'error resp)) -32700)))))
 
 ;;;; Live integration (real `claude' + real MCP handshake)
@@ -1039,40 +1078,41 @@ ignored so a partially-created worktree is still cleaned up."
             (call-process "git" nil nil nil "branch" "-D" (cdr wt))))))))
 
 (ert-deftest claude-code-test-integration-mcp-handshake ()
-  "A spawned instance completes the MCP handshake; a worktree eval sees its cwd."
+  "A spawned instance completes the MCP handshake under its PID.
+An eval from it, in a worktree, sees the worktree as its cwd."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))
          (claude-code-mcp-enabled t)
          (initialized nil)
-         (probe (lambda (_session-id request)
+         (probe (lambda (caller request)
                   (when (equal (alist-get 'method request) "initialize")
-                    (setq initialized t))))
+                    (setq initialized caller))))
          ;; Snapshot existing worktrees so teardown removes only what this test
          ;; creates, never a developer's real worktrees.
          (worktrees-before (mapcar #'car (claude-code-mcp-tests--worktrees root)))
-         buffer id pid)
+         buffer pid)
     (advice-add 'claude-code--mcp-handle-request :before probe)
     (unwind-protect
         (claude-code-tests--with-top-level-env
-          (let ((instance (claude-code-spawn
-                           root :worktree t
-                           :prompt "Respond with the single word: pong")))
-            (setq id (car instance))
-            (setq buffer (cdr instance)))
+          (setq buffer (cdr (claude-code-spawn
+                             root :worktree t
+                             :prompt "Respond with the single word: pong")))
           (setq pid (buffer-local-value 'ghostel--pid buffer))
-          ;; The real CLI performs the MCP initialize handshake against us.
+          ;; The real CLI performs the MCP initialize handshake against us,
+          ;; under the PID the launch filled in.
           (should (claude-code-tests--await (lambda () initialized) 45))
+          (should (eql initialized pid))
           ;; Once the worktree session's sessions file lands, its real cwd is the
           ;; worktree dir; an `eval' of `default-directory' returns it.
           (should (claude-code-tests--await
                    (lambda ()
-                     (let ((cwd (claude-code--session-cwd id)))
+                     (let ((cwd (claude-code--instance-cwd pid)))
                        (and cwd (string-match-p "/\\.claude/worktrees/" cwd))))
                    45))
-          (let* ((cwd (claude-code--session-cwd id))
+          (let* ((cwd (claude-code--instance-cwd pid))
                  (resp (claude-code--mcp-handle-request
-                        id
+                        pid
                         (list (cons 'jsonrpc "2.0") (cons 'id 1)
                               (cons 'method "tools/call")
                               (cons 'params

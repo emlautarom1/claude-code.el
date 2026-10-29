@@ -191,15 +191,13 @@ inherited, modelling only the two things that decide it: the pre-spawn hook
 runs in the instance's buffer, over a `process-environment' sharing its tail
 with Emacs's own.
 Neither Ghostel's native module nor the MCP server is wanted under test, so
-requiring either is a no-op, the MCP CLI arguments are a fixed stand-in, and
-`claude-code-cli' is launched as named.  The focus hook a launch watches is
-bound around BODY, and every buffer a launch hosted is killed afterwards,
-however BODY exits."
+requiring either is a no-op, MCP adds no arguments, and `claude-code-cli' is
+launched as named.  The focus hook a launch watches is bound around BODY, and
+every buffer a launch hosted is killed afterwards, however BODY exits."
   (declare (indent 1))
   `(claude-code-tests--without-requiring '(ghostel claude-code-mcp)
      (cl-letf ((after-focus-change-function after-focus-change-function)
-               ((symbol-function 'claude-code--mcp-cli-args)
-                (lambda (_id) '("--mcp-config" "{}")))
+               ((symbol-function 'claude-code--mcp-cli-args) #'ignore)
                ((symbol-function 'claude-code--cli-program)
                 (lambda () claude-code-cli))
                ((symbol-function 'ghostel-exec)
@@ -1135,23 +1133,23 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
           (should (equal (claude-code--session-display-name s)
                          "Dotted worktree")))))))
 
-(ert-deftest claude-code-test-session-cwd ()
-  "An instance's cwd is its own sessions/ file's, else its launch root.
-Only an instance Emacs manages has one, found by the id it was launched on."
+(ert-deftest claude-code-test-instance-cwd ()
+  "An instance's cwd is its sessions/ file's, else its launch root.
+Only an instance Emacs manages has one."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-managed-buffer (buf 1003)
-      ;; sessions/1003.json works in its worktree, not the root it was
-      ;; launched from, whatever session it names.
-      (claude-code--register "launched" buf "/home/test/proj" nil)
-      (should (equal (claude-code--session-cwd "launched")
-                     "/home/test/proj/.claude/worktrees/feat"))
-      ;; Before that file exists, the launch root stands in.
-      (with-current-buffer buf (setq-local ghostel--pid 4242))
-      (should (equal (claude-code--session-cwd "launched") "/home/test/proj"))
-      ;; A session Emacs does not run gets nothing, sessions/ file or not.
-      (should (null (claude-code--session-cwd
-                     "11111111-1111-4111-8111-111111111111")))
-      (should (null (claude-code--session-cwd "no-such-id"))))))
+    (claude-code-tests--with-managed-buffer (feat 1003)
+      (claude-code-tests--with-managed-buffer (fresh 4242)
+        ;; sessions/1003.json works in its worktree, not the root it was
+        ;; launched from.
+        (claude-code--register "a" feat "/home/test/proj" nil)
+        (should (equal (claude-code--instance-cwd 1003)
+                       "/home/test/proj/.claude/worktrees/feat"))
+        ;; Before that file exists, the launch root stands in.
+        (claude-code--register "b" fresh "/home/x/proj" nil)
+        (should (equal (claude-code--instance-cwd 4242) "/home/x/proj"))
+        ;; A process Emacs does not manage gets nothing, sessions/ file or not.
+        (should (null (claude-code--instance-cwd 1001)))
+        (should (null (claude-code--instance-cwd nil)))))))
 
 (ert-deftest claude-code-test-session-directory ()
   "A session works where the process running it is now, else in its worktree.
@@ -1250,24 +1248,29 @@ otherwise."
   (should (equal (claude-code--build-args :resume "ID" :worktree t)
                  '("--resume=ID"))))
 
-(ert-deftest claude-code-test-build-args-mcp ()
-  "MCP args append verbatim; a nil `:mcp-args' leaves the base list unchanged."
-  ;; A nil `:mcp-args' adds nothing to either branch.
-  (should (equal (claude-code--build-args :session-id "ID" :mcp-args nil)
-                 '("--session-id" "ID")))
-  (should (equal (claude-code--build-args :resume "ID" :mcp-args nil)
-                 '("--resume=ID")))
-  ;; Non-nil MCP args sit with the options, before the "--" terminator and the
-  ;; prompt, so the variadic MCP flags cannot swallow the positional prompt.
-  (should (equal (claude-code--build-args
-                  :session-id "ID" :prompt "hi"
-                  :mcp-args '("--mcp-config" "{}" "--allowedTools" "x"))
-                 '("--session-id" "ID"
-                   "--mcp-config" "{}" "--allowedTools" "x" "--" "hi")))
-  ;; ...and to the resume list too.
-  (should (equal (claude-code--build-args
-                  :resume "ID" :mcp-args '("--mcp-config" "{}"))
-                 '("--resume=ID" "--mcp-config" "{}"))))
+(ert-deftest claude-code-test-launch-hands-the-cli-its-pid ()
+  "A first MCP argument split around the PID launches the CLI through a shell.
+The shell fills in the PID only the started process knows, and the MCP
+arguments lead because the split one has to come first.  With no PID to fill
+in, the CLI is launched directly."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (let ((execs '())
+            (claude-code-cli "claude"))
+        (claude-code-tests--recording-launch execs
+          (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
+                     (lambda ()
+                       '(("--mcp-config=<" . ">") "--allowedTools" "x"))))
+            (let ((id (car (claude-code-spawn "/r" :prompt "hi"))))
+              (should (equal (nth 3 (car execs)) "/bin/sh"))
+              (should (equal (nth 1 (car execs))
+                             (list "-c" claude-code--pid-exec "claude"
+                                   "--mcp-config=<" ">" "--allowedTools" "x"
+                                   "--session-id" id "--" "hi")))))
+          (cl-letf (((symbol-function 'claude-code--mcp-cli-args) #'ignore))
+            (claude-code-resume "/r" "given-id")
+            (should (equal (nth 3 (car execs)) "claude"))
+            (should (equal (nth 1 (car execs)) '("--resume=given-id")))))))))
 
 (ert-deftest claude-code-test-cli-program ()
   "The CLI is found the way Ghostel finds a program, not on the shell's `$PATH'.
@@ -1292,21 +1295,35 @@ A bare name is searched for on `exec-path', a relative path is taken against
 
 (ert-deftest claude-code-test-launch-refuses-a-missing-cli ()
   "A CLI that cannot be found stops the launch before it starts anything.
-Ghostel would find it missing only once the MCP server was up and the buffer
-made, leaving both behind."
+The shell would otherwise exit at once in a buffer that dies with it, leaving
+the caller an id for an instance that never ran."
   (claude-code-tests--with-registry
     (let ((execs '())
           (mcp-calls 0)
           (buffers (buffer-list)))
       (claude-code-tests--recording-launch execs
         (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
-                   (lambda (_id) (cl-incf mcp-calls) '()))
+                   (lambda () (cl-incf mcp-calls) '()))
                   ((symbol-function 'claude-code--cli-program)
                    (lambda () (user-error "Cannot find the Claude CLI"))))
           (should-error (claude-code-spawn "/r") :type 'user-error))
         (should (null execs))
         (should (zerop mcp-calls))
         (should-not (seq-difference (buffer-list) buffers))))))
+
+(ert-deftest claude-code-test-pid-exec ()
+  "The launch script hands the CLI its own PID, and every argument verbatim."
+  (with-temp-buffer
+    (let ((proc (make-process
+                 :name "cc-pid-exec" :buffer (current-buffer)
+                 :connection-type 'pipe :sentinel #'ignore
+                 :command (list "/bin/sh" "-c" claude-code--pid-exec "/bin/echo"
+                                "--x=<" ">" "it's $HOME" "\"q\" `x` $$"))))
+      (while (process-live-p proc)
+        (accept-process-output proc 0.1))
+      (should (equal (buffer-string)
+                     (format "--x=<%d> it's $HOME \"q\" `x` $$\n"
+                             (process-id proc)))))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."
@@ -1603,15 +1620,15 @@ argument list differs."
             ;; Resume ignores new-session options; spawn keeps them behind the
             ;; generated session id.
             (should (equal resume-args
-                           '("--resume=given-id" "--mcp-config" "{}")))
+                           '("--resume=given-id")))
             (should (equal (nth 0 spawn-args) "--session-id"))
             (should (string-match-p claude-code-tests--uuid-re spawned-id))
             ;; Spawn hands back that id with the buffer hosting it.
             (should (equal (car spawned) spawned-id))
             (should (eq (cdr spawned) (nth 0 (nth 0 calls))))
-            (should (equal (nthcdr 2 spawn-args)
-                           '("--worktree=feat" "--model" "opus"
-                             "--mcp-config" "{}")))
+            (should (equal spawn-args
+                           (list "--session-id" spawned-id
+                                 "--worktree=feat" "--model" "opus")))
             ;; Both registered; only spawn recorded a worktree.
             (should (= (hash-table-count claude-code--managed) 2))
             (should (null (plist-get (gethash "given-id" claude-code--managed)
@@ -1716,7 +1733,7 @@ shutdown."
           (buffers (buffer-list)))
       (claude-code-tests--recording-launch execs
         (cl-letf (((symbol-function 'claude-code--mcp-cli-args)
-                   (lambda (_id) (cl-incf mcp-calls) '())))
+                   (lambda () (cl-incf mcp-calls) '())))
           (let ((claude-code-renderer 'tui))
             (should-error (claude-code-spawn "/r") :type 'user-error)))
         (should (null execs))
@@ -1788,8 +1805,7 @@ null,\"sessionId\":\"%s\"}\n" id)))
                 (clrhash claude-code--transcript-cache)
                 (claude-code-resume root id)
                 (should (equal (nth 1 (car execs))
-                               (list "--worktree=left" (concat "--resume=" id)
-                                     "--mcp-config" "{}")))
+                               (list "--worktree=left" (concat "--resume=" id))))
                 ;; The worktree the session named is gone: resume plainly.
                 (delete-directory worktree t)
                 (clrhash claude-code--transcript-cache)
@@ -1797,8 +1813,7 @@ null,\"sessionId\":\"%s\"}\n" id)))
                 (setq execs '())
                 (claude-code-resume root id)
                 (should (equal (nth 1 (car execs))
-                               (list (concat "--resume=" id)
-                                     "--mcp-config" "{}")))))))
+                               (list (concat "--resume=" id))))))))
       (delete-directory root t)
       (delete-directory config t))))
 

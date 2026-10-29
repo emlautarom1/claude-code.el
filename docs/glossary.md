@@ -45,7 +45,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **MCP tool** / **tool catalog** — a capability the MCP server advertises to Claude (a name, description, argument schema, and a handler function), registered with `claude-code-mcp-make-tool`. The **tool catalog** is the set of all advertised tools; it is expected to grow, and each one is documented in [`mcp-tools.md`](mcp-tools.md).
 
-- **Session-id path token** — the spawn UUID as it appears in the MCP request path `/mcp/<uuid>`. It multiplexes sessions over the one shared server and keys the real-cwd lookup. It is **not** a security boundary (see the [security decision](architecture.md#decisions)).
+- **PID path token** — the instance's PID as it appears in the MCP request path `/mcp/<pid>`. It multiplexes instances over the one shared server and keys the real-cwd lookup. It is **not** a security boundary (see the [security decision](architecture.md#decisions)).
 
 - **Inline renderer** / **fullscreen renderer** — Claude's two ways of drawing itself in a terminal, its `tui` setting's two values: the classic, inline main-screen renderer (`"default"`) and the flicker-free alt-screen renderer with virtualized scrollback (`"fullscreen"`). Claude resolves which one an instance gets unless `claude-code-renderer` names one; see the [architecture notes](architecture.md#the-renderer).
 

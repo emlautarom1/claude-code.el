@@ -148,12 +148,14 @@ The name must also **round-trip**. `--worktree=NAME` always resolves to `<root>/
 The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. Each spawned instance is wired to the server entirely through the command line: `claude` is passed `--mcp-config` with an inline JSON blob
 
 ```json
-{"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp/<sessionId>"}}}
+{"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp/<pid>"}}}
 ```
 
-(plus `--allowedTools` listing every registered tool when auto-approve is on). No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has. Because the JSON is handed to `claude` execvp-style (Ghostel does not go through a shell), it needs no escaping.
+(plus `--allowedTools` listing every registered tool when auto-approve is on). No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has.
 
-The one piece of on-disk state the server *reads* is a running session's real cwd: `claude-code--session-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root in the brief window before that file exists. This is a read through the existing storage adapter — no new format.
+The URL names the instance by its PID, which only the started process knows, so the CLI is launched through `/bin/sh` (`claude-code--pid-exec`): it splices `$$` into `--mcp-config=` and `exec`s the CLI under the same PID.
+
+The one piece of on-disk state the server *reads* is the calling instance's real cwd: `claude-code--instance-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root in the brief window before that file exists.
 
 ## Mapping an Emacs buffer to a session
 

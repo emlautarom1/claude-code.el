@@ -59,7 +59,7 @@
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
 ;; the byte-compiler happy without pulling the MCP file (and its `web-server'
 ;; dependency) in eagerly, and avoids a load cycle.
-(declare-function claude-code--mcp-cli-args "claude-code-mcp" (id))
+(declare-function claude-code--mcp-cli-args "claude-code-mcp" ())
 
 
 ;;;; Customization
@@ -70,7 +70,9 @@
   :prefix "claude-code-")
 
 (defcustom claude-code-cli "claude"
-  "Executable used to launch the Claude Code CLI."
+  "Executable used to launch the Claude Code CLI.
+A wrapper must `exec' the CLI, which has to run under the PID it was started
+with: that PID is what names the instance."
   :type 'string)
 
 (defcustom claude-code-config-dir
@@ -678,16 +680,18 @@ RSS is in kibibytes."
             (setq stack (append (funcall children p) stack)))))
       (and found (cons cpu rss)))))
 
-(defun claude-code--session-cwd (id)
-  "Return the real working directory of the managed instance for session ID.
-Read off the instance's sessions/ file -- the worktree directory for one working
-in a worktree -- and, before that file exists, the root it was launched from.
-Nil for an id no instance Emacs manages was launched on."
-  (when-let* ((entry (gethash id claude-code--managed)))
-    (or (let ((buffer (plist-get entry :buffer)))
-          (and (buffer-live-p buffer)
-               (claude-code--pid-cwd (claude-code--instance-pid buffer))))
-        (plist-get entry :origin))))
+(defun claude-code--instance-cwd (pid)
+  "Return the directory managed instance PID works in, or nil for no instance.
+Read off its sessions/ file -- the worktree directory for one working in a
+worktree -- and, before that file exists, the root it was launched from."
+  (when-let* ((entry (cl-loop for entry being the hash-values
+                              of claude-code--managed
+                              for buffer = (plist-get entry :buffer)
+                              when (and (buffer-live-p buffer)
+                                        (eql (claude-code--instance-pid buffer)
+                                             pid))
+                              return entry)))
+    (or (claude-code--pid-cwd pid) (plist-get entry :origin))))
 
 (defun claude-code--session-directory (session root)
   "Return the directory SESSION, listed under project ROOT, works in now.
@@ -709,7 +713,7 @@ otherwise."
 ;;;; Operations
 
 (cl-defun claude-code--build-args
-    (&key session-id resume prompt name worktree model effort mcp-args)
+    (&key session-id resume prompt name worktree model effort)
   "Build the argument list for the `claude' CLI.
 
 When RESUME is non-nil it is a session id to resume, and the result is
@@ -726,16 +730,11 @@ its session up front.  NAME sets the session's display name
 are passed through verbatim -- their validity is the CLI's concern, and a name
 that is empty or nothing but whitespace is one the CLI reads as no name at all.
 PROMPT, when a non-empty string, is emitted last as a positional argument
-behind a \"--\" option terminator.
-
-MCP-ARGS is a list of extra CLI arguments (the MCP wiring built by
-`claude-code--mcp-cli-args') placed with the other options, before the
-terminator; this function keeps no MCP knowledge of its own."
+behind a \"--\" option terminator."
   (if resume
       (append (when (stringp worktree)
                 (list (concat "--worktree=" worktree)))
-              (list (concat "--resume=" resume))
-              mcp-args)
+              (list (concat "--resume=" resume)))
     (append (when session-id (list "--session-id" session-id))
             (when name (list (concat "--name=" name)))
             (when worktree
@@ -744,7 +743,6 @@ terminator; this function keeps no MCP knowledge of its own."
                       "--worktree")))
             (when model (list "--model" model))
             (when effort (list "--effort" effort))
-            mcp-args
             (unless (or (null prompt) (string-empty-p prompt))
               (list "--" prompt)))))
 
@@ -945,6 +943,12 @@ against `default-directory', as Ghostel resolves a program it runs."
       (user-error "Cannot find the Claude CLI `%s'" claude-code-cli))
     program))
 
+(defconst claude-code--pid-exec "a=$1$$$2; shift 2; exec \"$0\" \"$a\" \"$@\""
+  "Script `/bin/sh' runs to hand the CLI its own PID in its first argument.
+Run as `sh -c SCRIPT CLI PREFIX SUFFIX ARGS...', it execs CLI with PREFIX, the
+PID and SUFFIX joined ahead of ARGS.  `exec' keeps the shell's PID, so `$$' is
+the PID the CLI runs under.")
+
 (defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
@@ -952,7 +956,9 @@ origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
 rather than start it, which `:worktree' may accompany; the `:worktree' request
 is also recorded in the registry.
-The instance is launched on `claude-code-renderer' when it names one."
+The instance is launched on `claude-code-renderer' when it names one.  A
+\(PREFIX . SUFFIX) first argument from `claude-code--mcp-cli-args' launches the
+CLI through `claude-code--pid-exec'."
   (require 'ghostel)
   (require 'claude-code-mcp)
   (let* (;; Resolved first so a bad value aborts before the MCP server is
@@ -961,10 +967,8 @@ The instance is launched on `claude-code-renderer' when it names one."
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
          (program (claude-code--cli-program))
-         (args (apply #'claude-code--build-args
-                      :session-id id
-                      :mcp-args (claude-code--mcp-cli-args id)
-                      opts))
+         (args (append (claude-code--mcp-cli-args)
+                       (apply #'claude-code--build-args :session-id id opts)))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
          (renderer-hook
@@ -978,7 +982,12 @@ The instance is launched on `claude-code-renderer' when it names one."
                    (cons renderer-hook
                          (default-value 'ghostel-pre-spawn-hook))))
     (unwind-protect
-        (ghostel-exec buffer program args)
+        (pcase args
+          (`((,prefix . ,suffix) . ,rest)
+           (ghostel-exec buffer "/bin/sh"
+                         `("-c" ,claude-code--pid-exec ,program
+                           ,prefix ,suffix ,@rest)))
+          (_ (ghostel-exec buffer program args)))
       (when renderer-env
         (set-default 'ghostel-pre-spawn-hook
                      (delq renderer-hook

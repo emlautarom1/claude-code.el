@@ -8,12 +8,12 @@
 
 ;; A Model Context Protocol (MCP) server that lets the `claude' CLI instances
 ;; this package spawns act on the user's live Emacs.  One HTTP server runs per
-;; Emacs, shared by every session; each session is keyed by its spawn UUID in
-;; the request path `/mcp/<uuid>'.  The server advertises a growing catalog of
+;; Emacs, shared by every instance; each instance is keyed by its PID in the
+;; request path `/mcp/<pid>'.  The server advertises a growing catalog of
 ;; tools, documented one by one in docs/mcp-tools.md:
 ;;
 ;;   * `eval' -- read and evaluate Elisp, return the printed result.
-;;   * `spawn' -- start another instance in the calling session's directory.
+;;   * `spawn' -- start another instance in the calling instance's directory.
 ;;
 ;; The file is organized in the same model/view/adapter spirit as
 ;; `claude-code.el':
@@ -28,11 +28,11 @@
 ;;     request.  Both are directly unit-testable.
 ;;   * Registry/catalog -- the tool table and `claude-code-mcp-make-tool', plain
 ;;     data describing every advertised tool.
-;;   * Session context -- what a tool call knows about the session that made it:
-;;     `claude-code--mcp-with-session' binds its real working directory.
+;;   * Session context -- what a tool call knows about the instance that made
+;;     it: `claude-code--mcp-with-session' binds its real working directory.
 ;;
 ;; Session state is reached ONLY through the `claude-code.el' model
-;; (`claude-code--session-cwd'); this file never re-parses `~/.claude'.  A tool
+;; (`claude-code--instance-cwd'); this file never re-parses `~/.claude'.  A tool
 ;; that acts on sessions does so through the public operations API.
 ;;
 ;; SECURITY.  This server executes arbitrary Elisp on behalf of a local process
@@ -92,22 +92,22 @@ Used as the `mcpServers' key in the `--mcp-config' blob and as the
 ;;;; Session context
 
 (defvar claude-code--mcp-session-cwd nil
-  "Real working directory of the session whose tool call is running.
+  "Real working directory of the instance whose tool call is running.
 Bound by `claude-code--mcp-with-session' for the duration of the call, and nil
-when the id that call arrived under names no known session.  A handler is
-passed its validated arguments and nothing else, so this is how one that has to
-act on the caller's own project reaches it -- and the nil case is a question
-`default-directory' cannot answer, being bound either way.")
+when the PID that call arrived under names no instance this Emacs manages.  A
+handler is passed its validated arguments and nothing else, so this is how one
+that has to act on the caller's own project reaches it -- and the nil case is a
+question `default-directory' cannot answer, being bound either way.")
 
-(defmacro claude-code--mcp-with-session (session-id &rest body)
-  "Evaluate BODY in the context of the session SESSION-ID names.
-Its real cwd comes from `claude-code--session-cwd', resolved once and bound to
-both `claude-code--mcp-session-cwd' and `default-directory'; an unknown id
+(defmacro claude-code--mcp-with-session (pid &rest body)
+  "Evaluate BODY in the context of the instance PID names.
+Its real cwd comes from `claude-code--instance-cwd', resolved once and bound
+to both `claude-code--mcp-session-cwd' and `default-directory'; an unknown PID
 leaves `default-directory' unchanged.  That directory is best-effort context
 for a tool, not a sandbox: it only affects `default-directory'-relative
 operations, not code using absolute paths."
   (declare (indent 1))
-  `(let* ((claude-code--mcp-session-cwd (claude-code--session-cwd ,session-id))
+  `(let* ((claude-code--mcp-session-cwd (claude-code--instance-cwd ,pid))
           (default-directory (if claude-code--mcp-session-cwd
                                  (file-name-as-directory
                                   claude-code--mcp-session-cwd)
@@ -233,9 +233,9 @@ with (window-buffer (selected-window))."
   "Handle the `spawn' tool; return the new session's id.
 PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
 WORKTREE the name of the checkout to run in.  The root is not among them: an
-instance is launched from the directory of the session that asked for it."
+instance is launched from the directory of the instance that asked for it."
   (unless claude-code--mcp-session-cwd
-    (error "No working directory known for the calling session"))
+    (error "No working directory known for the calling instance"))
   (car (claude-code-spawn claude-code--mcp-session-cwd
                           :prompt prompt :name name
                           :model model :effort effort
@@ -388,8 +388,8 @@ a handler passing values on to a process emits no option with an empty value."
                (t value))))
           arg-specs))
 
-(defun claude-code--mcp-tools-call (session-id params)
-  "Run the tool named in PARAMS for SESSION-ID and return its result payload.
+(defun claude-code--mcp-tools-call (pid params)
+  "Run the tool named in PARAMS for instance PID and return its result payload.
 PARAMS is the `tools/call' params alist carrying `name' and `arguments', and
 must be an object -- JSON null standing for the one a call did not send.
 Signals a `claude-code--mcp-rpc-error' for a PARAMS of any other shape, for an
@@ -408,7 +408,7 @@ that itself errors yields an `isError' result rather than crashing the server."
                       (plist-get tool :args)
                       (alist-get 'arguments params))))
       (condition-case err
-          (let ((result (claude-code--mcp-with-session session-id
+          (let ((result (claude-code--mcp-with-session pid
                           (apply (plist-get tool :handler) call-args))))
             (list (cons 'content
                         (vector (list (cons 'type "text")
@@ -422,9 +422,9 @@ that itself errors yields an `isError' result rather than crashing the server."
                                                  (error-message-string err))))))
                (cons 'isError t)))))))
 
-(defun claude-code--mcp-handle-request (session-id request)
+(defun claude-code--mcp-handle-request (pid request)
   "Return the JSON-RPC response alist for REQUEST, or nil for a notification.
-SESSION-ID is the path token identifying the calling session.  REQUEST is the
+PID is the path token naming the calling instance, nil for none.  REQUEST is the
 parsed JSON-RPC request object (an alist).  A request with no `id' is a
 notification and yields nil (the transport still acknowledges it).  A non-object
 REQUEST -- a JSON array or bare scalar -- is answered with a -32600 Invalid
@@ -443,7 +443,7 @@ error envelope echoing the request `id'."
              (pcase method
                ("initialize" (claude-code--mcp-initialize))
                ("tools/list" (claude-code--mcp-tools-list))
-               ("tools/call" (claude-code--mcp-tools-call session-id params))
+               ("tools/call" (claude-code--mcp-tools-call pid params))
                (_ (signal 'claude-code--mcp-rpc-error
                           (list -32601 (format "Method not found: %s" method))))))
           (claude-code--mcp-rpc-error
@@ -453,9 +453,9 @@ error envelope echoing the request `id'."
             id -32603
             (format "Internal error: %s" (error-message-string err)))))))))
 
-(defun claude-code--mcp-response-for-body (session-id body declared-length)
+(defun claude-code--mcp-response-for-body (pid body declared-length)
   "Return the JSON-RPC response alist for BODY, or nil for a notification.
-SESSION-ID is the path token identifying the calling session.  BODY is the
+PID is the path token naming the calling instance, nil for none.  BODY is the
 raw POST body; DECLARED-LENGTH is the request's Content-Length value as a
 string, or nil when the header is absent.  A BODY whose byte count disagrees
 with DECLARED-LENGTH is answered with a -32700 error rather than parsed:
@@ -469,7 +469,7 @@ only for the parse."
       (claude-code--mcp-error :null -32700 "Truncated request body")
     (condition-case nil
         (claude-code--mcp-handle-request
-         session-id (json-parse-string body :object-type 'alist))
+         pid (json-parse-string body :object-type 'alist))
       (json-error (claude-code--mcp-error :null -32700 "Parse error")))))
 
 
@@ -500,16 +500,17 @@ only for the parse."
 
 (defun claude-code--mcp-handle (request)
   "Handle one MCP HTTP POST REQUEST from the `web-server' transport.
-Reads the session id, body and declared Content-Length off REQUEST, maps
-them to a response through `claude-code--mcp-response-for-body', and writes
-it back -- an empty 202 when there is none (a notification)."
+Reads the PID, body and declared Content-Length off REQUEST, maps them to a
+response through `claude-code--mcp-response-for-body', and writes it back --
+an empty 202 when there is none (a notification).  A path whose token is not
+all digits names no instance."
   (with-slots (process headers body) request
     (let* ((path (cdr (assoc :POST headers)))
-           (session-id (and path
-                            (string-match "^/mcp/\\([^/]+\\)" path)
-                            (match-string 1 path)))
+           (pid (and path
+                     (string-match "\\`/mcp/\\([0-9]+\\)\\'" path)
+                     (string-to-number (match-string 1 path))))
            (response (claude-code--mcp-response-for-body
-                      session-id body
+                      pid body
                       (cdr (assoc :CONTENT-LENGTH headers)))))
       (if response
           (claude-code--mcp-send process response)
@@ -548,26 +549,33 @@ prefix is `claude-code--mcp-server-name'."
   (cl-loop for name being the hash-keys of claude-code--mcp-tools
            collect (format "mcp__%s__%s" claude-code--mcp-server-name name)))
 
-(defun claude-code--mcp-cli-args (id)
-  "Return CLI arguments connecting session ID to the MCP server, or nil.
+(defun claude-code--mcp-cli-args ()
+  "Return CLI arguments connecting an instance to the MCP server, or nil.
 Starts the server if needed.  Returns nil when MCP is disabled or the server
-could not start.  Otherwise returns `--mcp-config' with an inline JSON blob
-pointing at `/mcp/ID', plus an `--allowedTools' entry for every registered tool
-when `claude-code-mcp-auto-approve' is non-nil.  The JSON is passed to `claude'
-execvp-style, so it needs no shell escaping."
+could not start.  Otherwise the first argument is `--mcp-config=' with an
+inline JSON blob pointing at `/mcp/<pid>', given as the (PREFIX . SUFFIX)
+either side of the PID, which `claude-code--launch' fills in.  An
+`--allowedTools' entry for every registered tool follows when
+`claude-code-mcp-auto-approve' is non-nil."
   (when-let* ((port (claude-code--mcp-ensure-server)))
-    (let ((config (json-serialize
-                   (list (cons 'mcpServers
-                               (list (cons (intern claude-code--mcp-server-name)
-                                           (list (cons 'type "http")
-                                                 (cons 'url
-                                                       (format
-                                                        "http://127.0.0.1:%d/mcp/%s"
-                                                        port id))))))))))
-      (append (list "--mcp-config" config)
-              (when-let* ((allowed (and claude-code-mcp-auto-approve
-                                        (claude-code--mcp-allowed-tools))))
-                (list "--allowedTools" (string-join allowed ",")))))))
+    (pcase-let* ((marker "<pid>")
+                 (`(,prefix ,suffix)
+                  (split-string
+                   (concat
+                    "--mcp-config="
+                    (json-serialize
+                     (list (cons 'mcpServers
+                                 (list (cons (intern claude-code--mcp-server-name)
+                                             (list (cons 'type "http")
+                                                   (cons 'url
+                                                         (format
+                                                          "http://127.0.0.1:%d/mcp/%s"
+                                                          port marker)))))))))
+                   (regexp-quote marker))))
+      (cons (cons prefix suffix)
+            (when-let* ((allowed (and claude-code-mcp-auto-approve
+                                      (claude-code--mcp-allowed-tools))))
+              (list "--allowedTools" (string-join allowed ",")))))))
 
 ;;;###autoload
 (defun claude-code-mcp-stop ()
