@@ -62,19 +62,41 @@ Instances a test registers are therefore invisible to every other test."
   `(let ((claude-code--managed (make-hash-table :test 'equal)))
      ,@body))
 
-(defmacro claude-code-tests--with-managed-buffer (var &rest body)
-  "Run BODY with VAR bound to a fresh buffer and an empty managed registry.
-The buffer carries `ghostel--pid' 4242 and no program status record, as a
-Ghostel terminal would.  It is killed afterwards even when BODY already killed
-it."
+(defmacro claude-code-tests--with-managed-buffer (spec &rest body)
+  "Run BODY with a fresh buffer bound and an empty managed registry.
+SPEC is VAR or (VAR PID): the buffer is bound to VAR and carries
+`ghostel--pid' PID, 4242 by default, and no program status record, as a
+Ghostel terminal would.  It is killed afterwards even when BODY already
+killed it."
   (declare (indent 1))
-  `(claude-code-tests--with-registry
-     (let ((,var (generate-new-buffer " *cc-test*")))
-       (with-current-buffer ,var
-         (setq-local ghostel--pid 4242
-                     ghostel-program-status nil))
-       (unwind-protect (progn ,@body)
-         (when (buffer-live-p ,var) (kill-buffer ,var))))))
+  (pcase-let ((`(,var ,pid) (if (consp spec) spec (list spec 4242))))
+    `(claude-code-tests--with-registry
+       (let ((,var (generate-new-buffer " *cc-test*")))
+         (with-current-buffer ,var
+           (setq-local ghostel--pid ,pid
+                       ghostel-program-status nil))
+         (unwind-protect (progn ,@body)
+           (when (buffer-live-p ,var) (kill-buffer ,var)))))))
+
+(defmacro claude-code-tests--with-config (&rest body)
+  "Run BODY with `claude-code-config-dir' a scratch directory holding sessions/.
+The directory is removed afterwards."
+  (declare (indent 0))
+  `(let ((claude-code-config-dir (make-temp-file "cc-config" t)))
+     (unwind-protect
+         (progn (make-directory (claude-code--sessions-dir))
+                ,@body)
+       (delete-directory claude-code-config-dir t))))
+
+(defun claude-code-tests--write-session-file (pid content)
+  "Write CONTENT as sessions/PID.json under `claude-code-config-dir'.
+CONTENT is a string, or a session id to name in an otherwise minimal file."
+  (with-temp-file (expand-file-name (format "%d.json" pid)
+                                    (claude-code--sessions-dir))
+    (insert (if (string-prefix-p "{" content)
+                content
+              (format "{\"pid\":%d,\"sessionId\":\"%s\",\"status\":\"idle\"}"
+                      pid content)))))
 
 (defun claude-code-tests--listening-p (port)
   "Return non-nil when something accepts a loopback connection on PORT.
@@ -277,38 +299,50 @@ The directory is named as CLI v2.1.304 named it for that cwd."
                          (list id))))
       (delete-directory config t))))
 
-(ert-deftest claude-code-test-live-status-table ()
-  "Every sessions/ file is parsed and keyed by session id."
+(ert-deftest claude-code-test-live-table ()
+  "Every sessions/ file is parsed and keyed by the PID that names it."
   (claude-code-tests--with-fixtures
-    (let ((table (claude-code--live-status-table)))
+    (let ((table (claude-code--live-table)))
       (should (= (hash-table-count table) 6))
-      (let ((s1 (gethash "11111111-1111-4111-8111-111111111111" table)))
-        (should (equal (plist-get s1 :status) "busy"))
-        (should-not (plist-get s1 :shell-p))
-        ;; The parser exposes only :pid, :cwd, :status, :waiting-for and
+      (let ((p1 (gethash 1001 table)))
+        (should (equal (plist-get p1 :session)
+                       "11111111-1111-4111-8111-111111111111"))
+        (should (equal (plist-get p1 :cwd) "/home/test/proj"))
+        (should (equal (plist-get p1 :status) "busy"))
+        (should-not (plist-get p1 :shell-p))
+        ;; The parser exposes only :session, :cwd, :status, :waiting-for and
         ;; :shell-p.
-        (should (null (plist-get s1 :name)))
-        (should (= (plist-get s1 :pid) 1001)))
-      (let ((s3 (gethash "33333333-3333-4333-8333-333333333333" table)))
-        (should (equal (plist-get s3 :status) "waiting"))
-        (should (equal (plist-get s3 :waiting-for) "permission prompt")))
+        (should (null (plist-get p1 :name))))
+      (let ((p3 (gethash 1003 table)))
+        (should (equal (plist-get p3 :status) "waiting"))
+        (should (equal (plist-get p3 :waiting-for) "permission prompt")))
       ;; A file without a status field yields nil, not an error.
-      (let ((s4 (gethash "44444444-4444-4444-8444-444444444444" table)))
-        (should (null (plist-get s4 :status))))
+      (should (null (plist-get (gethash 1004 table) :status)))
       ;; Claude's `shell' (between turns, a background command running) is
       ;; busy, and flagged as such.
-      (let ((s6 (gethash "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" table)))
-        (should (equal (plist-get s6 :status) "busy"))
-        (should (plist-get s6 :shell-p)))
-      ;; `claude-code--live-info' is the per-id lookup over the same data:
-      ;; a fresh parse without TABLE, the given TABLE as-is (no reparse).
-      (let ((id "11111111-1111-4111-8111-111111111111"))
-        (should (equal (claude-code--live-info id) (gethash id table)))
-        (should (null (claude-code--live-info "no-such-id")))
-        (cl-letf (((symbol-function 'claude-code--live-status-table)
-                   (lambda () (error "Reparsed"))))
-          (should (eq (claude-code--live-info id table)
-                      (gethash id table))))))))
+      (let ((p6 (gethash 1006 table)))
+        (should (equal (plist-get p6 :status) "busy"))
+        (should (plist-get p6 :shell-p)))
+      ;; `claude-code--pid-info' reads one process's file the same way.
+      (should (equal (claude-code--pid-info 1003) (gethash 1003 table)))
+      (should-not (claude-code--pid-info 999999))
+      (should-not (claude-code--pid-info nil)))))
+
+(ert-deftest claude-code-test-live-table-skips-what-names-no-session ()
+  "Only a `<pid>.json' naming a session describes a running process.
+A file caught mid-rewrite, one whose `sessionId' is not a string, and the
+companion `<pid>.<sha256>.key' all describe nothing."
+  (claude-code-tests--with-config
+    (claude-code-tests--write-session-file 10 "kept")
+    (claude-code-tests--write-session-file 11 "{\"pid\":11,\"sessionId\":")
+    (claude-code-tests--write-session-file 12 "{\"pid\":12,\"sessionId\":null}")
+    (with-temp-file (expand-file-name "13.0a1b.key" (claude-code--sessions-dir))
+      (insert "{\"sessionId\":\"key\"}"))
+    (let ((table (claude-code--live-table)))
+      (should (equal (hash-table-keys table) '(10)))
+      (should (equal (plist-get (gethash 10 table) :session) "kept")))
+    (should-not (claude-code--pid-info 11))
+    (should-not (claude-code--pid-info 12))))
 
 (ert-deftest claude-code-test-pid-cwd ()
   "A process's working directory is read off its own sessions/ file, by pid."
@@ -858,7 +892,7 @@ carries no name, so it stays blank."
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-managed-buffer buf
+    (claude-code-tests--with-managed-buffer (buf 1001)
       (let ((id "11111111-1111-4111-8111-111111111111"))
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
@@ -868,7 +902,7 @@ carries no name, so it stays blank."
             (should (= (length ss) 7))
             (should (claude-code-session-alive-p s1))
             (should (eq (claude-code-session-buffer s1) buf))
-            (should (= (claude-code-session-pid s1) 4242))
+            (should (= (claude-code-session-pid s1) 1001))
             ;; Alive status comes from the live sessions file; the display
             ;; name comes from the transcript title.
             (should (equal (claude-code-session-status s1) "busy"))
@@ -925,7 +959,7 @@ live here, so only the registry can be making it alive."
     ;; from the parent, the view worktree sessions belong to.
     (dolist (case (list (cons parent worktree) (cons worktree parent)))
       (claude-code-tests--with-fixtures
-        (claude-code-tests--with-managed-buffer buf
+        (claude-code-tests--with-managed-buffer (buf 1003)
           (claude-code-tests--with-live-pids '()
             (claude-code--register id buf (car case) nil)
             (cl-letf (((symbol-function 'claude-code--session-process)
@@ -935,7 +969,7 @@ live here, so only the registry can be making it alive."
                 (should (claude-code-session-alive-p s))
                 (should (eq 'alive (claude-code--session-liveness s)))
                 (should (eq (claude-code-session-buffer s) buf))
-                (should (= (claude-code-session-pid s) 4242))
+                (should (= (claude-code-session-pid s) 1003))
                 ;; A row Emacs owns carries its live status, so the view can
                 ;; act on it: focus, kill, rename and send all work.
                 (should (equal (claude-code-session-status s) "waiting"))
@@ -1102,26 +1136,29 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
                          "Dotted worktree")))))))
 
 (ert-deftest claude-code-test-session-cwd ()
-  "Session cwd prefers the live file, then the registry, else nil."
+  "An instance's cwd is its own sessions/ file's, else its launch root.
+Only an instance Emacs manages has one, found by the id it was launched on."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-registry
-      ;; The live sessions file wins.  Session 33333333 is a worktree, so its
-      ;; live cwd is the worktree directory, not the parent project root.
-      (should (equal (claude-code--session-cwd
-                      "33333333-3333-4333-8333-333333333333")
+    (claude-code-tests--with-managed-buffer (buf 1003)
+      ;; sessions/1003.json works in its worktree, not the root it was
+      ;; launched from, whatever session it names.
+      (claude-code--register "launched" buf "/home/test/proj" nil)
+      (should (equal (claude-code--session-cwd "launched")
                      "/home/test/proj/.claude/worktrees/feat"))
-      ;; With no live file, fall back to the registry's launch-time root.
-      (puthash "reg-only" (list :origin "/home/x/proj") claude-code--managed)
-      (should (equal (claude-code--session-cwd "reg-only") "/home/x/proj"))
-      ;; An unknown id yields nil, so `default-directory' is left unchanged.
+      ;; Before that file exists, the launch root stands in.
+      (with-current-buffer buf (setq-local ghostel--pid 4242))
+      (should (equal (claude-code--session-cwd "launched") "/home/test/proj"))
+      ;; A session Emacs does not run gets nothing, sessions/ file or not.
+      (should (null (claude-code--session-cwd
+                     "11111111-1111-4111-8111-111111111111")))
       (should (null (claude-code--session-cwd "no-such-id"))))))
 
 (ert-deftest claude-code-test-session-directory ()
   "A session works where the process running it is now, else in its worktree.
-Emacs's instance is found by pid, so a `/clear' that moved it onto another
-session id still finds it; one outside Emacs, by session id.  With no process,
-the worktree the binding names counts while it is on disk -- the one the
-Worktree column shows -- and the root otherwise."
+Emacs's instance is found by pid; one outside Emacs, by the pid sessions/ files
+its session under.  With no process, the worktree the binding names counts
+while it is on disk -- the one the Worktree column shows -- and the root
+otherwise."
   (let* ((root (file-truename (make-temp-file "cc-root" t)))
          (feat (claude-code--worktree-path root "feat"))
          (wt "33333333-3333-4333-8333-333333333333")
@@ -1135,7 +1172,8 @@ Worktree column shows -- and the root otherwise."
           ;; sessions/1003.json runs session 33333333 in its worktree.
           (should (equal (funcall dir :id "cleared" :alive-p t :pid 1003)
                          fixture-feat))
-          (should (equal (funcall dir :id wt :external-p t) fixture-feat))
+          (claude-code-tests--with-live-pids '(1003)
+            (should (equal (funcall dir :id wt :external-p t) fixture-feat)))
           ;; A row still drawn alive whose process has gone.
           (should (equal (funcall dir :id wt :alive-p t :pid 999999) root))
           (should (equal (funcall dir :id wt :worktree-binding
@@ -2298,14 +2336,16 @@ The announcement waits out `claude-code--notify-settle'."
 
 (defmacro claude-code-tests--announcing (buf shell seen &rest body)
   "Run BODY with BUF the managed instance \"id-1\", announcing onto SEEN.
-SHELL is read as whether Claude's sessions/ status reports a background
-shell command, so a test moves it by setting it.  Each announcement pushes
-its body."
+SHELL is read as whether the sessions/ status of BUF's process reports a
+background shell command, so a test moves it by setting it.  Each announcement
+pushes its body."
   (declare (indent 3))
   `(cl-letf (((symbol-function 'claude-code--managed-buffer)
               (lambda (id) (and (equal id "id-1") ,buf)))
-             ((symbol-function 'claude-code--live-info)
-              (lambda (&rest _) (list :shell-p ,shell)))
+             ((symbol-function 'claude-code--pid-info)
+              (lambda (pid)
+                (and (eql pid (claude-code--instance-pid ,buf))
+                     (list :shell-p ,shell))))
              ((symbol-function 'claude-code--notify)
               (lambda (_id body) (push body ,seen))))
      ,@body))
@@ -2378,6 +2418,20 @@ registry by then announces nothing."
           (should (equal seen '("Finished")))
           (claude-code--announce "gone" 'done now)
           (should (equal seen '("Finished"))))))))
+
+(ert-deftest claude-code-test-announce-reads-its-own-process ()
+  "Whether a background shell keeps the turn going is read by the instance's PID.
+Pid 1006's sessions/ file reads `shell' and pid 1001's does not."
+  (claude-code-tests--with-fixtures
+    (dolist (case '((1006 . nil) (1001 . ("Finished"))))
+      (claude-code-tests--with-managed-buffer (buf (car case))
+        (let ((seen '()))
+          (cl-letf (((symbol-function 'claude-code--managed-buffer)
+                     (lambda (_id) buf))
+                    ((symbol-function 'claude-code--notify)
+                     (lambda (_id body) (push body seen))))
+            (claude-code--announce "id-1" 'done 1000.0)
+            (should (equal seen (cdr case)))))))))
 
 (ert-deftest claude-code-test-announce-shows-claude-s-message ()
   "Claude's own message is the body whenever it sent one.
@@ -2576,7 +2630,7 @@ happens to come first would miss that."
 The session is built when the notification fires, so it carries the name and
 status the instance has now rather than a cached one."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-managed-buffer buf
+    (claude-code-tests--with-managed-buffer (buf 1001)
       (let* ((id "11111111-1111-4111-8111-111111111111")
              (seen '())
              (claude-code-notify-function
@@ -3588,7 +3642,7 @@ hands it the parent (`claude-code--current-project'), but nothing in the model
 depends on that, since a session belongs to both roots.  The row must land in
 its status group, so `d' has no target there and `k' does."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-managed-buffer buf
+    (claude-code-tests--with-managed-buffer (buf 1003)
       (let ((id "33333333-3333-4333-8333-333333333333")
             (view (generate-new-buffer " *cc-view-test*")))
         (claude-code--register id buf "/home/test/proj" nil)

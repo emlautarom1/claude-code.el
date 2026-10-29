@@ -172,56 +172,49 @@ files its transcripts under itself, making it a project in its own right."
   (expand-file-name "sessions" claude-code-config-dir))
 
 (defun claude-code--read-session-file (file)
-  "Return the JSON object in sessions/ FILE as a hash table, or nil.
-Nil covers a file that is gone, unreadable, or not an object."
-  (let ((obj (ignore-errors
-               (with-temp-buffer
-                 (insert-file-contents file)
-                 (json-parse-buffer :object-type 'hash-table)))))
-    (and (hash-table-p obj) obj)))
+  "Return what sessions/ FILE says of its `claude' process, or nil.
+A plist with keys :session, :cwd, :status, :waiting-for and :shell-p.  Nil
+covers a file that is gone, unreadable, or names no session.  A missing status
+field yields a nil :status, and Claude's \"shell\" reads as \"busy\" with
+:shell-p set (see docs/storage-model.md)."
+  (when-let* ((obj (ignore-errors
+                     (with-temp-buffer
+                       (insert-file-contents file)
+                       (json-parse-buffer :object-type 'hash-table))))
+              ((hash-table-p obj))
+              (session (gethash "sessionId" obj))
+              ((stringp session)))
+    (let ((status (gethash "status" obj))
+          (cwd (gethash "cwd" obj)))
+      (list :session session
+            :cwd (and (stringp cwd) cwd)
+            :status (if (equal status "shell") "busy" status)
+            :waiting-for (gethash "waitingFor" obj)
+            :shell-p (equal status "shell")))))
 
-(defun claude-code--live-status-table ()
-  "Parse the per-process files under sessions/ into a hash table.
-The table is keyed by session id; each value is a plist with keys
-:pid, :cwd, :status, :waiting-for and :shell-p.  This is pure parsing of
-the files Claude writes for every running instance; process liveness
-is decided by the caller.  A missing status field yields a nil :status
-rather than an error, and Claude's \"shell\" reads as \"busy\": the turn has
-ended but a background command runs, whose completion starts the next one.
-:shell-p tells that case apart from a turn in progress."
+(defun claude-code--live-table ()
+  "Parse the per-process files under sessions/ into a hash keyed by PID.
+Each value is a `claude-code--read-session-file' plist.  This is pure parsing
+of the files Claude writes for every running process; process liveness is
+decided by the caller."
   (let ((dir (claude-code--sessions-dir))
-        (table (make-hash-table :test 'equal)))
+        (table (make-hash-table)))
     (when (file-directory-p dir)
-      (dolist (file (directory-files dir t "\\.json\\'"))
-        (when-let* ((obj (claude-code--read-session-file file))
-                    (id (gethash "sessionId" obj)))
-          (let ((status (gethash "status" obj)))
-            (puthash id
-                     (list :pid (gethash "pid" obj)
-                           :cwd (gethash "cwd" obj)
-                           :status (if (equal status "shell") "busy" status)
-                           :waiting-for (gethash "waitingFor" obj)
-                           :shell-p (equal status "shell"))
-                     table)))))
+      (dolist (file (directory-files dir t "\\`[0-9]+\\.json\\'"))
+        (when-let* ((info (claude-code--read-session-file file)))
+          (puthash (string-to-number (file-name-base file)) info table))))
     table))
 
-(defun claude-code--live-info (id &optional table)
-  "Return the live sessions/ entry for session ID, or nil for none.
-TABLE, when given, is a pre-parsed `claude-code--live-status-table', letting
-a caller resolving many ids parse sessions/ once."
-  (gethash id (or table (claude-code--live-status-table))))
+(defun claude-code--pid-info (pid)
+  "Return what sessions/ says of the `claude' process PID, or nil.
+See `claude-code--read-session-file'."
+  (and (integerp pid)
+       (claude-code--read-session-file
+        (expand-file-name (format "%d.json" pid) (claude-code--sessions-dir)))))
 
 (defun claude-code--pid-cwd (pid)
-  "Return the directory the `claude' process PID works in, or nil.
-Read off that process's own sessions/ file, which keeps naming it across a
-change of the session it runs."
-  (when-let* (((integerp pid))
-              (obj (claude-code--read-session-file
-                    (expand-file-name (format "%d.json" pid)
-                                      (claude-code--sessions-dir))))
-              (cwd (gethash "cwd" obj))
-              ((stringp cwd)))
-    cwd))
+  "Return the directory the `claude' process PID works in, or nil."
+  (plist-get (claude-code--pid-info pid) :cwd))
 
 (defvar claude-code--transcript-cache (make-hash-table :test 'equal)
   "Cache mapping a transcript file to (MTIME . FIELDS).
@@ -460,6 +453,10 @@ root a later query normalises the same way."
        (let ((proc (buffer-local-value 'ghostel--process buffer)))
          (and (process-live-p proc) proc))))
 
+(defun claude-code--instance-pid (buffer)
+  "Return the PID of the `claude' process BUFFER hosts."
+  (buffer-local-value 'ghostel--pid buffer))
+
 (defun claude-code--managed-buffer (id)
   "Return the live buffer of the Emacs-managed instance for session ID, or nil."
   (let ((buffer (plist-get (gethash id claude-code--managed) :buffer)))
@@ -482,12 +479,19 @@ This is a bare existence check and does not verify the live process is the same
 PID-reuse trade-off that buys."
   (and (integerp pid) (process-attributes pid) t))
 
-(defun claude-code--external-p (id &optional live-table)
+(defun claude-code--live-pid (id live)
+  "Return the PID of a running `claude' LIVE says runs session ID, or nil.
+LIVE is a `claude-code--live-table'."
+  (cl-loop for pid being the hash-keys of live using (hash-values info)
+           when (and (equal (plist-get info :session) id)
+                     (claude-code--pid-live-p pid))
+           return pid))
+
+(defun claude-code--external-p (id &optional live)
   "Return non-nil when a `claude' outside Emacs is running session ID.
-LIVE-TABLE is a pre-parsed `claude-code--live-status-table'."
+LIVE is a `claude-code--live-table', parsed when omitted."
   (and (not (claude-code--managed-buffer id))
-       (claude-code--pid-live-p
-        (plist-get (claude-code--live-info id live-table) :pid))))
+       (claude-code--live-pid id (or live (claude-code--live-table)))))
 
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
@@ -546,17 +550,16 @@ reach."
 
 (defun claude-code--alive-session (id buffer live &optional tr)
   "Return the alive `claude-code-session' for managed instance ID in BUFFER.
-LIVE is a pre-parsed `claude-code--live-status-table' supplying the instance's
-native status, and TR its `claude-code--project-transcripts' descriptor.  TR's
-worktree is authoritative when TR exists, including when it is nil; the
+LIVE is a `claude-code--live-table' supplying the native status of the
+instance's process, and TR its `claude-code--project-transcripts' descriptor.
+TR's worktree is authoritative when TR exists, including when it is nil; the
 registry stands in only for a session with no transcript yet."
-  (let* ((info (claude-code--live-info id live))
+  (let* ((pid (and (buffer-live-p buffer) (claude-code--instance-pid buffer)))
+         (info (gethash pid live))
          (root (claude-code--root-status buffer))
          (modifier (car (memq (car root) '(done error)))))
     (apply #'claude-code-session--create
-           :id id :alive-p t :buffer buffer
-           :pid (and (buffer-live-p buffer)
-                     (buffer-local-value 'ghostel--pid buffer))
+           :id id :alive-p t :buffer buffer :pid pid
            :status (plist-get info :status)
            :waiting-for (plist-get info :waiting-for)
            :modifier modifier
@@ -574,7 +577,7 @@ registry stands in only for a session with no transcript yet."
 Finds the instance's transcript descriptor under the root it was launched
 from, so the struct carries the session's name as well as its live status."
   (let ((root (plist-get (gethash id claude-code--managed) :origin)))
-    (claude-code--alive-session id buffer (claude-code--live-status-table)
+    (claude-code--alive-session id buffer (claude-code--live-table)
                                 (claude-code--transcript-for root id))))
 
 (defun claude-code-project-sessions (project-root)
@@ -588,7 +591,7 @@ that have no transcript yet.
 A session a program drove is left out unless Emacs manages an instance for it
 \(`claude-code--interactive-transcript-p')."
   (let* ((root (claude-code--normalize-root project-root))
-         (live (claude-code--live-status-table))
+         (live (claude-code--live-table))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (dolist (tr (claude-code--project-transcripts root))
@@ -676,25 +679,27 @@ RSS is in kibibytes."
       (and found (cons cpu rss)))))
 
 (defun claude-code--session-cwd (id)
-  "Return the real working directory of the running instance for session ID.
-Prefers the live `sessions/*.json' cwd (the actual worktree directory for a
-worktree session), falls back to the project root the instance was launched
-from, and is nil for an unknown id."
-  (or (plist-get (claude-code--live-info id) :cwd)
-      (plist-get (gethash id claude-code--managed) :origin)))
+  "Return the real working directory of the managed instance for session ID.
+Read off the instance's sessions/ file -- the worktree directory for one working
+in a worktree -- and, before that file exists, the root it was launched from.
+Nil for an id no instance Emacs manages was launched on."
+  (when-let* ((entry (gethash id claude-code--managed)))
+    (or (let ((buffer (plist-get entry :buffer)))
+          (and (buffer-live-p buffer)
+               (claude-code--pid-cwd (claude-code--instance-pid buffer))))
+        (plist-get entry :origin))))
 
 (defun claude-code--session-directory (session root)
   "Return the directory SESSION, listed under project ROOT, works in now.
-A process running it answers for itself: Emacs's instance by its pid, which
-names it across a `/clear', and one outside Emacs by the session id.  A
-session no process runs works in the worktree its binding names while that is
-a directory, and in ROOT otherwise."
-  (or (pcase (claude-code--session-liveness session)
-        ('alive (claude-code--pid-cwd (claude-code-session-pid session)))
-        ('external (let ((cwd (plist-get (claude-code--live-info
-                                          (claude-code-session-id session))
-                                         :cwd)))
-                     (and (stringp cwd) cwd))))
+A process running it answers for itself: Emacs's instance by its pid, and one
+outside Emacs by the pid sessions/ names it under.  A session no process runs
+works in the worktree its binding names while that is a directory, and in ROOT
+otherwise."
+  (or (claude-code--pid-cwd
+       (pcase (claude-code--session-liveness session)
+         ('alive (claude-code-session-pid session))
+         ('external (claude-code--live-pid (claude-code-session-id session)
+                                           (claude-code--live-table)))))
       (let ((path (plist-get (claude-code-session-worktree-binding session)
                              :path)))
         (and path (file-directory-p path) path))
@@ -810,7 +815,8 @@ RECORD-ID is \"\", changes state from OLD to NEW.  The directory goes through
 Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report itself."
   (when-let* (((string-empty-p record-id))
               ((not (eq (plist-get old :state) (plist-get new :state))))
-              (cwd (claude-code--pid-cwd ghostel--pid)))
+              (cwd (claude-code--pid-cwd
+                    (claude-code--instance-pid (current-buffer)))))
     (ghostel--update-directory cwd)))
 
 (define-derived-mode claude-code-instance-mode ghostel-mode "Claude"
@@ -1395,7 +1401,9 @@ a turn the command keeps going -- its completion starts the next one -- so it
 neither ends the stretch of work nor announces anything."
   (when-let* ((buffer (claude-code--managed-buffer id))
               ((not (and (eq state 'done)
-                         (plist-get (claude-code--live-info id) :shell-p)))))
+                         (plist-get (claude-code--pid-info
+                                     (claude-code--instance-pid buffer))
+                                    :shell-p)))))
     (with-current-buffer buffer
       (let ((since claude-code--working-since))
         (unless (eq state 'blocked)
