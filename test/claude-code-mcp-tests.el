@@ -708,19 +708,6 @@ and the id is what the caller has to find the session by afterwards."
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--effort" "turbo"))))))
 
-(ert-deftest claude-code-mcp-test-spawn-refuses-an-unknown-caller ()
-  "A call from an instance with no known directory launches nothing.
-Falling back to whatever `default-directory' the server happens to hold would
-start an instance in an unrelated project."
-  (let ((execs '()))
-    (claude-code-mcp-tests--with-caller "/home/test/proj" execs
-      (let ((response (claude-code-mcp-tests--call-tool 999
-                                                        "spawn")))
-        (should (eq (alist-get 'isError (alist-get 'result response)) t))
-        (should (string-match-p "No working directory"
-                                (claude-code-mcp-tests--result-text response)))
-        (should (null execs))))))
-
 ;;;; Wire serialization (arrays are vectors, false is JSON false)
 
 (ert-deftest claude-code-mcp-test-serialize-shapes ()

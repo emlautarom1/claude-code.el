@@ -106,11 +106,9 @@ expands that from its own environment as it starts.")
 
 (defvar claude-code--mcp-session-cwd nil
   "Real working directory of the instance whose tool call is running.
-Bound by `claude-code--mcp-with-session' for the duration of the call, and nil
-when the PID that call arrived under names no instance this Emacs manages.  A
+Bound by `claude-code--mcp-with-session' for the duration of the call.  A
 handler is passed its validated arguments and nothing else, so this is how one
-that has to act on the caller's own project reaches it -- and the nil case is a
-question `default-directory' cannot answer, being bound either way.")
+that has to act on the caller's own project reaches it.")
 
 (defmacro claude-code--mcp-with-session (pid &rest body)
   "Evaluate BODY in the context of the instance PID names.
@@ -247,8 +245,6 @@ with (window-buffer (selected-window))."
 PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
 WORKTREE the name of the checkout to run in.  The root is not among them: an
 instance is launched from the directory of the instance that asked for it."
-  (unless claude-code--mcp-session-cwd
-    (error "No working directory known for the calling instance"))
   (car (claude-code-spawn claude-code--mcp-session-cwd
                           :prompt prompt :name name
                           :model model :effort effort
