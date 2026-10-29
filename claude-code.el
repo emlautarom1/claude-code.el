@@ -713,14 +713,14 @@ worktree -- and, before that file exists, the root it was launched from."
 
 (defun claude-code--session-directory (session root)
   "Return the directory SESSION, listed under project ROOT, works in now.
-A process running it answers for itself: Emacs's instance by its pid, and one
-outside Emacs by the pid sessions/ names it under.  A session no process runs
-works in the worktree its binding names while that is a directory, and in ROOT
-otherwise."
-  (or (claude-code--pid-cwd
-       (pcase (claude-code--session-liveness session)
-         ('alive (claude-code-session-pid session))
-         ('external (gethash (claude-code-session-id session)
+A process running it answers for itself: Emacs's instance as
+`claude-code--instance-cwd' does, and one outside Emacs by its sessions/ file.
+A session no process runs works in the worktree its binding names while that is
+a directory, and in ROOT otherwise."
+  (or (pcase (claude-code--session-liveness session)
+        ('alive (claude-code--instance-cwd (claude-code-session-pid session)))
+        ('external (claude-code--pid-cwd
+                    (gethash (claude-code-session-id session)
                              (claude-code--running)))))
       (let ((path (plist-get (claude-code-session-worktree-binding session)
                              :path)))

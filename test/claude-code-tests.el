@@ -1247,10 +1247,10 @@ Only an instance Emacs manages has one."
 
 (ert-deftest claude-code-test-session-directory ()
   "A session works where the process running it is now, else in its worktree.
-Emacs's instance is found by pid; one outside Emacs, by the pid sessions/ files
-its session under.  With no process, the worktree the binding names counts
-while it is on disk -- the one the Worktree column shows -- and the root
-otherwise."
+Emacs's instance is found by pid, and works where it was launched until its
+sessions/ file says otherwise; one outside Emacs, by the pid sessions/ files its
+session under.  With no process, the worktree the binding names counts while it
+is on disk -- the one the Worktree column shows -- and the root otherwise."
   (let* ((root (file-truename (make-temp-file "cc-root" t)))
          (feat (claude-code--worktree-path root "feat"))
          (wt "33333333-3333-4333-8333-333333333333")
@@ -1261,9 +1261,14 @@ otherwise."
     (unwind-protect
         (claude-code-tests--with-fixtures
           (make-directory feat t)
-          ;; sessions/1003.json runs session 33333333 in its worktree.
-          (should (equal (funcall dir :id "cleared" :alive-p t :pid 1003)
-                         fixture-feat))
+          (claude-code-tests--with-registry
+            ;; sessions/1003.json runs session 33333333 in its worktree.
+            (puthash 1003 (list :origin root) claude-code--managed)
+            (should (equal (funcall dir :id "cleared" :alive-p t :pid 1003)
+                           fixture-feat))
+            ;; No sessions/4242.json yet.
+            (puthash 4242 (list :origin feat) claude-code--managed)
+            (should (equal (funcall dir :id "new" :alive-p t :pid 4242) feat)))
           (claude-code-tests--with-live-pids '(1003)
             (should (equal (funcall dir :id wt :external-p t) fixture-feat)))
           ;; A row still drawn alive whose process has gone.
@@ -3442,17 +3447,21 @@ moved still opens where the instance is now."
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point)))
       (claude-code-tests--with-fixtures
-        (claude-code-tests--in-view
-          (setq-local claude-code--project "/home/test/proj")
-          (should (equal (should-error (claude-code-sessions-vc) :type 'user-error)
-                         '(user-error "No session on this line")))
-          (setq at-point (claude-code-session--create :id "d"))
-          (claude-code-sessions-vc)
-          (setq at-point (claude-code-session--create :id "a" :alive-p t :pid 1003))
-          (claude-code-sessions-vc)
-          (should (equal (reverse shown)
-                         '("/home/test/proj/"
-                           "/home/test/proj/.claude/worktrees/feat/"))))))))
+        (claude-code-tests--with-registry
+          (claude-code-tests--in-view
+            (setq-local claude-code--project "/home/test/proj")
+            (should (equal (should-error (claude-code-sessions-vc)
+                                         :type 'user-error)
+                           '(user-error "No session on this line")))
+            (setq at-point (claude-code-session--create :id "d"))
+            (claude-code-sessions-vc)
+            (puthash 1003 (list :origin "/home/test/proj") claude-code--managed)
+            (setq at-point (claude-code-session--create :id "a" :alive-p t
+                                                        :pid 1003))
+            (claude-code-sessions-vc)
+            (should (equal (reverse shown)
+                           '("/home/test/proj/"
+                             "/home/test/proj/.claude/worktrees/feat/")))))))))
 
 (defmacro claude-code-tests--recording-exports (exports cancelled &rest body)
   "Run BODY with exports and their cancels stubbed and recorded.
