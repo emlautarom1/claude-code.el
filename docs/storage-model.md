@@ -27,7 +27,7 @@ The PID names the process, not the session. `/clear` (and its aliases `/reset` a
 
 A session's display name comes entirely from the transcript (see [Transcripts](#transcripts--projectsencoded-cwdsessionidjsonl) and `claude-code--session-display-name`); a `/rename` is reflected there through its `custom-title`. Claude writes a `name` here too, qualified by `nameSource`: `derived` marks the directory-derived placeholder (`{"name":"proj-f8","nameSource":"derived"}`), while `auto`, `user`, `peer`, `hook` and `collision` mark real ones. Reading it would still be wrong, because this file exists only while the process does — it names live sessions and nothing else, and a view has to name dead ones from the same source as live ones. That source is the transcript.
 
-Liveness is a plain per-PID `process-attributes` existence check. Claude records two guards against a reused PID — `procStart` (start-time jiffies) and `pidDomain` (`linux:<machine-id>:<pid-namespace>`, which also keeps PIDs from separate containers apart) — and this package consults **neither**. A stale `sessions/<pid>.json` left by a crash whose PID was reused could therefore mis-flag a dead session as external, accepted as a simplicity trade-off since PID reuse is vanishingly unlikely (`pid_max` defaults to 4194304).
+Liveness is a plain per-PID `process-attributes` existence check, and a PID is taken to name one process: Claude's guards against a reused PID, `procStart` and `pidDomain`, go unread.
 
 ### Not every process here is a terminal session
 

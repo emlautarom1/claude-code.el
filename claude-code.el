@@ -495,10 +495,7 @@ the registry is refreshed from it (`claude-code--instance-entry')."
     (plist-get (gethash pid claude-code--managed) :buffer)))
 
 (defun claude-code--pid-live-p (pid)
-  "Return non-nil when integer PID is a currently running process.
-This is a bare existence check and does not verify the live process is the same
-`claude' the sessions file recorded -- see docs/storage-model.md for the
-PID-reuse trade-off that buys."
+  "Return non-nil when integer PID is a currently running process."
   (and (integerp pid) (process-attributes pid) t))
 
 (defun claude-code--live-pid (id live)
