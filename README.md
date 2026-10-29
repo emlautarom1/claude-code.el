@@ -10,7 +10,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree. A row is flagged `+` when the instance's last turn finished and `!` when it failed, until you type into it.
 - **Session recaps in the echo area** — Claude writes a short account of where a session stood each time you come back to it after a break. Move point onto a row and the view hands that session's latest recap to ElDoc, the way `emacs-lisp-mode` documents the variable under point; `M-x eldoc-doc-buffer` shows the full text. A finished or failed turn's message, if any, comes first; a session with neither shows nothing.
-- **Transcripts beside the view** — `t` shows the conversation of the session at point the way Claude's own `/export` writes it, in a window beside the view that the next row's transcript takes over. `g` there exports it again.
+- **Transcripts beside the view** — `t` shows the conversation of the session at point the way Claude's own `/export` writes it, MCP tool calls aside, in a window beside the view that the next row's transcript takes over. `g` there exports it again.
 - **External sessions** — one of your `claude` processes running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
 - **Actions** — focus an alive instance, resume a dead session, create a new one (with a display name, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
 - **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
@@ -66,7 +66,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `g`       | refresh                                                     |
 | `?`       | describe the mode, listing every keybinding                 |
 
-An instance replaces a sessions view on the selected frame — the one you are in, if any — and otherwise opens in another window. Side and dedicated windows keep what they have, and an instance already on screen is shown where it is. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this. A transcript opens beside the view, which stays selected; `(derived-mode . claude-code-transcript-mode)` is the condition that places transcripts elsewhere.
+An instance replaces a sessions view on the selected frame — the one you are in, if any — and otherwise opens in another window. Side and dedicated windows keep what they have, and an instance already on screen is shown where it is. Add a `display-buffer-alist` entry for the instance buffers to place them somewhere of your own choosing; it takes precedence over all of this. A transcript opens beside the view, which stays selected; `(derived-mode . claude-code-transcript-mode)` is the condition that places transcripts elsewhere, and putting `display-buffer-reuse-mode-window` first in its action keeps them to one window.
 
 Instances are hosted in `claude-code-instance-mode`, a major mode deriving from `ghostel-mode`, so `(derived-mode . claude-code-instance-mode)` is the `display-buffer-alist` condition that matches Claude's terminals and no other. Bindings for them go in its keymap; they survive Ghostel's input-mode switches and outrank every enabled minor mode. Char mode is the exception — it sends every key to the terminal. An instance buffer's `default-directory` follows the directory Claude works in, so `magit-status`, `C-x p` and `C-x v` commands run from it act on the session's worktree.
 
@@ -103,7 +103,10 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 (claude-code-interrupt session)
 
 ;; Export a session's conversation as text, as Claude's /export does.
-(claude-code-export-transcript session root (lambda (text) (insert text)))
+(claude-code-export-transcript
+ session root
+ (lambda (text)
+   (with-current-buffer (get-buffer-create "*export*") (insert text))))
 ```
 
 ## Emacs as an MCP server

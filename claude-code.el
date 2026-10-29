@@ -33,6 +33,7 @@
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)
+(require 'xdg)
 
 ;; Ghostel is required lazily in the launch path (see `claude-code--launch').
 ;; Declaring its API here keeps the byte-compiler happy without the native
@@ -1072,11 +1073,11 @@ is where `claude-code--session-display-name' reads it back on the next refresh."
     (ghostel-send-C-c)))
 
 (defcustom claude-code-export-config-dir
-  (expand-file-name "claude-code-export/" user-emacs-directory)
+  (expand-file-name "claude-code-export/" (xdg-cache-home))
   "Config directory the `claude' exporting a transcript runs with.
 That process files itself under sessions/ as an instance of the session it
 exports, so it is kept away from `claude-code-config-dir', where it would read
-as one.  The CLI creates the directory."
+as one.  The CLI creates the directory and keeps nothing there worth keeping."
   :type 'directory)
 
 (defvar claude-code--export-timeout 30
@@ -1088,9 +1089,11 @@ as one.  The CLI creates the directory."
 (defun claude-code--export-args (file)
   "Return the CLI arguments that export transcript FILE on request.
 The CLI answers the SDK's `export_conversation' control request without an API
-call, and leaves FILE untouched.  `--bare' keeps the user's hooks and plugins
-out of a process that is not a session of theirs."
-  (list "-p" "--bare" "--input-format" "stream-json"
+call, and leaves FILE untouched.  `--safe-mode' keeps the hooks and MCP servers
+of the directory it runs in out of a process that is no session, and leaves
+every built-in tool loaded: the export leaves out a call to a tool that is
+not."
+  (list "-p" "--safe-mode" "--input-format" "stream-json"
         "--output-format" "stream-json" "--verbose"
         "--no-session-persistence" (concat "--resume=" file)))
 
@@ -1098,7 +1101,8 @@ out of a process that is not a session of theirs."
   "Return what stdout LINE of a transcript export settles, or nil for nothing.
 \(text . TEXT) carries the exported text; (error . MESSAGE) a failure
 the CLI reported, as its answer to the request or as the result of a run that
-ended."
+ended.  A transcript holding no conversation is reported under a session id
+the CLI made up, so the message names none."
   (when-let* ((obj (ignore-errors
                      (json-parse-string line :null-object nil
                                         :false-object nil)))
@@ -1118,10 +1122,13 @@ ended."
                                            "malformed answer")))))))
       ("result"
        (when (gethash "is_error" obj)
-         (let ((errors (gethash "errors" obj)))
-           (cons 'error (if (and (vectorp errors) (> (length errors) 0))
-                            (mapconcat (lambda (e) (format "%s" e)) errors "; ")
-                          (format "%s" (gethash "subtype" obj))))))))))
+         (let* ((errors (gethash "errors" obj))
+                (message (if (and (vectorp errors) (> (length errors) 0))
+                             (mapconcat (lambda (e) (format "%s" e)) errors "; ")
+                           (format "%s" (gethash "subtype" obj)))))
+           (cons 'error (if (string-prefix-p "No conversation found" message)
+                            "No conversation to export"
+                          message))))))))
 
 (defun claude-code--export-file (session root)
   "Return SESSION's transcript file as it lies now, or signal a `user-error'.
@@ -1140,13 +1147,11 @@ file SESSION names may be gone."
   "Mark PROC's export settled; return non-nil unless it already was.
 Of its answer, its exit, its timeout and a cancel, only the first is heard."
   (unless (process-get proc 'claude-code-settled)
-    (process-put proc 'claude-code-settled t)
-    (cancel-timer (process-get proc 'claude-code-timer))
-    t))
+    (process-put proc 'claude-code-settled t)))
 
 (defun claude-code--export-cancel (proc)
   "Abandon the export PROC runs, calling neither of its callbacks."
-  (when (claude-code--export-settle proc)
+  (when (and (claude-code--export-settle proc) (process-live-p proc))
     (signal-process proc 'SIGTERM)))
 
 (defun claude-code-export-transcript (session root on-text &optional on-error)
@@ -1196,8 +1201,7 @@ in."
                :sentinel
                (lambda (proc event)
                  (unless (process-live-p proc)
-                   ;; What the sentinel outran is still in the pipe.
-                   (while (accept-process-output errors 0 nil t))
+                   (cancel-timer (process-get proc 'claude-code-timer))
                    (delete-process errors)
                    (when (claude-code--export-settle proc)
                      (funcall on-error
@@ -1209,20 +1213,28 @@ in."
                                          stderr))))))))
             (error (delete-process errors)
                    (signal (car err) (cdr err))))))
+    ;; Armed until the process ends, answered or not: a CLI the EOF does not
+    ;; end is ended here.
     (process-put proc 'claude-code-timer
                  (run-at-time claude-code--export-timeout nil
                               (lambda ()
+                                (when (process-live-p proc)
+                                  (signal-process proc 'SIGTERM))
                                 (when (claude-code--export-settle proc)
-                                  (signal-process proc 'SIGTERM)
                                   (funcall on-error
                                            (format "Export timed out after %ss"
                                                    claude-code--export-timeout))))))
-    (process-send-string
-     proc (concat (json-serialize
-                   `((type . "control_request")
-                     (request_id . ,claude-code--export-request-id)
-                     (request (subtype . "export_conversation"))))
-                  "\n"))
+    (condition-case err
+        (process-send-string
+         proc (concat (json-serialize
+                       `((type . "control_request")
+                         (request_id . ,claude-code--export-request-id)
+                         (request (subtype . "export_conversation"))))
+                      "\n"))
+      ;; A CLI gone before it was asked: the caller hears of it here, and only
+      ;; here.
+      (error (claude-code--export-settle proc)
+             (signal (car err) (cdr err))))
     proc))
 
 
@@ -2171,7 +2183,7 @@ leaves no empty buffer behind."
                                   claude-code--transcript-root))
 
 (defun claude-code--transcript-abandon ()
-  "Abandon the export this buffer awaits; a `kill-buffer-hook' member."
+  "Abandon the export this buffer awaits, as it is killed or changes mode."
   (when claude-code--transcript-export
     (claude-code--export-cancel claude-code--transcript-export)))
 
@@ -2183,8 +2195,10 @@ rather than wrapping them a second time.
 
 \\{claude-code-transcript-mode-map}"
   :interactive nil
+  (buffer-disable-undo)
   (setq-local truncate-lines t)
   (setq-local revert-buffer-function #'claude-code--transcript-revert)
+  (add-hook 'change-major-mode-hook #'claude-code--transcript-abandon nil t)
   (add-hook 'kill-buffer-hook #'claude-code--transcript-abandon nil t))
 
 ;;;;; Mode

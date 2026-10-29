@@ -1900,6 +1900,12 @@ answers lasts until its input closes, and SIGTERM ends it whole."
              ,@body)
          (delete-directory ,root t)))))
 
+(defun claude-code-tests--export-processes ()
+  "Return the processes an export started that have not been cleaned up."
+  (seq-filter (lambda (proc)
+                (string-prefix-p "claude-code-export" (process-name proc)))
+              (process-list)))
+
 (defun claude-code-tests--export (session root)
   "Export SESSION under ROOT; return (CALLS . PROCESS) once the process ends.
 CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE),
@@ -1933,7 +1939,7 @@ that answer nothing of ours are passed over."
       (should (equal calls '((text "\n● Because you asked.\n  Twice."))))
       (should (eq (process-status proc) 'exit))
       (should (= (process-exit-status proc) 0))
-      (should-not (process-list))
+      (should-not (claude-code-tests--export-processes))
       (let ((logged (with-temp-buffer
                       (insert-file-contents log)
                       (split-string (buffer-string) "\n" t))))
@@ -1945,14 +1951,20 @@ that answer nothing of ours are passed over."
                          (request_id . "claude-code")
                          (request (subtype . "export_conversation")))))
         (should (equal (nthcdr 3 logged)
-                       (claude-code--export-args
-                        (claude-code-session-transcript session))))))))
+                       (list "-p" "--safe-mode"
+                             "--input-format" "stream-json"
+                             "--output-format" "stream-json" "--verbose"
+                             "--no-session-persistence"
+                             (concat "--resume="
+                                     (claude-code-session-transcript
+                                      session)))))))))
 
 (ert-deftest claude-code-test-export-transcript-reports-a-failure ()
   "An export the CLI cannot answer reports why, once, and leaves no process.
-The CLI's own account comes first: an error answer, or a failed run's result.
-A CLI that dies with neither is described by its stderr, and failing that by
-how it ended."
+The CLI's own account comes first: an error answer, or a failed run's result,
+which for a transcript holding no conversation names a session id the CLI made
+up.  A CLI that dies with neither is described by its stderr, all of it, and
+failing that by how it ended."
   (pcase-dolist (`(,script ,message)
                  `((,(concat "read -r r\n"
                              "echo '{\"type\":\"control_response\",\"response\":"
@@ -1967,10 +1979,18 @@ how it ended."
                              "\"error_during_execution\",\"is_error\":true,"
                              "\"errors\":[\"No conversation found with session ID: 0f\"]}'\n"
                              "exit 1\n")
-                    "No conversation found with session ID: 0f")
-                   (,(concat "echo \"error: unknown option '--bare'\" >&2\n"
+                    "No conversation to export")
+                   (,(concat "echo \"error: unknown option '--safe-mode'\" >&2\n"
                              "exit 1\n")
-                    "%s ended with no transcript: error: unknown option '--bare'")
+                    "%s ended with no transcript: error: unknown option '--safe-mode'")
+                   ;; More than the pipe holds, so the CLI ends with the tail
+                   ;; still unread.
+                   (,(concat "read -r r\n"
+                             "head -c 300000 /dev/zero | tr '\\0' x >&2\n"
+                             "echo ' last words' >&2\n"
+                             "exit 1\n")
+                    ,(concat "%s ended with no transcript: "
+                             (make-string 300000 ?x) " last words"))
                    (,(concat "read -r r\n" "exit 0\n")
                     "%s ended with no transcript: finished")))
     (claude-code-tests--with-fake-cli (session root _log) script
@@ -1978,7 +1998,7 @@ how it ended."
         (should (equal calls
                        (list (list 'error (format message claude-code-cli)))))
         (should-not (process-live-p proc))
-        (should-not (process-list))))))
+        (should-not (claude-code-tests--export-processes))))))
 
 (ert-deftest claude-code-test-export-transcript-times-out ()
   "A CLI that never answers is given up on, reported, and terminated."
@@ -1988,7 +2008,36 @@ how it ended."
       (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
         (should (equal calls '((error "Export timed out after 0.3s"))))
         (should (eq (process-status proc) 'signal))
-        (should-not (process-list))))))
+        (should-not (claude-code-tests--export-processes))))))
+
+(ert-deftest claude-code-test-export-transcript-ends-a-lingering-cli ()
+  "A CLI the closed input does not end is ended at the timeout, unheard."
+  (claude-code-tests--with-fake-cli (session root _log)
+      (concat "read -r r\n"
+              "echo '" claude-code-tests--export-answer "'\n"
+              "exec sleep 100\n")
+    (let ((claude-code--export-timeout 0.5))
+      (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
+        (should (equal calls '((text "\n● Because you asked.\n  Twice."))))
+        (should (eq (process-status proc) 'signal))
+        (should-not (claude-code-tests--export-processes))))))
+
+(ert-deftest claude-code-test-export-transcript-cli-gone-before-asked ()
+  "A request that cannot be written is signalled, and no callback follows."
+  (claude-code-tests--with-fake-cli (session root _log)
+      "read -r r\nexec cat >/dev/null\n"
+    (let ((claude-code--export-timeout 0.3)
+          (calls '()))
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (&rest _) (error "Process claude-code-export not running"))))
+        (should-error (claude-code-export-transcript
+                       session root
+                       (lambda (text) (push text calls))
+                       (lambda (msg) (push msg calls)))))
+      (should (claude-code-tests--await
+               (lambda () (not (claude-code-tests--export-processes))) 5))
+      (claude-code-tests--await (lambda () calls) 0.5)
+      (should-not calls))))
 
 (ert-deftest claude-code-test-export-transcript-cancel ()
   "A cancelled export calls neither callback, and its process ends."
@@ -2005,7 +2054,7 @@ how it ended."
       (should (claude-code-tests--await (lambda () (not (process-live-p proc))) 5))
       (claude-code-tests--await (lambda () calls) 0.5)
       (should-not calls)
-      (should-not (process-list)))))
+      (should-not (claude-code-tests--export-processes)))))
 
 (ert-deftest claude-code-test-export-transcript-of-any-length ()
   "The answer is one line as long as the transcript, read in many pieces.
@@ -3249,13 +3298,17 @@ export refuses leaves no buffer behind.  Run against real windows."
       (kill-buffer view))))
 
 (ert-deftest claude-code-test-transcript-buffer-exports-again ()
-  "`g' exports a transcript buffer's session again; killing it abandons that."
+  "`g' exports a transcript buffer's session again.
+Killing the buffer abandons the export it awaits, and so does leaving the mode,
+which takes the buffer out of reach of the answer.  No text it held is kept
+for undo."
   (let ((exports '()) (cancelled '())
         (session (claude-code-session--create :id "a")))
     (claude-code-tests--recording-exports exports cancelled
       (let ((buffer (claude-code--transcript-export session "/r")))
         (with-current-buffer buffer
           (should (eq major-mode 'claude-code-transcript-mode))
+          (should (eq buffer-undo-list t))
           (should (eq (keymap-lookup (current-local-map) "g") #'revert-buffer))
           (revert-buffer)
           (should (equal (mapcar (lambda (e) (list (nth 0 e) (nth 1 e))) exports)
@@ -3263,7 +3316,11 @@ export refuses leaves no buffer behind.  Run against real windows."
           (should (equal cancelled (list (nth 4 (nth 1 exports))))))
         (kill-buffer buffer)
         (should (equal cancelled (list (nth 4 (nth 0 exports))
-                                       (nth 4 (nth 1 exports)))))))))
+                                       (nth 4 (nth 1 exports)))))
+        (with-current-buffer (claude-code--transcript-export session "/r")
+          (fundamental-mode)
+          (should (eq (car cancelled) (nth 4 (nth 0 exports))))
+          (kill-buffer))))))
 
 (ert-deftest claude-code-test-transcript-fill-keeps-places ()
   "Exporting again leaves every window, and the buffer's point, where it was.
@@ -4738,15 +4795,19 @@ where a typed RET would be taken as a newline.  No model turn is spent."
   "A real CLI exports a transcript's whole conversation, in order.
 The fixture chains its messages by uuid, as Claude writes them; the CLI
 follows that chain, so without it only the last message would export.  The
-export's config dir holds no sessions/ entry once it has ended."
+`Write' call is one the CLI leaves out unless the tool is loaded.  The
+transcript is left as it was, and the export's config dir holds no sessions/
+entry once it has ended."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (let* ((id "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
          (root (file-truename (make-temp-file "cc-export" t)))
          (claude-code-export-config-dir (expand-file-name "config/" root))
-         (session (claude-code-session--create
-                   :id id
-                   :transcript (expand-file-name (concat "export/" id ".jsonl")
-                                                 claude-code-tests--fixtures))))
+         (file (expand-file-name (concat "export/" id ".jsonl")
+                                 claude-code-tests--fixtures))
+         (before (with-temp-buffer
+                   (insert-file-contents-literally file)
+                   (buffer-string)))
+         (session (claude-code-session--create :id id :transcript file)))
     (unwind-protect
         (claude-code-tests--with-top-level-env
           (pcase-let ((`(,calls . ,proc) (claude-code-tests--export session root)))
@@ -4755,10 +4816,15 @@ export's config dir holds no sessions/ entry once it has ended."
             (should (= (length calls) 1))
             (should (eq (car (car calls)) 'text))
             (let ((text (cadr (car calls))) (pos 0))
-              (dolist (part '("say ok" "ok" "now tell me why" "Because you asked."))
+              (dolist (part '("say ok" "Write(/home/test/proj/notes.txt)" "ok"
+                              "now tell me why" "Because you asked."))
                 (setq pos (string-search part text pos))
                 (should pos)
                 (cl-incf pos (length part))))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents-literally file)
+                             (buffer-string))
+                           before))
             (should-not (directory-files
                          (expand-file-name "sessions" claude-code-export-config-dir)
                          nil "\\.json\\'"))))
