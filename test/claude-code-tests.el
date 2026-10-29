@@ -3217,47 +3217,48 @@ sight leaves it up."
 
 (ert-deftest claude-code-test-format-session ()
   "Columns fall back sensibly and render usage.
-Order is Flag[0] Status[1] Active[2] Id[3] Worktree[4] CPU%[5] Mem[6]
-Name[7]."
+Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
   (let ((now 1800000000))
     (let* ((s (claude-code-session--create
                :id "abcdef01-0000-4000-8000-000000000000"
                :alive-p nil :title "The Title"))
            (v (claude-code--format-session s nil now)))
-      ;; No status modifier -> an empty Flag cell.
-      (should (equal (aref v 0) ""))
-      (should (equal (substring-no-properties (aref v 1)) "dead"))
+      ;; No status modifier -> the status alone.
+      (should (equal (substring-no-properties (aref v 0)) "dead"))
       ;; No last-active -> empty Active cell.
-      (should (equal (substring-no-properties (aref v 2)) ""))
-      (should (equal (substring-no-properties (aref v 3)) "abcdef01"))
+      (should (equal (substring-no-properties (aref v 1)) ""))
+      (should (equal (substring-no-properties (aref v 2)) "abcdef01"))
+      (should (equal (aref v 3) ""))
       (should (equal (aref v 4) ""))
       (should (equal (aref v 5) ""))
-      (should (equal (aref v 6) ""))
       ;; The transcript title is shown in the final (Name) column.
-      (should (equal (aref v 7) "The Title")))
+      (should (equal (aref v 6) "The Title")))
     (let* ((s (claude-code-session--create
                :id "11112222-0000-4000-8000-000000000000"
                :alive-p t :status "busy" :title "Worker task"
                :worktree "feat" :last-active (- now 90)))
            (v (claude-code--format-session s '(12.5 . 204800) now)))
-      (should (equal (substring-no-properties (aref v 1)) "busy"))
-      (should (eq (get-text-property 0 'face (aref v 1)) 'warning))
+      (should (equal (substring-no-properties (aref v 0)) "busy"))
+      (should (eq (get-text-property 0 'face (aref v 0)) 'warning))
       ;; The Active cell is last-active rendered against the NOW argument.
-      (should (equal (substring-no-properties (aref v 2))
+      (should (equal (substring-no-properties (aref v 1))
                      (claude-code--format-relative-time (- now 90) now)))
-      (should (equal (aref v 4) "feat"))
-      (should (equal (aref v 5) "12.5"))
-      (should (equal (aref v 6) "200M"))
-      (should (equal (aref v 7) "Worker task")))
-    ;; A status modifier flags the row ahead of its status.
-    (pcase-dolist (`(,modifier ,flag ,face) '((done "+" success) (error "!" error)))
-      (let ((v (claude-code--format-session
-                (claude-code-session--create :id "a" :alive-p t :status "idle"
-                                             :modifier modifier)
-                nil now)))
-        (should (equal (substring-no-properties (aref v 0)) flag))
-        (should (eq (get-text-property 0 'face (aref v 0)) face))
-        (should (get-text-property 0 'help-echo (aref v 0)))))))
+      (should (equal (aref v 3) "feat"))
+      (should (equal (aref v 4) "12.5"))
+      (should (equal (aref v 5) "200M"))
+      (should (equal (aref v 6) "Worker task")))
+    ;; A status modifier's glyph follows the status, in its own face.
+    (pcase-dolist (`(,modifier ,cell ,face) '((done "idle ✓" success)
+                                              (error "idle ✗" error)))
+      (let* ((v (claude-code--format-session
+                 (claude-code-session--create :id "a" :alive-p t :status "idle"
+                                              :modifier modifier)
+                 nil now))
+             (glyph (1- (length (aref v 0)))))
+        (should (equal (substring-no-properties (aref v 0)) cell))
+        (should (eq (get-text-property 0 'face (aref v 0)) 'success))
+        (should (eq (get-text-property glyph 'face (aref v 0)) face))
+        (should (get-text-property glyph 'help-echo (aref v 0)))))))
 
 (ert-deftest claude-code-test-format-relative-time ()
   "Relative ages render compactly; nil renders empty."
@@ -3311,7 +3312,7 @@ computed for every row, so one odd id would abort a whole view refresh."
     (should (equal "new-id"
                    (substring-no-properties
                     (aref (claude-code--format-session s nil (current-time))
-                          3))))))
+                          2))))))
 
 (ert-deftest claude-code-test-group-key ()
   "Grouping keys depend on the current grouping mode."
@@ -4582,9 +4583,9 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
       (should (= (length marked) 2))
       (should (equal marked (claude-code-tests--tagged-ids)))
       (dolist (reprint (list #'claude-code-sessions-refresh
-                             ;; Column 7 is Name.  This is what `S' runs, and a
+                             ;; Column 6 is Name.  This is what `S' runs, and a
                              ;; header click funnels into the same place.
-                             (lambda () (tabulated-list-sort 7))
+                             (lambda () (tabulated-list-sort 6))
                              #'revert-buffer
                              (lambda () (tabulated-list-widen-current-column 1))))
         ;; Park on a marked row: the width commands read the entry at point.
@@ -4598,7 +4599,7 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
     (should-not (functionp tabulated-list-entries))
     ;; The first sort is what arms it: it leaves a `tabulated-list--original-
     ;; order' behind, which is the only guard on the `-1' branch.
-    (tabulated-list-sort 7)
+    (tabulated-list-sort 6)
     (tabulated-list-sort -1)
     (should (string-match-p "Dead" (buffer-string)))))
 
@@ -4608,27 +4609,27 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
     (setq claude-code--collapsed nil)
     (claude-code-sessions-refresh)
     (claude-code--goto-group "dead")
-    (should (string-match-p "^v Dead (6)$" (thing-at-point 'line t)))
+    (should (string-match-p "^▾ Dead (6)$" (thing-at-point 'line t)))
     ;; `m' advances, so this marks two of the six dead rows.
     (forward-line 1)
     (claude-code-sessions-mark)
     (claude-code-sessions-mark)
     (claude-code--goto-group "dead")
     ;; Their tags are on screen, so the header adds nothing.
-    (should (string-match-p "^v Dead (6)$" (thing-at-point 'line t)))
+    (should (string-match-p "^▾ Dead (6)$" (thing-at-point 'line t)))
     (claude-code-sessions-toggle-group)
     (should (member "dead" claude-code--collapsed))
     (should (equal 2 (length claude-code--marks)))
     (should (null (claude-code-tests--tagged-ids)))
-    (should (string-match-p "^> Dead (6, 2 marked)$" (thing-at-point 'line t)))
+    (should (string-match-p "^▸ Dead (6, 2 marked)$" (thing-at-point 'line t)))
     ;; Unfolding hands the rows back their tags.
     (claude-code-sessions-toggle-group)
-    (should (string-match-p "^v Dead (6)$" (thing-at-point 'line t)))
+    (should (string-match-p "^▾ Dead (6)$" (thing-at-point 'line t)))
     (should (equal 2 (length (claude-code-tests--tagged-ids))))))
 
 (ert-deftest claude-code-test-view-collapsed-group-reports-its-modifiers ()
   "A folded group counts the status modifiers of the rows it hides.
-They follow its marks, and an expanded group shows the flags themselves."
+They follow its marks, and an expanded group shows the glyphs themselves."
   (claude-code-tests--in-view
     (let ((sessions (mapcar (lambda (spec)
                               (claude-code-session--create
@@ -4642,14 +4643,14 @@ They follow its marks, and an expanded group shows the flags themselves."
         (setq claude-code--collapsed (list "idle"))
         (should (equal (substring-no-properties
                         (car (car (claude-code--tabulated-groups))))
-                       "> Idle (5, 2 marked, 2 done, 1 error)"))
+                       "▸ Idle (5, 2 marked, 2 done, 1 error)"))
         (setq claude-code--collapsed nil)
         (should (equal (substring-no-properties
                         (car (car (claude-code--tabulated-groups))))
-                       "v Idle (5)"))))))
+                       "▾ Idle (5)"))))))
 
-(ert-deftest claude-code-test-view-sorts-by-flag ()
-  "`S' on the flag column sorts each group by flag."
+(ert-deftest claude-code-test-view-sorts-by-modifier ()
+  "`S' on the Status column sorts each group by status modifier."
   (claude-code-tests--in-view
     (let ((sessions (mapcar (lambda (spec)
                               (claude-code-session--create
@@ -4667,7 +4668,7 @@ They follow its marks, and an expanded group shows the flags themselves."
           (while (not (eobp))
             (when-let* ((id (tabulated-list-get-id))) (push id ids))
             (forward-line 1))
-          (should (equal (nreverse ids) '("b" "c" "a"))))))))
+          (should (equal (nreverse ids) '("b" "a" "c"))))))))
 
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()
   "A mark whose session leaves the listing is dropped, not left dormant."

@@ -1679,19 +1679,19 @@ The empty string is returned when TIME is nil."
             ((< secs 604800) (format "%dd" (/ secs 86400)))
             (t (format "%dw" (/ secs 604800)))))))
 
-(defun claude-code--modifier-flag (session)
-  "Return the flag cell for SESSION's status modifier, empty for none."
+(defun claude-code--modifier-glyph (session)
+  "Return the glyph for SESSION's status modifier, or nil for none."
   (pcase (claude-code-session-modifier session)
-    ('done (propertize "+" 'face 'success 'help-echo "Turn finished"))
-    ('error (propertize "!" 'face 'error 'help-echo "Turn failed"))
-    (_ "")))
+    ('done (propertize "✓" 'face 'success 'help-echo "Turn finished"))
+    ('error (propertize "✗" 'face 'error 'help-echo "Turn failed"))))
 
 (defun claude-code--format-session (session usage now)
   "Return the column vector for SESSION.
 USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
-  (let ((status (claude-code--status-display session)))
-    (vector (claude-code--modifier-flag session)
-            (propertize (car status) 'face (cdr status))
+  (let ((status (claude-code--status-display session))
+        (glyph (claude-code--modifier-glyph session)))
+    (vector (concat (propertize (car status) 'face (cdr status))
+                    (and glyph (concat " " glyph)))
             (propertize (claude-code--format-relative-time
                          (claude-code-session-last-active session) now)
                         'face 'shadow)
@@ -1741,7 +1741,7 @@ each status modifier, standing in for the tags and flags it is not showing."
                                        (eq (claude-code-session-modifier s) 'error))))
                     for n = (seq-count pred sessions)
                     unless (zerop n) collect (format "%d %s" n label)))))
-    (propertize (format "%s %s (%s)" (if collapsed ">" "v") (capitalize key)
+    (propertize (format "%s %s (%s)" (if collapsed "▸" "▾") (capitalize key)
                         (string-join (cons (number-to-string (length sessions))
                                            counts)
                                      ", "))
@@ -2282,10 +2282,7 @@ rather than wrapping them a second time.
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-printer #'claude-code--print-entry)
   (setq-local tabulated-list-format
-              ;; The unnamed first column flags a status modifier.  Sortable,
-              ;; so `S' on it brings flagged rows together.
-              (vector '("" 1 t)
-                      '("Status" 9 t)
+              (vector '("Status" 9 t)
                       (list "Active" 8 #'claude-code--time-less-p :right-align t)
                       '("Id" 9 t)
                       '("Worktree" 14 t)

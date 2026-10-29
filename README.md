@@ -8,7 +8,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 
 - **Per-project sessions view** (`M-x claude-code-sessions`) — a `tabulated-list-mode` buffer listing every [interactive session](docs/glossary.md) of the current `project.el` project, alive and dead.
 - **Grouping** by status (`busy`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
-- **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree. A row is flagged `+` when the instance's last turn finished and `!` when it failed, until you type into it.
+- **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree. A row's status is followed by `✓` when the instance's last turn finished and `✗` when it failed, until you type into it.
 - **Session recaps in the echo area** — Claude writes a short account of where a session stood each time you come back to it after a break. Move point onto a row and the view hands that session's latest recap to ElDoc, the way `emacs-lisp-mode` documents the variable under point; `M-x eldoc-doc-buffer` shows the full text. A finished or failed turn's message, if any, comes first; a session with neither shows nothing.
 - **Transcripts beside the view** — `t` shows the conversation of the session at point the way Claude's own `/export` writes it, MCP tool calls aside, in a window beside the view that the next row's transcript takes over. `g` there exports it again.
 - **External sessions** — one of your `claude` processes running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
