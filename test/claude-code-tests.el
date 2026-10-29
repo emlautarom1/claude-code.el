@@ -6,6 +6,9 @@
 ;;; Code:
 
 (require 'ert)
+;; Ahead of `ert-x', which defines its `mock' method only over a loaded TRAMP.
+(require 'tramp)
+(require 'ert-x)
 (require 'seq)
 (require 'cl-lib)
 (require 'claude-code)
@@ -186,6 +189,39 @@ invisible to `require'."
                     (unless (memq feat ,features) (apply ,orig feat args)))))
          ,@body))))
 
+(defmacro claude-code-tests--with-executable (dir name &rest body)
+  "Run BODY with DIR a fresh directory holding an executable file NAME."
+  (declare (indent 2))
+  (let ((file (gensym "file")))
+    `(ert-with-temp-directory ,dir
+       (let ((,file (expand-file-name ,name ,dir)))
+         (write-region "#!/bin/sh\n" nil ,file)
+         (set-file-modes ,file #o700))
+       ,@body)))
+
+(defmacro claude-code-tests--on-mock-host (dirs &rest body)
+  "Run BODY in a remote `default-directory' whose host also searches DIRS.
+The host is TRAMP's `mock' method from `ert-x', a local shell behind the remote
+file handlers, so it shares Emacs's file system.  TRAMP reads
+`tramp-remote-path' once per connection, so the connection is dropped on the
+way in and on the way out.  Skips when the method is unavailable or cannot
+connect."
+  (declare (indent 1))
+  `(progn
+     (skip-unless (and ert-remote-temporary-file-directory
+                       (equal (file-remote-p ert-remote-temporary-file-directory
+                                             'method)
+                              "mock")))
+     (let ((default-directory ert-remote-temporary-file-directory)
+           (tramp-remote-path (append ,dirs tramp-remote-path)))
+       (tramp-cleanup-connection (tramp-dissect-file-name default-directory) t t)
+       (unwind-protect
+           (progn
+             (skip-unless (ignore-errors (file-directory-p default-directory)))
+             ,@body)
+         (tramp-cleanup-connection
+          (tramp-dissect-file-name default-directory) t t)))))
+
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
   "Run BODY with Ghostel paste/key stubbed to push onto CALLS.
 Each call pushes (paste STR) or (key NAME).  Ghostel's native module is absent
@@ -216,7 +252,7 @@ however BODY exits."
        (claude-code-tests--without-requiring '(ghostel claude-code-mcp)
          (cl-letf ((after-focus-change-function after-focus-change-function)
                    ((symbol-function 'claude-code--mcp-wiring) #'ignore)
-                   ((symbol-function 'ghostel--resolve-local-executable)
+                   ((symbol-function 'claude-code--resolve-executable)
                     #'identity)
                    ((symbol-function 'ghostel-exec)
                     (lambda (buffer program args)
@@ -1377,18 +1413,108 @@ the caller an id for an instance that never ran."
   (claude-code-tests--with-registry
     (let ((execs '())
           (mcp-calls 0)
-          (buffers (buffer-list)))
+          (buffers (buffer-list))
+          (resolve (symbol-function 'claude-code--resolve-executable))
+          (claude-code-cli "claude-code-tests-cli")
+          (exec-path '()))
       (claude-code-tests--recording-launch execs
         (cl-letf (((symbol-function 'claude-code--mcp-wiring)
                    (lambda (_buffer) (cl-incf mcp-calls) nil))
-                  ((symbol-function 'ghostel--resolve-local-executable)
-                   (lambda (program)
-                     (error "Searching for program: No such file or directory, %s"
-                            program))))
-          (should-error (claude-code-spawn "/r")))
+                  ((symbol-function 'claude-code--resolve-executable) resolve))
+          (should-error (claude-code-spawn "/r") :type 'user-error))
         (should (null execs))
         (should (zerop mcp-calls))
         (should-not (seq-difference (buffer-list) buffers))))))
+
+(ert-deftest claude-code-test-launch-finds-the-cli-on-the-project-host ()
+  "A remote project's instance runs the CLI its own host has.
+What Ghostel is handed is the name that host's shell runs."
+  (claude-code-tests--with-executable dir "claude-code-tests-cli"
+    (claude-code-tests--with-registry
+      (let ((execs '())
+            (resolve (symbol-function 'claude-code--resolve-executable))
+            (claude-code-cli "claude-code-tests-cli")
+            (exec-path '()))
+        (claude-code-tests--on-mock-host (list dir)
+          (let ((root default-directory)
+                ;; The caller's own directory is local: only the root may
+                ;; decide the host.
+                (default-directory temporary-file-directory))
+            (claude-code-tests--recording-launch execs
+              (cl-letf (((symbol-function 'claude-code--resolve-executable)
+                         resolve))
+                (claude-code-spawn root)
+                (should (equal (nth 3 (car execs))
+                               (expand-file-name claude-code-cli dir)))))))))))
+
+(ert-deftest claude-code-test-resolve-executable-searches-exec-path ()
+  "A bare name is found on `exec-path' and comes back as the file it names."
+  (claude-code-tests--with-executable dir "claude-code-tests-cli"
+    (let ((exec-path (list dir)))
+      (should (equal (claude-code--resolve-executable "claude-code-tests-cli")
+                     (expand-file-name "claude-code-tests-cli" dir))))))
+
+(ert-deftest claude-code-test-resolve-executable-takes-a-file-name ()
+  "A name with a directory is a file, a relative one under `default-directory'."
+  (claude-code-tests--with-executable dir "cli"
+    (let ((exec-path '())
+          (default-directory dir)
+          (cli (expand-file-name "cli" dir)))
+      (should (equal (claude-code--resolve-executable "./cli") cli))
+      (should (equal (claude-code--resolve-executable cli) cli)))))
+
+(ert-deftest claude-code-test-resolve-executable-refuses-a-missing-one ()
+  "No executable by the name is a `user-error' naming where it was sought."
+  (let ((exec-path '()))
+    (should (string-match-p
+             "in .exec-path."
+             (cadr (should-error
+                    (claude-code--resolve-executable "claude-code-tests-cli")
+                    :type 'user-error))))
+    (should-error (claude-code--resolve-executable "/claude-code-tests/cli")
+                  :type 'user-error)
+    (claude-code-tests--on-mock-host nil
+      (should (string-match-p
+               "on /mock:.* in .tramp-remote-path."
+               (cadr (should-error
+                      (claude-code--resolve-executable "claude-code-tests-cli")
+                      :type 'user-error)))))))
+
+(ert-deftest claude-code-test-resolve-executable-searches-the-host-path ()
+  "A remote `default-directory' searches its host's path, not Emacs's.
+The answer is the name that host runs, without TRAMP's prefix."
+  (claude-code-tests--with-executable dir "claude-code-tests-cli"
+    (let ((exec-path '()))
+      (claude-code-tests--on-mock-host (list dir)
+        (should (equal (claude-code--resolve-executable "claude-code-tests-cli")
+                       (expand-file-name "claude-code-tests-cli" dir)))))
+    (let ((exec-path (list dir)))
+      (claude-code-tests--on-mock-host nil
+        (should-error (claude-code--resolve-executable "claude-code-tests-cli")
+                      :type 'user-error)))))
+
+(ert-deftest claude-code-test-resolve-executable-ignores-the-project-directory ()
+  "A bare name never resolves to a file in a remote `default-directory'.
+TRAMP appends that directory to the host's search path, and a project's own
+executable is not the CLI."
+  (claude-code-tests--with-executable dir "claude-code-tests-cli"
+    (claude-code-tests--on-mock-host nil
+      (let ((default-directory (concat (file-remote-p default-directory) dir)))
+        (should-error (claude-code--resolve-executable "claude-code-tests-cli")
+                      :type 'user-error)))))
+
+(ert-deftest claude-code-test-resolve-executable-takes-a-host-file-name ()
+  "An absolute name under a remote `default-directory' is a file on its host."
+  (claude-code-tests--with-executable dir "cli"
+    ;; A home of its own sets the host's file names apart from Emacs's.
+    (let ((tramp-remote-process-environment
+           (cons (concat "HOME=" (directory-file-name dir))
+                 tramp-remote-process-environment)))
+      (claude-code-tests--on-mock-host nil
+        (should (equal (claude-code--resolve-executable "~/cli")
+                       (expand-file-name "cli" dir)))
+        (should-error (claude-code--resolve-executable "~/cli-none")
+                      :type 'user-error)))))
 
 (ert-deftest claude-code-test-new-uuid ()
   "Generated ids are valid, distinct version-4 UUIDs."

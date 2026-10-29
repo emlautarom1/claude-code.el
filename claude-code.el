@@ -44,7 +44,6 @@
 (declare-function ghostel-paste-string "ghostel" (string))
 (declare-function ghostel-send-C-c "ghostel" ())
 (declare-function ghostel--update-directory "ghostel" (dir))
-(declare-function ghostel--resolve-local-executable "ghostel" (program))
 (defvar ghostel--pid)
 (defvar ghostel--process)
 (defvar ghostel-kill-buffer-on-exit)
@@ -72,8 +71,10 @@
 
 (defcustom claude-code-cli "claude"
   "Executable used to launch the Claude Code CLI.
-A wrapper must `exec' the CLI, which has to run under the PID it was started
-with: that PID is what names the instance."
+A bare name is searched for on the project's host: on variable `exec-path'
+locally, on `tramp-remote-path' remotely.  A wrapper must `exec' the CLI, which
+has to run under the PID it was started with: that PID is what names the
+instance."
   :type 'string)
 
 (defcustom claude-code-config-dir
@@ -953,6 +954,27 @@ Ghostel binds `process-environment' around the hook."
   (dolist (cell cells)
     (setenv (car cell) (cdr cell))))
 
+(defun claude-code--resolve-executable (program)
+  "Return the name the host of `default-directory' runs PROGRAM by.
+Signal a `user-error' when that host has no such executable."
+  (let ((host (file-remote-p default-directory))
+        (bare (not (file-name-directory program))))
+    (or (if bare
+            ;; A remote search path ends in `default-directory', which must not
+            ;; supply the CLI.
+            (let ((default-directory (concat host "/")))
+              (executable-find program t))
+          (let ((file (expand-file-name (if (file-name-absolute-p program)
+                                            (concat host program)
+                                          program))))
+            (and (file-executable-p file) (file-local-name file))))
+        (user-error "Cannot find `%s'%s%s" program
+                    (if host (concat " on " host) "")
+                    (if bare
+                        (format-message " in `%s'"
+                                        (if host 'tramp-remote-path 'exec-path))
+                      "")))))
+
 (defun claude-code--launch (id project-root &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
@@ -969,9 +991,7 @@ the arguments and environment `claude-code--mcp-wiring' asks for."
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
-         ;; Resolved as Ghostel resolves what it runs, so a CLI that cannot be
-         ;; found aborts before a buffer is created.
-         (program (ghostel--resolve-local-executable claude-code-cli))
+         (program (claude-code--resolve-executable claude-code-cli))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
          (mcp (claude-code--mcp-wiring buffer))
