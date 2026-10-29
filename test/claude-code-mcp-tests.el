@@ -932,11 +932,12 @@ user can read the instance's command line."
 
 (ert-deftest claude-code-mcp-test-stop-is-a-noop-when-stopped ()
   "`claude-code-mcp-stop' is a clean no-op when no server is live."
-  (let ((claude-code--mcp-server nil))
-    ;; Must not error and must leave state nil.
-    (claude-code-mcp-stop)
-    (should (null claude-code--mcp-server))
-    (should (null (claude-code--mcp-port)))))
+  (claude-code-mcp-tests--isolated
+    (let ((claude-code--mcp-server nil))
+      ;; Must not error and must leave state nil.
+      (claude-code-mcp-stop)
+      (should (null claude-code--mcp-server))
+      (should (null (claude-code--mcp-port))))))
 
 (ert-deftest claude-code-mcp-test-stop-forgets-the-tokens ()
   "No token outlives the server it was minted for."
@@ -978,19 +979,20 @@ reports that from its buffer."
 
 (ert-deftest claude-code-mcp-test-ensure-server-idempotent ()
   "Ensuring twice yields one listener on the same port; stop tears it down."
-  (let ((claude-code-mcp-enabled t)
-        (claude-code--mcp-server nil))
-    (unwind-protect
-        (let ((port1 (claude-code--mcp-ensure-server))
-              (server1 claude-code--mcp-server)
-              (port2 (claude-code--mcp-ensure-server)))
-          (should (integerp port1))
-          ;; Same server object and port -- no second listener was opened.
-          (should (eq server1 claude-code--mcp-server))
-          (should (equal port1 port2)))
-      (claude-code-mcp-stop))
-    (should (null claude-code--mcp-server))
-    (should (null (claude-code--mcp-port)))))
+  (claude-code-mcp-tests--isolated
+    (let ((claude-code-mcp-enabled t)
+          (claude-code--mcp-server nil))
+      (unwind-protect
+          (let ((port1 (claude-code--mcp-ensure-server))
+                (server1 claude-code--mcp-server)
+                (port2 (claude-code--mcp-ensure-server)))
+            (should (integerp port1))
+            ;; Same server object and port -- no second listener was opened.
+            (should (eq server1 claude-code--mcp-server))
+            (should (equal port1 port2)))
+        (claude-code-mcp-stop))
+      (should (null claude-code--mcp-server))
+      (should (null (claude-code--mcp-port))))))
 
 ;;;; In-Emacs socket end-to-end (real loopback, no claude/ghostel)
 
