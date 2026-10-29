@@ -1191,26 +1191,6 @@ read can find it partial or gone while the instance is still running."
         (should (eq (claude-code--managed-buffer "cleared") buf))
         (should-not (claude-code--managed-buffer "launched"))))))
 
-(ert-deftest claude-code-test-two-instances-on-one-session ()
-  "Two instances running one session make one alive row, the lower PID's.
-A `/resume' in one instance of a session another one runs puts both on it."
-  (claude-code-tests--with-config
-    (claude-code-tests--with-managed-buffer (low 70)
-      (claude-code-tests--with-managed-buffer (high 80)
-        (claude-code--register "a" low "/r" nil)
-        (claude-code--register "b" high "/r" nil)
-        (claude-code-tests--write-session-file 70 "shared")
-        (claude-code-tests--write-session-file 80 "shared")
-        (cl-letf (((symbol-function 'claude-code--session-process)
-                   (lambda (b) (memq b (list low high)))))
-          (let ((running (claude-code--running)))
-            (should (equal (hash-table-keys running) '("shared")))
-            (should (eql (gethash "shared" running) 70)))
-          (should (eq (claude-code--managed-buffer "shared") low))
-          (let ((ss (claude-code-project-sessions "/r")))
-            (should (= (length ss) 1))
-            (should (eq (claude-code-session-buffer (car ss)) low))))))))
-
 (ert-deftest claude-code-test-external-session ()
   "An unmanaged transcript with a live sessions PID is external, else dead."
   (claude-code-tests--with-fixtures

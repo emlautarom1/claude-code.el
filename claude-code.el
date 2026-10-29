@@ -480,17 +480,13 @@ session last read."
 (defun claude-code--running (&optional live)
   "Return a hash of session id -> PID of the managed instance running it.
 LIVE is a `claude-code--live-table', parsed when omitted, and every entry of
-the registry is refreshed from it (`claude-code--instance-entry').  Two
-instances running one session map it to the lower PID."
+the registry is refreshed from it (`claude-code--instance-entry')."
   (let ((live (or live (claude-code--live-table)))
         (running (make-hash-table :test 'equal)))
     (dolist (pid (hash-table-keys claude-code--managed))
       (let ((entry (claude-code--instance-entry pid live)))
         (when (claude-code--session-process (plist-get entry :buffer))
-          (let* ((session (plist-get entry :session))
-                 (other (gethash session running)))
-            (when (or (null other) (< pid other))
-              (puthash session pid running))))))
+          (puthash (plist-get entry :session) pid running))))
     running))
 
 (defun claude-code--managed-buffer (id)
