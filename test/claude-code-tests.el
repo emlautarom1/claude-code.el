@@ -65,15 +65,16 @@ Instances a test registers are therefore invisible to every other test."
 (defmacro claude-code-tests--with-managed-buffer (spec &rest body)
   "Run BODY with a fresh buffer bound and an empty managed registry.
 SPEC is VAR or (VAR PID): the buffer is bound to VAR and carries
-`ghostel--pid' PID, 4242 by default, and no program status record, as a
-Ghostel terminal would.  It is killed afterwards even when BODY already
-killed it."
+`ghostel--pid' PID, 4242 by default, with no live process and no program
+status record, as a Ghostel terminal would.  It is killed afterwards even when
+BODY already killed it."
   (declare (indent 1))
   (pcase-let ((`(,var ,pid) (if (consp spec) spec (list spec 4242))))
     `(claude-code-tests--with-registry
        (let ((,var (generate-new-buffer " *cc-test*")))
          (with-current-buffer ,var
            (setq-local ghostel--pid ,pid
+                       ghostel--process nil
                        ghostel-program-status nil))
          (unwind-protect (progn ,@body)
            (when (buffer-live-p ,var) (kill-buffer ,var)))))))
@@ -1113,23 +1114,25 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
   (should (eq 'dead (claude-code--session-liveness
                      (claude-code-session--create :alive-p nil)))))
 
-(ert-deftest claude-code-test-external-p ()
-  "External means: not Emacs-managed, and the sessions/ PID is live."
+(ert-deftest claude-code-test-running ()
+  "Each running session maps to the PID of the live `claude' running it.
+A managed instance counts while its buffer's process lives, file or not; any
+other PID while it is a running process."
   (claude-code-tests--with-fixtures
     ;; Session 22222222 has sessions/1002.json (pid 1002).
-    (claude-code-tests--with-live-pids '(1002)
+    (let ((id "22222222-2222-4222-8222-222222222222"))
       (claude-code-tests--with-registry
-        (should (claude-code--external-p "22222222-2222-4222-8222-222222222222"))
-        ;; An id with no sessions/ entry is never external.
-        (should-not (claude-code--external-p "no-such-id")))
-      ;; An Emacs-managed live instance is not external even with a live PID.
+        (claude-code-tests--with-live-pids '(1002)
+          (should (eql (gethash id (claude-code--running)) 1002)))
+        (claude-code-tests--with-live-pids '()
+          (should-not (gethash id (claude-code--running)))))
       (claude-code-tests--with-managed-buffer buf
-        (claude-code--register "22222222-2222-4222-8222-222222222222"
-                               buf "/home/test/proj" nil)
-        (cl-letf (((symbol-function 'claude-code--session-process)
-                   (lambda (b) (eq b buf))))
-          (should-not (claude-code--external-p
-                       "22222222-2222-4222-8222-222222222222")))))))
+        (claude-code--register "launched" buf "/home/test/proj" nil)
+        (claude-code-tests--with-live-pids '()
+          (should-not (gethash "launched" (claude-code--running)))
+          (cl-letf (((symbol-function 'claude-code--session-process)
+                     (lambda (b) (eq b buf))))
+            (should (eql (gethash "launched" (claude-code--running)) 4242))))))))
 
 (ert-deftest claude-code-test-sessions-follow-an-instance-across-a-clear ()
   "An instance runs the session its sessions/ file names, not its launch id.
@@ -1160,8 +1163,9 @@ its live status, while the session it left is dead -- resumable and deletable
               (should (equal (plist-get (gethash 1001 claude-code--managed)
                                         :session)
                              now))
-              (should (eq (claude-code--managed-buffer now) buf))
-              (should-not (claude-code--managed-buffer left))
+              (let ((running (claude-code--running)))
+                (should (eql (gethash now running) 1001))
+                (should-not (gethash left running)))
               (claude-code-delete abandoned)
               (should (equal deleted
                              (list (claude-code-session-transcript abandoned))))
@@ -1182,14 +1186,14 @@ read can find it partial or gone while the instance is still running."
       (claude-code--register "launched" buf "/r" nil)
       (cl-letf (((symbol-function 'claude-code--session-process)
                  (lambda (b) (eq b buf))))
-        (should (eq (claude-code--managed-buffer "launched") buf))
+        (should (eql (gethash "launched" (claude-code--running)) 70))
         (claude-code-tests--write-session-file 70 "cleared")
-        (should (eq (claude-code--managed-buffer "cleared") buf))
+        (should (eql (gethash "cleared" (claude-code--running)) 70))
         (claude-code-tests--write-session-file 70 "{\"pid\":70,\"sessi")
-        (should (eq (claude-code--managed-buffer "cleared") buf))
+        (should (eql (gethash "cleared" (claude-code--running)) 70))
         (delete-file (expand-file-name "70.json" (claude-code--sessions-dir)))
-        (should (eq (claude-code--managed-buffer "cleared") buf))
-        (should-not (claude-code--managed-buffer "launched"))))))
+        (should (eql (gethash "cleared" (claude-code--running)) 70))
+        (should-not (gethash "launched" (claude-code--running)))))))
 
 (ert-deftest claude-code-test-external-session ()
   "An unmanaged transcript with a live sessions PID is external, else dead."
@@ -5119,10 +5123,10 @@ first of two `/clear's started."
                      15))
             (clear)
             (pcase-let ((`(,current ,left ,launched) ids))
-              (should (eq (claude-code--managed-buffer current) buffer))
-              (should-not (claude-code--managed-buffer left))
-              (should-not (claude-code--managed-buffer launched))
-              (should-not (claude-code--external-p left))
+              (let ((running (claude-code--running)))
+                (should (eql (gethash current running) pid))
+                (should-not (gethash left running))
+                (should-not (gethash launched running)))
               (let* ((sessions (claude-code-project-sessions root))
                      (row (claude-code-tests--find-session sessions current))
                      (gone (claude-code-tests--find-session sessions left)))

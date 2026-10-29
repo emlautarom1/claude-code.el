@@ -466,53 +466,44 @@ That is ORIGIN's parent when ORIGIN is a worktree, so the instance belongs to
 the same project wherever it goes to work."
   (or (car (claude-code--worktree-parent origin)) origin))
 
-(defun claude-code--instance-entry (pid live)
-  "Refresh managed instance PID's :session from LIVE; return its entry.
-LIVE is a `claude-code--live-table'.  A PID LIVE does not describe keeps the
-session last read."
+(defun claude-code--instance-entry (pid info)
+  "Return managed instance PID's entry, its :session refreshed from INFO.
+INFO is what sessions/ says of PID (`claude-code--read-session-file'); without
+one, the entry keeps the session last read."
   (let ((entry (gethash pid claude-code--managed))
-        (session (plist-get (gethash pid live) :session)))
+        (session (plist-get info :session)))
     (when (and entry session)
-      (setq entry (plist-put entry :session session))
-      (puthash pid entry claude-code--managed))
+      ;; Every entry holds :session, so this updates it in place.
+      (plist-put entry :session session))
     entry))
-
-(defun claude-code--running (&optional live)
-  "Return a hash of session id -> PID of the managed instance running it.
-LIVE is a `claude-code--live-table', parsed when omitted, and every entry of
-the registry is refreshed from it (`claude-code--instance-entry')."
-  (let ((live (or live (claude-code--live-table)))
-        (running (make-hash-table :test 'equal)))
-    (dolist (pid (hash-table-keys claude-code--managed))
-      (let ((entry (claude-code--instance-entry pid live)))
-        (when (claude-code--session-process (plist-get entry :buffer))
-          (puthash (plist-get entry :session) pid running))))
-    running))
-
-(defun claude-code--managed-buffer (id)
-  "Return the buffer of the managed instance running session ID, or nil."
-  (when-let* ((pid (gethash id (claude-code--running))))
-    (plist-get (gethash pid claude-code--managed) :buffer)))
 
 (defun claude-code--pid-live-p (pid)
   "Return non-nil when integer PID is a currently running process."
   (and (integerp pid) (process-attributes pid) t))
 
-(defun claude-code--live-pid (id live)
-  "Return the PID of a running `claude' LIVE says runs session ID, or nil.
-LIVE is a `claude-code--live-table'."
-  (cl-loop for pid being the hash-keys of live using (hash-values info)
-           when (and (equal (plist-get info :session) id)
-                     (claude-code--pid-live-p pid))
-           return pid))
+(defun claude-code--running (&optional live)
+  "Return a hash of session id -> PID of the live `claude' running it.
+LIVE is a `claude-code--live-table', parsed when omitted.  A managed instance
+runs the session its entry names, refreshed from LIVE
+\(`claude-code--instance-entry'), while its buffer's process lives; any other
+`claude' runs the one LIVE names while its PID does."
+  (let ((live (or live (claude-code--live-table)))
+        (running (make-hash-table :test 'equal)))
+    (maphash (lambda (pid info)
+               (when (and (not (gethash pid claude-code--managed))
+                          (claude-code--pid-live-p pid))
+                 (puthash (plist-get info :session) pid running)))
+             live)
+    (maphash (lambda (pid _)
+               (let ((entry (claude-code--instance-entry pid (gethash pid live))))
+                 (when (claude-code--session-process (plist-get entry :buffer))
+                   (puthash (plist-get entry :session) pid running))))
+             claude-code--managed)
+    running))
 
-(defun claude-code--external-p (id &optional running live)
-  "Return non-nil when a `claude' outside Emacs is running session ID.
-RUNNING and LIVE are a `claude-code--running' and a `claude-code--live-table',
-each built when omitted."
-  (let ((live (or live (claude-code--live-table))))
-    (and (not (gethash id (or running (claude-code--running live))))
-         (claude-code--live-pid id live))))
+(defun claude-code--managed-buffer (pid)
+  "Return the buffer of managed instance PID, or nil."
+  (plist-get (gethash pid claude-code--managed) :buffer))
 
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
@@ -569,14 +560,13 @@ reach."
         :transcript (plist-get tr :transcript)
         :last-active (plist-get tr :last-active)))
 
-(defun claude-code--alive-session (pid live &optional tr)
+(defun claude-code--alive-session (pid info &optional tr)
   "Return the alive `claude-code-session' for managed instance PID.
-LIVE is a `claude-code--live-table' supplying the instance's native status,
-and TR the `claude-code--project-transcripts' descriptor of the session it
-runs.  TR's worktree is authoritative when TR exists, including when it is
-nil; the registry stands in only for a session with no transcript yet."
-  (let* ((entry (claude-code--instance-entry pid live))
-         (info (gethash pid live))
+INFO is what sessions/ says of PID, supplying its native status, and TR the
+`claude-code--project-transcripts' descriptor of the session it runs.  TR's
+worktree is authoritative when TR exists, including when it is nil; the
+registry stands in only for a session with no transcript yet."
+  (let* ((entry (claude-code--instance-entry pid info))
          (buffer (plist-get entry :buffer))
          (root (claude-code--root-status buffer))
          (modifier (car (memq (car root) '(done error)))))
@@ -600,10 +590,10 @@ It describes the session the instance runs now, its transcript looked up under
 the instance's `claude-code--origin-project', so the struct carries that
 session's name as well as its live status."
   (let* ((pid (claude-code--instance-pid buffer))
-         (live (claude-code--live-table))
-         (entry (claude-code--instance-entry pid live)))
+         (info (claude-code--pid-info pid))
+         (entry (claude-code--instance-entry pid info)))
     (claude-code--alive-session
-     pid live (claude-code--transcript-for
+     pid info (claude-code--transcript-for
                (claude-code--origin-project (plist-get entry :origin))
                (plist-get entry :session)))))
 
@@ -624,25 +614,26 @@ A session a program drove is left out unless Emacs manages an instance for it
          (sessions '()))
     (dolist (tr (claude-code--project-transcripts root))
       (let* ((id (plist-get tr :id))
-             (pid (gethash id running)))
+             (pid (gethash id running))
+             (managed (gethash pid claude-code--managed)))
         ;; An instance Emacs manages is the user's whatever it is stamped with.
-        (when (or pid (plist-get tr :interactive-p))
+        (when (or managed (plist-get tr :interactive-p))
           (puthash id t seen)
-          (push (if pid
-                    (claude-code--alive-session pid live tr)
+          (push (if managed
+                    (claude-code--alive-session pid (gethash pid live) tr)
                   (apply #'claude-code-session--create
-                         :id id :alive-p nil
-                         :external-p (claude-code--external-p id running live)
+                         :id id :alive-p nil :external-p (and pid t)
                          (claude-code--transcript-session-args tr)))
                 sessions))))
     (maphash (lambda (id pid)
-               (let ((origin (plist-get (gethash pid claude-code--managed)
-                                        :origin)))
-                 (when (and (not (gethash id seen))
-                            (member root (list origin
+               (when-let* ((origin (plist-get (gethash pid claude-code--managed)
+                                              :origin))
+                           ((not (gethash id seen)))
+                           ((member root (list origin
                                                (claude-code--origin-project
-                                                origin))))
-                   (push (claude-code--alive-session pid live) sessions))))
+                                                origin)))))
+                 (push (claude-code--alive-session pid (gethash pid live))
+                       sessions)))
              running)
     (nreverse sessions)))
 
@@ -728,8 +719,8 @@ otherwise."
   (or (claude-code--pid-cwd
        (pcase (claude-code--session-liveness session)
          ('alive (claude-code-session-pid session))
-         ('external (claude-code--live-pid (claude-code-session-id session)
-                                           (claude-code--live-table)))))
+         ('external (gethash (claude-code-session-id session)
+                             (claude-code--running)))))
       (let ((path (plist-get (claude-code-session-worktree-binding session)
                              :path)))
         (and path (file-directory-p path) path))
@@ -1049,14 +1040,14 @@ over the one it already has.  A binding that went stale between the two costs
 nothing, because what makes it a `--worktree\=' argument -- the worktree still
 being a directory -- is decided here and now.  Behaves as `claude-code-resume\='
 documents."
-  (cond
-   ((claude-code--managed-buffer id))
-   ((claude-code--external-p id)
-    (user-error "Session %s is running outside Emacs" id))
-   (t (claude-code--launch
-       id root :resume id
-       :worktree (claude-code--resume-worktree
-                  (claude-code--normalize-root root) binding)))))
+  (let ((pid (gethash id (claude-code--running))))
+    (cond
+     ((claude-code--managed-buffer pid))
+     (pid (user-error "Session %s is running outside Emacs" id))
+     (t (claude-code--launch
+         id root :resume id
+         :worktree (claude-code--resume-worktree
+                    (claude-code--normalize-root root) binding))))))
 
 ;;;###autoload
 (defun claude-code-resume (project-root id)
@@ -1088,12 +1079,12 @@ Refuses an alive session and one running outside Emacs, checked by id against
 the registry and sessions/ as well as by SESSION's own flags: a struct is only
 as fresh as the query that built it, so a session resumed since then still calls
 itself dead."
-  (let ((id (claude-code-session-id session)))
+  (let* ((id (claude-code-session-id session))
+         (pid (gethash id (claude-code--running))))
     (when (or (claude-code-session-alive-p session)
-              (claude-code--managed-buffer id))
+              (claude-code--managed-buffer pid))
       (user-error "Refusing to delete alive session %s; kill it first" id))
-    (when (or (claude-code-session-external-p session)
-              (claude-code--external-p id))
+    (when (or (claude-code-session-external-p session) pid)
       (user-error "Session %s is running outside Emacs" id))
     (let ((file (claude-code-session-transcript session)))
       (unless (and file (file-exists-p file))
