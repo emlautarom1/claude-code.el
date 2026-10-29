@@ -900,6 +900,24 @@ carries no name, so it stays blank."
               (should-not (claude-code-session-worktree
                            (claude-code-tests--find-session ss auto))))))))))
 
+(ert-deftest claude-code-test-sessions-list-an-instance-launched-from-a-worktree ()
+  "An instance with no transcript yet is listed under its launch root's project.
+Launched from inside a worktree, that is the parent project, which is the one
+the views name; the worktree itself still lists it too."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer buf
+      (let ((id "66666666-6666-4666-8666-666666666666")
+            (worktree "/home/test/proj/.claude/worktrees/feat"))
+        (claude-code--register id buf worktree nil)
+        (cl-letf (((symbol-function 'claude-code--session-process)
+                   (lambda (b) (eq b buf))))
+          (dolist (root (list "/home/test/proj" worktree))
+            (should (claude-code-session-alive-p
+                     (claude-code-tests--find-session
+                      (claude-code-project-sessions root) id))))
+          (should-not (claude-code-tests--find-session
+                       (claude-code-project-sessions "/home/other") id)))))))
+
 (ert-deftest claude-code-test-sessions-with-alive ()
   "A managed live instance becomes the alive session, without duplication."
   (claude-code-tests--with-fixtures
@@ -2757,6 +2775,24 @@ launched on another session and runs 11111111 now."
           (should (equal (claude-code-session-status session) "busy"))
           (should (equal (claude-code--session-display-name session)
                          "Understand the project layout")))))))
+
+(ert-deftest claude-code-test-notify-names-a-session-of-a-sibling-worktree ()
+  "An instance launched from a worktree names a session filed under a sibling.
+Its transcript is filed under the project's other worktree, which only the
+parent project lists, so that is where the name is looked up."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-managed-buffer buf
+      (let* ((seen '())
+             (claude-code-notify-function
+              (lambda (session _body) (push session seen))))
+        (claude-code--register "55555555-5555-4555-8555-555555555555" buf
+                               "/home/test/proj/.claude/worktrees/feat" nil)
+        (cl-letf (((symbol-function 'claude-code--session-process)
+                   (lambda (b) (eq b buf)))
+                  ((symbol-function 'claude-code--on-screen-p) #'ignore))
+          (claude-code--notify buf "Finished"))
+        (should (equal (claude-code--session-display-name (car seen))
+                       "Dotted worktree"))))))
 
 (ert-deftest claude-code-test-notify-stays-quiet ()
   "Nothing is announced with notifications off, after an exit, or on screen."

@@ -460,6 +460,12 @@ root a later query normalises the same way."
   "Return the PID of the `claude' process BUFFER hosts."
   (buffer-local-value 'ghostel--pid buffer))
 
+(defun claude-code--origin-project (origin)
+  "Return the project an instance launched from ORIGIN belongs to.
+That is ORIGIN's parent when ORIGIN is a worktree, so the instance belongs to
+the same project wherever it goes to work."
+  (or (car (claude-code--worktree-parent origin)) origin))
+
 (defun claude-code--instance-entry (pid live)
   "Refresh managed instance PID's :session from LIVE; return its entry.
 LIVE is a `claude-code--live-table'.  A PID LIVE does not describe keeps the
@@ -598,14 +604,15 @@ nil; the registry stands in only for a session with no transcript yet."
 (defun claude-code--instance-session (buffer)
   "Return the alive `claude-code-session' for the instance BUFFER hosts.
 It describes the session the instance runs now, its transcript looked up under
-the root the instance was launched from, so the struct carries that session's
-name as well as its live status."
+the instance's `claude-code--origin-project', so the struct carries that
+session's name as well as its live status."
   (let* ((pid (claude-code--instance-pid buffer))
          (live (claude-code--live-table))
          (entry (claude-code--instance-entry pid live)))
     (claude-code--alive-session
-     pid live (claude-code--transcript-for (plist-get entry :origin)
-                                           (plist-get entry :session)))))
+     pid live (claude-code--transcript-for
+               (claude-code--origin-project (plist-get entry :origin))
+               (plist-get entry :session)))))
 
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
@@ -613,8 +620,8 @@ A transcript's session is alive when Emacs manages a live instance running it,
 external when a `claude' outside Emacs runs it, and dead when no process is.
 Aliveness is keyed by session id, never by PROJECT-ROOT, because one session can
 belong to two roots (see docs/storage-model.md).  The launch root recorded in
-`claude-code--managed' is consulted only to list PROJECT-ROOT's own instances
-whose session has no transcript yet.
+`claude-code--managed' is consulted only to list the instances launched from
+PROJECT-ROOT, or from a worktree of it, whose session has no transcript here.
 A session a program drove is left out unless Emacs manages an instance for it
 \(`claude-code--interactive-transcript-p')."
   (let* ((root (claude-code--normalize-root project-root))
@@ -636,11 +643,13 @@ A session a program drove is left out unless Emacs manages an instance for it
                          (claude-code--transcript-session-args tr)))
                 sessions))))
     (maphash (lambda (id pid)
-               (when (and (not (gethash id seen))
-                          (equal (plist-get (gethash pid claude-code--managed)
-                                            :origin)
-                                 root))
-                 (push (claude-code--alive-session pid live) sessions)))
+               (let ((origin (plist-get (gethash pid claude-code--managed)
+                                        :origin)))
+                 (when (and (not (gethash id seen))
+                            (member root (list origin
+                                               (claude-code--origin-project
+                                                origin))))
+                   (push (claude-code--alive-session pid live) sessions))))
              running)
     (nreverse sessions)))
 
@@ -2346,16 +2355,15 @@ docs/glossary.md)."
 
 (defun claude-code--instance-project ()
   "Return (ROOT . WORKTREE) for the instance hosted in this buffer, or nil.
-ROOT is the project the instance was launched from, resolved to its parent
-when that is a worktree, so the instance belongs to the same project wherever
-it goes to work.  WORKTREE is the worktree of ROOT the buffer's directory --
-the one the instance works in -- names, nil when it names none."
+ROOT is the instance's `claude-code--origin-project'.  WORKTREE is the
+worktree of ROOT the buffer's directory -- the one the instance works in --
+names, nil when it names none."
   (when-let* ((origin (cl-loop for plist being the hash-values
                                of claude-code--managed
                                when (eq (plist-get plist :buffer)
                                         (current-buffer))
                                return (plist-get plist :origin))))
-    (let ((root (or (car (claude-code--worktree-parent origin)) origin))
+    (let ((root (claude-code--origin-project origin))
           (here (claude-code--worktree-parent
                  (claude-code--normalize-root default-directory))))
       (cons root (and (equal (car here) root) (cdr here))))))
