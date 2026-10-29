@@ -38,7 +38,6 @@
 ;; module being present, so the package compiles and tests in CI.
 (declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
 (declare-function ghostel-mode "ghostel" ())
-(declare-function ghostel-send-string "ghostel" (string))
 (declare-function ghostel-send-key "ghostel" (key-name &optional mods))
 (declare-function ghostel-paste-string "ghostel" (string))
 (declare-function ghostel-send-C-c "ghostel" ())
@@ -1046,15 +1045,15 @@ itself dead."
 
 (defun claude-code-send-text (session text &optional submit)
   "Send TEXT to SESSION's instance, submitting with RET when SUBMIT is non-nil.
-Any newline in TEXT is delivered with a bracketed paste, so Claude's prompt
-receives it as a literal newline within a single message.  Sending the newline
-as a raw keystroke instead would be read as RET and submit the text early, so
-only SUBMIT sends the RET that actually submits."
+TEXT goes as a bracketed paste, so a RET arriving with it still submits; typed,
+a long TEXT read together with its RET would leave the RET a newline.  Claude
+collapses a long or many-line paste into a placeholder and runs no slash
+command in it."
   (require 'ghostel)
   (with-current-buffer (claude-code--buffer session)
-    (if (string-search "\n" text)
-        (ghostel-paste-string text)
-      (ghostel-send-string text))
+    ;; An empty paste can make Claude read an image off the clipboard.
+    (unless (string-empty-p text)
+      (ghostel-paste-string text))
     (when submit (ghostel-send-key "return"))))
 
 (defun claude-code-rename (session name)

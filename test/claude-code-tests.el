@@ -143,15 +143,13 @@ invisible to `require'."
          ,@body))))
 
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
-  "Run BODY with Ghostel send/paste/key stubbed to push onto CALLS.
-Each call pushes (paste STR), (send STR) or (key NAME).  Ghostel's native
-module is absent under test, so requiring it is a no-op."
+  "Run BODY with Ghostel paste/key stubbed to push onto CALLS.
+Each call pushes (paste STR) or (key NAME).  Ghostel's native module is absent
+under test, so requiring it is a no-op."
   (declare (indent 1))
   `(claude-code-tests--without-requiring '(ghostel)
      (cl-letf (((symbol-function 'ghostel-paste-string)
                 (lambda (s) (push (list 'paste s) ,calls)))
-               ((symbol-function 'ghostel-send-string)
-                (lambda (s) (push (list 'send s) ,calls)))
                ((symbol-function 'ghostel-send-key)
                 (lambda (k &rest _) (push (list 'key k) ,calls))))
        ,@body)))
@@ -1761,7 +1759,7 @@ but invisible to every query and to `claude-code--on-buffer-kill'."
           (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (ert-deftest claude-code-test-rename ()
-  "Rename sends exactly the /rename slash command, then submits."
+  "Rename pastes exactly the /rename slash command, then submits."
   (claude-code-tests--with-managed-buffer buf
     (let ((calls '()))
       (claude-code-tests--recording-ghostel calls
@@ -1769,30 +1767,31 @@ but invisible to every query and to `claude-code--on-buffer-kill'."
          (claude-code-session--create :id "s" :alive-p t :buffer buf)
          "My Name"))
       (should (equal (reverse calls)
-                     '((send "/rename My Name") (key "return"))))
+                     '((paste "/rename My Name") (key "return"))))
       ;; Renaming a dead session is refused.
       (should-error (claude-code-rename
                      (claude-code-session--create :id "d" :alive-p nil) "x")
                     :type 'user-error))))
 
 (ert-deftest claude-code-test-send-text ()
-  "Newlines paste as one message; single lines type; RET only when submitting."
+  "Text is pasted, never typed, whatever its length; RET only when submitting."
   (claude-code-tests--with-managed-buffer buf
     (let ((calls '())
           (s (claude-code-session--create :id "s" :alive-p t :buffer buf)))
       (claude-code-tests--recording-ghostel calls
-        ;; Single line, no submit: typed, no RET.
+        ;; No submit: pasted, no RET.
         (setq calls nil)
         (claude-code-send-text s "hello")
-        (should (equal (reverse calls) '((send "hello"))))
-        ;; Single line, submit: typed then RET.
+        (should (equal (reverse calls) '((paste "hello"))))
+        ;; Submit: pasted, then RET, whatever the text's length or lines.
+        (dolist (text (list "hi" (make-string 100 ?x) "a\nb"))
+          (setq calls nil)
+          (claude-code-send-text s text t)
+          (should (equal (reverse calls) `((paste ,text) (key "return")))))
+        ;; Empty text: nothing is pasted, so a submit is the RET alone.
         (setq calls nil)
-        (claude-code-send-text s "hi" t)
-        (should (equal (reverse calls) '((send "hi") (key "return"))))
-        ;; Multi-line: bracketed paste, then RET only for the submit.
-        (setq calls nil)
-        (claude-code-send-text s "a\nb" t)
-        (should (equal (reverse calls) '((paste "a\nb") (key "return"))))))))
+        (claude-code-send-text s "" t)
+        (should (equal (reverse calls) '((key "return"))))))))
 
 (ert-deftest claude-code-test-status-display-unknown ()
   "An unrecognised non-nil status is surfaced verbatim; nil stays `alive'."
@@ -4315,6 +4314,53 @@ The name is given as several words to show that it reaches the CLI whole."
         (let ((f (expand-file-name (concat id ".jsonl")
                                    (claude-code-tests--project-dir default-directory))))
           (when (file-exists-p f) (delete-file f)))))))
+
+(ert-deftest claude-code-test-integration-long-rename-submits ()
+  "A long rename lands even when Claude reads it and its RET in one go.
+Stopping the instance across the send stands for a Claude too busy to read
+between the two: the read then holds the whole command and its RET, which is
+where a typed RET would be taken as a newline.  No model turn is spent."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (require 'ghostel)
+  (let* ((root (directory-file-name (expand-file-name default-directory)))
+         (name (concat "emacs integration " (make-string 60 ?x)))
+         buffer id pid)
+    (unwind-protect
+        (claude-code-tests--with-top-level-env
+          (let ((instance (claude-code-spawn root)))
+            (setq id (car instance))
+            (setq buffer (cdr instance))
+            (setq pid (buffer-local-value 'ghostel--pid buffer)))
+          ;; Ready for input once Claude has turned on bracketed paste.
+          (should (claude-code-tests--await
+                   (lambda () (and (buffer-live-p buffer)
+                                   (with-current-buffer buffer
+                                     (ghostel--mode-enabled ghostel--term 2004))))
+                   45))
+          (let ((s (claude-code-tests--find-session
+                    (claude-code-project-sessions root) id)))
+            (signal-process pid 'SIGSTOP)
+            (unwind-protect (claude-code-rename s name)
+              (signal-process pid 'SIGCONT)))
+          (should (claude-code-tests--await
+                   (lambda ()
+                     (let ((s (claude-code-tests--find-session
+                               (claude-code-project-sessions root) id)))
+                       (equal (and s (claude-code--session-display-name s))
+                              name)))
+                   15)))
+      (when (buffer-live-p buffer)
+        (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))
+      (when (and pid (not (claude-code-tests--await
+                           (lambda () (not (claude-code--pid-live-p pid))) 15)))
+        (ignore-errors (signal-process pid 'SIGKILL)))
+      (when id
+        (let* ((dir (claude-code-tests--project-dir default-directory))
+               (f (expand-file-name (concat id ".jsonl") dir))
+               ;; Where a `/rename' also leaves the name.
+               (own (expand-file-name id dir)))
+          (when (file-exists-p f) (delete-file f))
+          (when (file-directory-p own) (delete-directory own t)))))))
 
 (provide 'claude-code-tests)
 ;;; claude-code-tests.el ends here
