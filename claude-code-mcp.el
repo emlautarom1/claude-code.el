@@ -558,11 +558,9 @@ either side of the PID, which `claude-code--launch' fills in.  An
 `--allowedTools' entry for every registered tool follows when
 `claude-code-mcp-auto-approve' is non-nil."
   (when-let* ((port (claude-code--mcp-ensure-server)))
-    (pcase-let* ((marker "<pid>")
-                 (`(,prefix ,suffix)
-                  (split-string
-                   (concat
-                    "--mcp-config="
+    (let* ((marker "<pid>")
+           (config
+            (concat "--mcp-config="
                     (json-serialize
                      (list (cons 'mcpServers
                                  (list (cons (intern claude-code--mcp-server-name)
@@ -570,9 +568,10 @@ either side of the PID, which `claude-code--launch' fills in.  An
                                                    (cons 'url
                                                          (format
                                                           "http://127.0.0.1:%d/mcp/%s"
-                                                          port marker)))))))))
-                   (regexp-quote marker))))
-      (cons (cons prefix suffix)
+                                                          port marker))))))))))
+           (at (string-search marker config)))
+      (cons (cons (substring config 0 at)
+                  (substring config (+ at (length marker))))
             (when-let* ((allowed (and claude-code-mcp-auto-approve
                                       (claude-code--mcp-allowed-tools))))
               (list "--allowedTools" (string-join allowed ",")))))))

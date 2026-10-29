@@ -630,9 +630,9 @@ A session a program drove is left out unless Emacs manages an instance for it
                (when-let* ((origin (plist-get (gethash pid claude-code--managed)
                                               :origin))
                            ((not (gethash id seen)))
-                           ((member root (list origin
-                                               (claude-code--origin-project
-                                                origin)))))
+                           ((or (equal root origin)
+                                (equal root (claude-code--origin-project
+                                             origin)))))
                  (push (claude-code--alive-session pid (gethash pid live))
                        sessions)))
              running)
