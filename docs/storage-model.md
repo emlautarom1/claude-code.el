@@ -151,7 +151,7 @@ The name must also **round-trip**. `--worktree=NAME` always resolves to `<root>/
 
 ## MCP configuration
 
-The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. Each spawned instance is wired to the server entirely through its command line and environment: `claude` is passed `--mcp-config` with an inline JSON blob
+The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. An instance is wired to the server entirely through its command line and environment: `claude` is passed `--mcp-config` with an inline JSON blob
 
 ```json
 {"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp","headers":{"X-Claude-Code-Token":"${CLAUDE_CODE_EL_MCP_TOKEN}"}}}}

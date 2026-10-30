@@ -58,7 +58,8 @@
 
 (defcustom claude-code-mcp-enabled t
   "When non-nil, spawned `claude' instances connect to the Emacs MCP server.
-Set to nil to spawn instances with no `--mcp-config' at all."
+One in a remote directory never does.  Set to nil to spawn instances with no
+`--mcp-config' at all."
   :type 'boolean
   :group 'claude-code-mcp)
 
@@ -595,12 +596,15 @@ prefix is `claude-code--mcp-server-name'."
 (defun claude-code--mcp-wiring (buffer)
   "Return what connects the instance BUFFER hosts to the MCP server, or nil.
 Starts the server if needed and mints BUFFER a fresh token.  Returns nil when
-MCP is disabled, and otherwise (ARGS . ENV).  ARGS is `--mcp-config=' with an
+MCP is disabled or BUFFER's directory, where Ghostel runs the instance, is
+remote, and otherwise (ARGS . ENV).  ARGS is `--mcp-config=' with an
 inline JSON blob pointing at the server, followed by an `--allowedTools' entry
 for every registered tool when `claude-code-mcp-auto-approve' is non-nil.  ENV
 holds the (NAME . VALUE) cell carrying the token, which the blob names only as
 `${NAME}', keeping the token off the command line."
-  (when-let* ((port (claude-code--mcp-ensure-server)))
+  (when-let* (((not (file-remote-p
+                     (buffer-local-value 'default-directory buffer))))
+              (port (claude-code--mcp-ensure-server)))
     (let* ((token (claude-code--mcp-new-token))
            (server
             (list (cons 'type "http")

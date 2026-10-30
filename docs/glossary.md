@@ -41,11 +41,11 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Encoded project directory** — the name of a project's transcript directory under `projects/`, derived from its absolute working directory by a lossy [encoding](storage-model.md#the-cwd-encoding-lossy--never-invert).
 
-- **MCP server** — the Model Context Protocol server (`claude-code-mcp.el`) that exposes Emacs *to* the sessions this package spawns. One loopback HTTP server runs per Emacs, shared by every session; each spawned instance is pointed at it with an inline `--mcp-config`. See the [architecture notes](architecture.md#mcp-server).
+- **MCP server** — the Model Context Protocol server (`claude-code-mcp.el`) that exposes Emacs *to* the sessions this package spawns. One loopback HTTP server runs per Emacs, shared by every instance pointed at it with an inline `--mcp-config`. See the [architecture notes](architecture.md#mcp-server).
 
 - **MCP tool** / **tool catalog** — a capability the MCP server advertises to Claude (a name, description, argument schema, and a handler function), registered with `claude-code-mcp-make-tool`. The **tool catalog** is the set of all advertised tools; it is expected to grow, and each one is documented in [`mcp-tools.md`](mcp-tools.md).
 
-- **MCP token** — the random secret minted for each launch of an instance, which the instance presents with every request to the MCP server and by which the server knows the instance calling (see the [security decision](architecture.md#decisions)).
+- **MCP token** — the random secret minted for each launch wired to the server, which the instance presents with every request to the MCP server and by which the server knows the instance calling (see the [security decision](architecture.md#decisions)).
 
 - **Inline renderer** / **fullscreen renderer** — Claude's two ways of drawing itself in a terminal, its `tui` setting's two values: the classic, inline main-screen renderer (`"default"`) and the flicker-free alt-screen renderer with virtualized scrollback (`"fullscreen"`). Claude resolves which one an instance gets unless `claude-code-renderer` names one; see the [architecture notes](architecture.md#the-renderer).
 

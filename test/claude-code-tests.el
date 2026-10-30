@@ -2235,8 +2235,10 @@ Emacs's own environment never sees it."
                    (cons nil (list (cons "CC_TEST_MCP_TOKEN" "t0k"))))))
         (dolist (renderer '(nil inline))
           (let ((claude-code-renderer renderer))
-            ;; The token is minted for the buffer that hosts the instance.
+            ;; The token is minted for the buffer that hosts the instance, which
+            ;; is in the directory the instance runs in.
             (should (eq (cdr (claude-code-spawn "/r")) wired))
+            (should (equal (buffer-local-value 'default-directory wired) "/r/"))
             (should (equal (child-env "CC_TEST_MCP_TOKEN") "t0k"))
             (should (equal (child-env claude-code-tests--alt-screen)
                            (if renderer "1" "0")))

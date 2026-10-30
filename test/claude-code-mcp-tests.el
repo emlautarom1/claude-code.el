@@ -901,6 +901,18 @@ The token travels in the environment, and the config only names the variable."
         (should (null (claude-code--mcp-wiring (current-buffer))))
         (should (zerop (hash-table-count claude-code--mcp-tokens)))))))
 
+(ert-deftest claude-code-mcp-test-no-wiring-in-a-remote-directory ()
+  "An instance in a remote directory is not wired, and nothing starts for it."
+  (claude-code-mcp-tests--isolated
+    (let ((started nil))
+      (cl-letf (((symbol-function 'claude-code--mcp-ensure-server)
+                 (lambda () (setq started t) 7777)))
+        (with-temp-buffer
+          (setq default-directory "/ssh:cc-test-host:/r/")
+          (should (null (claude-code--mcp-wiring (current-buffer))))
+          (should-not started)
+          (should (zerop (hash-table-count claude-code--mcp-tokens))))))))
+
 (ert-deftest claude-code-mcp-test-ensure-server-disabled ()
   "`claude-code--mcp-ensure-server' returns nil and starts nothing when off."
   (let ((claude-code-mcp-enabled nil)
