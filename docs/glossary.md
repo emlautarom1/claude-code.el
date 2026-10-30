@@ -37,7 +37,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Project** — the current `project.el` project (usually a git repository). Each project has its own view. Sessions are associated with a project by their working directory. The sessions-view buffer pins its `default-directory` to the project root, so project-aware commands (`magit`, `project.el`, `compile`, …) resolve the current project directly from the view instead of prompting. It pins `list-buffers-directory` there too, which is where tools that expect a buffer to visit a file — `ibuffer`, completion annotators such as `marginalia` — look for a directory instead.
 
-- **Config dir** — Claude Code's state directory, `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when set (`claude-code-config-dir`).
+- **Config dir** — Claude Code's state directory on a host, `~/.claude` by default, or `$CLAUDE_CONFIG_DIR` when set (`claude-code-config-dir` on this machine).
 
 - **Encoded project directory** — the name of a project's transcript directory under `projects/`, derived from its absolute working directory by a lossy [encoding](storage-model.md#the-cwd-encoding-lossy--never-invert).
 

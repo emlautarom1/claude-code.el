@@ -65,6 +65,4 @@ spawning. The integration test does this via
 `claude-code-tests--with-top-level-env`; an ad-hoc `emacs --batch` harness needs
 `env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION …`. A normally launched Emacs
 never has these variables, so **production code deliberately leaves the nesting
-markers alone** — this is a test/debug concern only. The renderer variables and
-`CLAUDE_CODE_EL_MCP_TOKEN` are the only ones the spawn path touches at all;
-everything else is inherited from Emacs as-is.
+markers alone** — this is a test/debug concern only.

@@ -23,7 +23,7 @@
   "Run BODY with session lookups isolated from the real config dir.
 Points `claude-code-config-dir' at a nonexistent path (so sessions/ is empty)
 and rebinds `claude-code--managed' and the minted tokens to fresh tables, so
-`claude-code--instance-cwd' resolves to nil and no token is held for any PID."
+`claude-code--instance-cwd' resolves to nil and no token names any instance."
   (declare (indent 0))
   `(let ((claude-code-config-dir "/claude-code-mcp-tests-nonexistent")
          (claude-code--mcp-tokens (make-hash-table :test 'equal :weakness 'value)))
@@ -31,9 +31,9 @@ and rebinds `claude-code--managed' and the minted tokens to fresh tables, so
 
 (defmacro claude-code-mcp-tests--with-instances (instances &rest body)
   "Run BODY with each (PID . TOKEN) in INSTANCES a managed instance.
-Each is hosted in a buffer of its own carrying PID, as a Ghostel terminal
-would, and was launched from \"/home/test/PID\" with TOKEN.  The registry and
-the tokens are private to BODY."
+Each is hosted in a buffer of its own carrying PID, as the launch wrapper
+reports it, and was launched from \"/home/test/PID\" with TOKEN.  The registry
+and the tokens are private to BODY."
   (declare (indent 1))
   (let ((buffers (make-symbol "buffers")))
     `(claude-code-mcp-tests--isolated
@@ -44,15 +44,20 @@ the tokens are private to BODY."
                  (let ((buffer (generate-new-buffer " *cc-mcp-test*")))
                    (push buffer ,buffers)
                    (with-current-buffer buffer
-                     (setq-local ghostel--pid (car instance)))
-                   (puthash (car instance)
-                            (list :buffer buffer
-                                  :origin (format "/home/test/%d" (car instance)))
+                     (setq-local claude-code--pid (car instance)))
+                   (puthash buffer
+                            (list :origin (format "/home/test/%s" (car instance))
+                                  :session nil :info nil :transcript nil)
                             claude-code--managed)
                    (puthash (secure-hash 'sha256 (cdr instance)) buffer
                             claude-code--mcp-tokens)))
                ,@body)
            (mapc #'kill-buffer ,buffers))))))
+
+(defun claude-code-mcp-tests--instance (pid)
+  "Return the buffer of the managed instance carrying PID."
+  (seq-find (lambda (buffer) (eql (claude-code--instance-pid buffer) pid))
+            (hash-table-keys claude-code--managed)))
 
 (defun claude-code-mcp-tests--headers (&rest headers)
   "Return a POST's parsed headers as `web-server' builds them.
@@ -450,7 +455,7 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
                                        "tools/call" 4 :null)))))))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
-  "A tool sees its caller's cwd for the call, and nil for a PID naming nothing.
+  "A tool sees its caller's cwd for the call, and nil for a caller naming nothing.
 The nil is what a tool acting on the caller's project has to check, and it
 must not outlive the call: the next one may come from another instance."
   (let ((seen 'unset))
@@ -459,28 +464,27 @@ must not outlive the call: the next one may come from another instance."
        :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
        :handler (lambda () (setq seen claude-code--mcp-session-cwd) "ok"))
       (claude-code-mcp-tests--isolated
-        (puthash 4242 (list :buffer nil :origin "/home/test/proj")
-                 claude-code--managed)
-        (pcase-dolist (`(,pid . ,cwd) '((4242 . "/home/test/proj")
-                                        (999 . nil)
-                                        (nil . nil)))
-          (setq seen 'unset)
-          (claude-code-mcp-tests--call-tool pid "cc-mcp-test-cwd")
-          (should (equal seen cwd)))))
+        (claude-code-tests--with-managed-buffer buf
+          (claude-code-tests--with-managed-buffer stranger
+            (claude-code--register "id" buf "/home/test/proj" nil)
+            (pcase-dolist (`(,caller . ,cwd) (list (cons buf "/home/test/proj")
+                                                   (cons stranger nil)
+                                                   (cons nil nil)))
+              (setq seen 'unset)
+              (claude-code-mcp-tests--call-tool caller "cc-mcp-test-cwd")
+              (should (equal seen cwd)))))))
     (should (null claude-code--mcp-session-cwd))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-follows-the-instance ()
-  "A call is answered for the instance whose PID it names, whatever it runs.
+  "A call is answered for the instance it comes from, whatever it runs.
 Its cwd is read off its own sessions/ file, which a `/clear' rewrites under a
 new session id while the PID stays."
   (claude-code-tests--with-fixtures
-    (claude-code-tests--with-registry
-      (puthash 1003 (list :buffer nil :origin "/home/test/proj"
-                          :session "launched")
-               claude-code--managed)
+    (claude-code-tests--with-managed-buffer (buf 1003)
+      (claude-code--register "launched" buf "/home/test/proj" nil)
       (let ((result (alist-get 'result
                                (claude-code-mcp-tests--call-tool
-                                1003 "eval" (cons 'code "default-directory")))))
+                                buf "eval" (cons 'code "default-directory")))))
         (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
                        "\"/home/test/proj/.claude/worktrees/feat/\""))))))
 
@@ -617,25 +621,26 @@ Nothing of that buffer may be read as source, and its point must not move."
 (ert-deftest claude-code-mcp-test-eval-sees-the-session-directory ()
   "The evaluated form runs in the calling session's own working directory."
   (claude-code-mcp-tests--isolated
-    (puthash 4242 (list :buffer nil :origin "/home/test/proj")
-             claude-code--managed)
-    (let ((result (alist-get 'result
-                             (claude-code-mcp-tests--call-tool
-                              4242 "eval" (cons 'code "default-directory")))))
-      (should (eq (alist-get 'isError result) :false))
-      (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
-                     "\"/home/test/proj/\"")))))
+    (claude-code-tests--with-managed-buffer buf
+      (claude-code--register "id" buf "/home/test/proj" nil)
+      (let ((result (alist-get 'result
+                               (claude-code-mcp-tests--call-tool
+                                buf "eval" (cons 'code "default-directory")))))
+        (should (eq (alist-get 'isError result) :false))
+        (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
+                       "\"/home/test/proj/\""))))))
 
 ;;;; Pure dispatch: tools/call spawn
 
-(defmacro claude-code-mcp-tests--with-caller (cwd execs &rest body)
-  "Run BODY with instance 4242 managed from CWD and the launch path stubbed.
+(defmacro claude-code-mcp-tests--with-caller (var cwd execs &rest body)
+  "Run BODY with VAR an instance managed from CWD and the launch path stubbed.
 EXECS collects the (BUFFER ARGS) of every launch, so a test asserts what
 reached the CLI without a `claude' ever running."
-  (declare (indent 2))
+  (declare (indent 3))
   `(claude-code-mcp-tests--isolated
-     (puthash 4242 (list :buffer nil :origin ,cwd) claude-code--managed)
-     (claude-code-tests--recording-launch ,execs ,@body)))
+     (claude-code-tests--with-managed-buffer ,var
+       (claude-code--register "caller" ,var ,cwd nil)
+       (claude-code-tests--recording-launch ,execs ,@body))))
 
 (defun claude-code-mcp-tests--result-text (response)
   "Return the text payload of RESPONSE's tool result."
@@ -646,8 +651,8 @@ reached the CLI without a `claude' ever running."
 The directory is the server's to resolve -- the tool takes no path argument --
 and the id is what the caller has to find the session by afterwards."
   (let ((execs '()))
-    (claude-code-mcp-tests--with-caller "/home/test/proj" execs
-      (let* ((response (claude-code-mcp-tests--call-tool 4242 "spawn"))
+    (claude-code-mcp-tests--with-caller caller "/home/test/proj" execs
+      (let* ((response (claude-code-mcp-tests--call-tool caller "spawn"))
              (id (claude-code-mcp-tests--result-text response)))
         (should (eq (alist-get 'isError (alist-get 'result response))
                     :false))
@@ -663,10 +668,10 @@ and the id is what the caller has to find the session by afterwards."
 (ert-deftest claude-code-mcp-test-spawn-options ()
   "Every option reaches the CLI, and a worktree is asked for by name."
   (let ((execs '()))
-    (claude-code-mcp-tests--with-caller "/home/test/proj" execs
+    (claude-code-mcp-tests--with-caller caller "/home/test/proj" execs
       (let ((id (claude-code-mcp-tests--result-text
                  (claude-code-mcp-tests--call-tool
-                  4242 "spawn" '(prompt . "do the thing") '(model . "opus")
+                  caller "spawn" '(prompt . "do the thing") '(model . "opus")
                   '(effort . "xhigh") '(worktree . "feat")
                   '(name . "a long name")))))
         (should (equal (nth 1 (car execs))
@@ -675,12 +680,12 @@ and the id is what the caller has to find the session by afterwards."
                              "--model" "opus" "--effort" "xhigh"
                              "--" "do the thing"))))
       ;; A name on its own is the whole request.
-      (claude-code-mcp-tests--call-tool 4242 "spawn" '(worktree . "solo"))
+      (claude-code-mcp-tests--call-tool caller "spawn" '(worktree . "solo"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree=solo")))
       ;; The name joins the flag in one argument, so a caller-chosen name the
       ;; CLI would otherwise take for a flag of its own cannot become one.
-      (claude-code-mcp-tests--call-tool 4242 "spawn"
+      (claude-code-mcp-tests--call-tool caller "spawn"
                                         '(worktree . "--ax-screen-reader"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--worktree=--ax-screen-reader")))
@@ -690,7 +695,7 @@ and the id is what the caller has to find the session by afterwards."
         (let* ((launched (length execs))
                (error-object
                 (alist-get 'error (claude-code-mcp-tests--call-tool
-                                   4242 "spawn" (cons 'worktree value)))))
+                                   caller "spawn" (cons 'worktree value)))))
           (should (equal (alist-get 'code error-object) -32602))
           (should (string-match-p "must be of type string"
                                   (alist-get 'message error-object)))
@@ -699,12 +704,12 @@ and the id is what the caller has to find the session by afterwards."
       ;; would reach the CLI and kill the instance at startup, and an unnamed
       ;; worktree is no worktree.
       (claude-code-mcp-tests--call-tool
-       4242 "spawn" '(prompt . "") '(model . "") '(effort . "")
+       caller "spawn" '(prompt . "") '(model . "") '(effort . "")
        '(worktree . "") '(name . ""))
       (should (null (nthcdr 2 (nth 1 (car execs)))))
       ;; Neither the model nor the effort is held to a set of values: an unknown
       ;; one reaches the CLI, whose error it is to report.
-      (claude-code-mcp-tests--call-tool 4242 "spawn" '(effort . "turbo"))
+      (claude-code-mcp-tests--call-tool caller "spawn" '(effort . "turbo"))
       (should (equal (nthcdr 2 (nth 1 (car execs)))
                      (list "--effort" "turbo"))))))
 
@@ -795,12 +800,12 @@ Lisp, so each must reach the handler as nil."
   "A request comes from the live instance whose token it presents, with no Origin."
   (claude-code-mcp-tests--with-instances '((4242 . "tok") (4343 . "tok2"))
     (let ((token claude-code--mcp-token-key))
-      (should (eql (claude-code--mcp-caller
-                    (claude-code-mcp-tests--headers (cons token "tok")))
-                   4242))
-      (should (eql (claude-code--mcp-caller
-                    (claude-code-mcp-tests--headers (cons token "tok2")))
-                   4343))
+      (should (eq (claude-code--mcp-caller
+                   (claude-code-mcp-tests--headers (cons token "tok")))
+                  (claude-code-mcp-tests--instance 4242)))
+      (should (eq (claude-code--mcp-caller
+                   (claude-code-mcp-tests--headers (cons token "tok2")))
+                  (claude-code-mcp-tests--instance 4343)))
       (dolist (headers
                (list
                 ;; No token, and a wrong one.
@@ -815,10 +820,15 @@ Lisp, so each must reach the handler as nil."
         (should-not (claude-code--mcp-caller headers)))
       ;; The token of an instance that is gone names nothing, whether its
       ;; buffer is still around or not.
-      (remhash 4343 claude-code--managed)
+      (remhash (claude-code-mcp-tests--instance 4343) claude-code--managed)
       (should-not (claude-code--mcp-caller
                    (claude-code-mcp-tests--headers (cons token "tok2"))))
-      (kill-buffer (claude-code--managed-buffer 4242))
+      ;; An instance whose PID is not reported yet calls all the same.
+      (with-current-buffer (claude-code-mcp-tests--instance 4242)
+        (setq claude-code--pid nil))
+      (should (claude-code--mcp-caller
+               (claude-code-mcp-tests--headers (cons token "tok"))))
+      (kill-buffer (seq-first (hash-table-keys claude-code--managed)))
       (should-not (claude-code--mcp-caller
                    (claude-code-mcp-tests--headers (cons token "tok")))))))
 
@@ -923,8 +933,8 @@ The token travels in the environment, and the config only names the variable."
   (claude-code-tests--with-managed-buffer buf
     (claude-code-tests--with-managed-buffer other
       (claude-code-mcp-tests--with-server port
-        (puthash 1 (list :buffer buf) claude-code--managed)
-        (puthash 2 (list :buffer other) claude-code--managed)
+        (puthash buf (list :origin "/r") claude-code--managed)
+        (puthash other (list :origin "/r") claude-code--managed)
         ;; One of two exiting leaves the server up for the survivor.
         (with-current-buffer buf (claude-code--on-buffer-kill))
         (should (= (hash-table-count claude-code--managed) 1))
@@ -1087,7 +1097,7 @@ any handler runs, on every method and path."
   (claude-code-mcp-tests--with-server port
     (claude-code-mcp-tests--with-instances '((4242 . "tok") (4343 . "tok2"))
       (let ((claude-code-mcp-tests--evaluated nil))
-        (remhash 4343 claude-code--managed)
+        (remhash (claude-code-mcp-tests--instance 4343) claude-code--managed)
         (dolist (token '("wrong" "tok2"))
           (should (= (claude-code-mcp-tests--status
                       (claude-code-mcp-tests--http-post
@@ -1263,11 +1273,12 @@ An eval from it, in a worktree, sees the worktree as its cwd."
           (setq buffer (cdr (claude-code-spawn
                              root :worktree t
                              :prompt "Respond with the single word: pong")))
-          (setq pid (buffer-local-value 'ghostel--pid buffer))
+          (should (claude-code-tests--await
+                   (lambda () (setq pid (claude-code--instance-pid buffer))) 10))
           ;; The real CLI performs the MCP initialize handshake against us,
           ;; and its token names it.
           (should (claude-code-tests--await (lambda () initialized) 45))
-          (should (eql initialized pid))
+          (should (eq initialized buffer))
           ;; The token is in the instance's environment, and the command line
           ;; every local user can read carries only the variable's name.
           (when-let* ((environ (claude-code-tests--proc-strings pid "environ")))
@@ -1297,12 +1308,12 @@ An eval from it, in a worktree, sees the worktree as its cwd."
           ;; worktree dir; an `eval' of `default-directory' returns it.
           (should (claude-code-tests--await
                    (lambda ()
-                     (let ((cwd (claude-code--instance-cwd pid)))
+                     (let ((cwd (claude-code--instance-cwd buffer)))
                        (and cwd (string-match-p "/\\.claude/worktrees/" cwd))))
                    45))
-          (let* ((cwd (claude-code--instance-cwd pid))
+          (let* ((cwd (claude-code--instance-cwd buffer))
                  (resp (claude-code--mcp-handle-request
-                        pid
+                        buffer
                         (list (cons 'jsonrpc "2.0") (cons 'id 1)
                               (cons 'method "tools/call")
                               (cons 'params
@@ -1318,10 +1329,10 @@ An eval from it, in a worktree, sees the worktree as its cwd."
       (advice-remove 'claude-code--mcp-handle-request probe)
       (when (buffer-live-p buffer)
         (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))
-      (when (and pid (claude-code--pid-live-p pid))
+      (when (and pid (process-attributes pid))
         (ignore-errors (signal-process pid 'SIGKILL))
         ;; Let the process and its git children die before touching its worktree.
-        (claude-code-tests--await (lambda () (not (claude-code--pid-live-p pid))) 5))
+        (claude-code-tests--await (lambda () (not (process-attributes pid))) 5))
       (claude-code-mcp-stop)
       ;; Spawning with `:worktree t' leaves a locked git worktree behind that the
       ;; CLI never tears down.  Remove only worktrees that appeared during this

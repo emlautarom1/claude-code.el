@@ -108,15 +108,15 @@ Bound by `claude-code--mcp-with-session' for the duration of the call.  A
 handler is passed its validated arguments and nothing else, so this is how one
 that has to act on the caller's own project reaches it.")
 
-(defmacro claude-code--mcp-with-session (pid &rest body)
-  "Evaluate BODY in the context of the instance PID names.
+(defmacro claude-code--mcp-with-session (caller &rest body)
+  "Evaluate BODY in the context of the instance whose buffer is CALLER.
 Its real cwd comes from `claude-code--instance-cwd', resolved once and bound
-to both `claude-code--mcp-session-cwd' and `default-directory'; an unknown PID
-leaves `default-directory' unchanged.  That directory is best-effort context
-for a tool, not a sandbox: it only affects `default-directory'-relative
-operations, not code using absolute paths."
+to both `claude-code--mcp-session-cwd' and `default-directory'; a CALLER that
+is no instance leaves `default-directory' unchanged.  That directory is
+best-effort context for a tool, not a sandbox: it only affects
+`default-directory'-relative operations, not code using absolute paths."
   (declare (indent 1))
-  `(let* ((claude-code--mcp-session-cwd (claude-code--instance-cwd ,pid))
+  `(let* ((claude-code--mcp-session-cwd (claude-code--instance-cwd ,caller))
           (default-directory (if claude-code--mcp-session-cwd
                                  (file-name-as-directory
                                   claude-code--mcp-session-cwd)
@@ -395,8 +395,9 @@ a handler passing values on to a process emits no option with an empty value."
                (t value))))
           arg-specs))
 
-(defun claude-code--mcp-tools-call (pid params)
-  "Run the tool named in PARAMS for instance PID and return its result payload.
+(defun claude-code--mcp-tools-call (caller params)
+  "Run the tool named in PARAMS for CALLER and return its result payload.
+CALLER is the calling instance's buffer.
 PARAMS is the `tools/call' params alist carrying `name' and `arguments', and
 must be an object -- JSON null standing for the one a call did not send.
 Signals a `claude-code--mcp-rpc-error' for a PARAMS of any other shape, for an
@@ -415,7 +416,7 @@ that itself errors yields an `isError' result rather than crashing the server."
                       (plist-get tool :args)
                       (alist-get 'arguments params))))
       (condition-case err
-          (let ((result (claude-code--mcp-with-session pid
+          (let ((result (claude-code--mcp-with-session caller
                           (apply (plist-get tool :handler) call-args))))
             (list (cons 'content
                         (vector (list (cons 'type "text")
@@ -429,12 +430,12 @@ that itself errors yields an `isError' result rather than crashing the server."
                                                  (error-message-string err))))))
                (cons 'isError t)))))))
 
-(defun claude-code--mcp-handle-request (pid request)
+(defun claude-code--mcp-handle-request (caller request)
   "Return the JSON-RPC response alist for REQUEST, or nil for a notification.
-PID names the calling instance.  REQUEST is the parsed JSON-RPC request object
-\(an alist).  A request with no `id' is a notification and yields nil (the
-transport still acknowledges it).  A non-object REQUEST -- a JSON array or
-bare scalar -- is answered with a -32600 Invalid Request; any
+CALLER is the calling instance's buffer.  REQUEST is the parsed JSON-RPC
+request object (an alist).  A request with no `id' is a notification and
+yields nil (the transport still acknowledges it).  A non-object REQUEST -- a
+JSON array or bare scalar -- is answered with a -32600 Invalid Request; any
 `claude-code--mcp-rpc-error' or other error becomes a JSON-RPC error envelope
 echoing the request `id'."
   (if (not (listp request))
@@ -450,7 +451,7 @@ echoing the request `id'."
              (pcase method
                ("initialize" (claude-code--mcp-initialize))
                ("tools/list" (claude-code--mcp-tools-list))
-               ("tools/call" (claude-code--mcp-tools-call pid params))
+               ("tools/call" (claude-code--mcp-tools-call caller params))
                (_ (signal 'claude-code--mcp-rpc-error
                           (list -32601 (format "Method not found: %s" method))))))
           (claude-code--mcp-rpc-error
@@ -460,22 +461,22 @@ echoing the request `id'."
             id -32603
             (format "Internal error: %s" (error-message-string err)))))))))
 
-(defun claude-code--mcp-response-for-body (pid body declared-length)
+(defun claude-code--mcp-response-for-body (caller body declared-length)
   "Return the JSON-RPC response alist for BODY, or nil for a notification.
-PID names the calling instance.  BODY is the raw POST body; DECLARED-LENGTH
-is the request's Content-Length value as a string, or nil when the header is
-absent.  A BODY whose byte count disagrees with DECLARED-LENGTH is answered
-with a -32700 error rather than parsed: web-server frames the body by the
-header blank line, not Content-Length, so a body split across packets arrives
-truncated.  A body that is not valid JSON is likewise a -32700.  Dispatch
-errors never escape `claude-code--mcp-handle-request', so the `json-error'
-handler here fires only for the parse."
+CALLER is the calling instance's buffer.  BODY is the raw POST body;
+DECLARED-LENGTH is the request's Content-Length value as a string, or nil when
+the header is absent.  A BODY whose byte count disagrees with DECLARED-LENGTH
+is answered with a -32700 error rather than parsed: web-server frames the body
+by the header blank line, not Content-Length, so a body split across packets
+arrives truncated.  A body that is not valid JSON is likewise a -32700.
+Dispatch errors never escape `claude-code--mcp-handle-request', so the
+`json-error' handler here fires only for the parse."
   (if (and declared-length
            (/= (string-bytes body) (string-to-number declared-length)))
       (claude-code--mcp-error :null -32700 "Truncated request body")
     (condition-case nil
         (claude-code--mcp-handle-request
-         pid (json-parse-string body :object-type 'alist))
+         caller (json-parse-string body :object-type 'alist))
       (json-error (claude-code--mcp-error :null -32700 "Parse error")))))
 
 
@@ -497,17 +498,16 @@ Keyed by digest, so a lookup's timing says nothing about a guessed token.")
     (encode-hex-string (buffer-string))))
 
 (defun claude-code--mcp-caller (headers)
-  "Return the PID of the instance a request with HEADERS comes from, or nil.
+  "Return the buffer of the instance a request with HEADERS comes from, or nil.
 HEADERS is the alist `web-server' parses the request into.  It must carry no
 `Origin', which only a browser sends, and must present a live managed
 instance's token in `claude-code--mcp-token-header'."
-  (let* ((token (cdr (assq claude-code--mcp-token-key headers)))
-         (buffer (and (stringp token)
-                      (not (assq :ORIGIN headers))
-                      (gethash (secure-hash 'sha256 token)
-                               claude-code--mcp-tokens)))
-         (pid (and (buffer-live-p buffer) (claude-code--instance-pid buffer))))
-    (and pid (eq (claude-code--managed-buffer pid) buffer) pid)))
+  (let ((buffer (when-let* ((token (cdr (assq claude-code--mcp-token-key
+                                              headers)))
+                            ((stringp token))
+                            ((not (assq :ORIGIN headers))))
+                  (gethash (secure-hash 'sha256 token) claude-code--mcp-tokens))))
+    (and (buffer-live-p buffer) (claude-code--managed-p buffer) buffer)))
 
 
 ;;;; Transport (web-server glue)

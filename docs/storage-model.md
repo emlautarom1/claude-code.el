@@ -4,7 +4,11 @@
 
 ## Config directory
 
-`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set. Resolved once into `claude-code-config-dir`.
+`~/.claude`, or `$CLAUDE_CONFIG_DIR` when set; a remote host is asked for both once per TRAMP connection (`claude-code--remote-config-env`). The variable decides more than the directory: set — even to `~/.claude` — the CLI keeps its global config in `.claude.json` inside it, and unset in `~/.claude.json` (verified against CLI v2.1.312). Setting it where the host has none starts the instance as a fresh install, so every instance is launched with the variable as its host has it, set or unset (`claude-code--config-env`).
+
+## Remote hosts
+
+A project under a TRAMP prefix is read on its host, and its directory is encoded from its local name. Every path Claude records — a `cwd`, a `worktreePath` — gets the prefix back as it is read. A PID names a process on its own host only.
 
 ## Running instances — `sessions/<pid>.json`
 
@@ -17,17 +21,17 @@ Claude writes one JSON file per running process, named by OS PID. The fields thi
 | `status`     | `idle` \| `busy` \| `waiting` \| `shell` (absent early on) |
 | `waitingFor` | set only while `waiting`, e.g. `"permission prompt"`       |
 
-`claude-code--live-table` parses every such file into a hash keyed by the PID in its name, and `claude-code--pid-info` reads one. It matches `<pid>.json` and nothing else, which is the CLI's own filter too: a companion `sessions/<pid>.<sha256>.key` holds the `peerToken` authorizing that process's messaging socket and carries no session id. Parsing is pure — a missing `status` yields nil, and process liveness is decided separately (`claude-code--pid-live-p`). A session is *alive* only when an instance Emacs manages runs it; this table says which session each managed instance runs and its status, and flags [external](glossary.md) sessions.
+`claude-code--live-table` parses every such file into a hash keyed by the PID in its name, and `claude-code--pid-info` reads one. It matches `<pid>.json` and nothing else, which is the CLI's own filter too: a companion `sessions/<pid>.<sha256>.key` holds the `peerToken` authorizing that process's messaging socket and carries no session id. Parsing is pure — a missing `status` yields nil, and process liveness is decided separately (`claude-code--pid-running-p`). A session is *alive* only when an instance Emacs manages runs it; this table says which session each managed instance runs and its status, and flags [external](glossary.md) sessions.
 
 The PID names the process, not the session. `/clear` (and its aliases `/reset` and `/new`), `/resume` and `/branch` move the running process onto another session: the file is rewritten **in place** under the new `sessionId`, so a read can catch it partial, and it is removed when the process exits. Nothing else records the switch — no transcript line links the two sessions, bar `/branch`'s `forkedFrom`. Verified against CLI v2.1.304.
 
 `cwd` follows the process: `--worktree` starts it in the worktree, `EnterWorktree` and `ExitWorktree` move it within the turn that calls them, and a Bash `cd` does not.
 
-`shell` stands in for `idle` while a background shell command the instance started is still running (verified against CLI v2.1.304): the turn has ended, but the command's completion starts the next one with no user input, and Claude's own job list shows it as *working*. A prompt typed meanwhile still reads `busy`, and a permission prompt `waiting`. `claude-code--read-session-file` therefore reads `shell` as `busy`, leaving the three statuses the [glossary](glossary.md) names, and flags it with `:shell-p`, which is what holds back the [attention notification](architecture.md#attention-notifications) for a turn the command keeps going. Claude rewrites the file some 30 ms after the OSC 7501 report of the same change, so that flag is read only once `claude-code--notify-settle` has passed. `claude-code--status-display` renders an unrecognised value as `unknown (VALUE)` rather than guessing, which is what keeps a vocabulary Anthropic extends from reading as the wrong status.
+`shell` stands in for `idle` while a background shell command the instance started is still running (verified against CLI v2.1.304): the turn has ended, but the command's completion starts the next one with no user input, and Claude's own job list shows it as *working*. A prompt typed meanwhile still reads `busy`, and a permission prompt `waiting`. `claude-code--read-session-file` therefore reads `shell` as `busy`, leaving the three statuses the [glossary](glossary.md) names, and flags it with `:shell-p`, which is what holds back the [attention notification](architecture.md#attention-notifications) for a turn the command keeps going. Claude rewrites the file some 30 ms after the OSC 7501 report of the same change, so that flag is read only once `claude-code--notify-settle` has passed, and never for a remote instance, whose file is read by queries alone. `claude-code--status-display` renders an unrecognised value as `unknown (VALUE)` rather than guessing, which is what keeps a vocabulary Anthropic extends from reading as the wrong status.
 
 A session's display name comes entirely from the transcript (see [Transcripts](#transcripts--projectsencoded-cwdsessionidjsonl) and `claude-code--session-display-name`); a `/rename` is reflected there through its `custom-title`. Claude writes a `name` here too, qualified by `nameSource`: `derived` marks the directory-derived placeholder (`{"name":"proj-f8","nameSource":"derived"}`), while `auto`, `user`, `peer`, `hook` and `collision` mark real ones. Reading it would still be wrong, because this file exists only while the process does — it names live sessions and nothing else, and a view has to name dead ones from the same source as live ones. That source is the transcript.
 
-Liveness is a plain per-PID `process-attributes` existence check, and a PID is taken to name one process: Claude's guards against a reused PID, `procStart` and `pidDomain`, go unread.
+Liveness is membership in the host's process table, read once per query (`claude-code--pid-running-p`), and a PID is taken to name one process: Claude's guards against a reused PID, `procStart` and `pidDomain`, go unread. A table that cannot be read — TRAMP returns none when `ps` fails — has every PID running: refusing a resume or a delete costs less than a second process on a session.
 
 ### Not every process here is a terminal session
 
@@ -155,8 +159,8 @@ The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk lay
 
 (plus `--allowedTools` listing every registered tool when auto-approve is on), and its environment carries `CLAUDE_CODE_EL_MCP_TOKEN`. No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has.
 
-The one piece of on-disk state the server *reads* is the calling instance's real cwd: `claude-code--instance-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root in the brief window before that file exists.
+The one piece of on-disk state the server *reads* is the calling instance's real cwd: `claude-code--instance-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root before that file has been read.
 
 ## Mapping an Emacs buffer to a session
 
-The registry `claude-code--managed` is keyed by the instance's PID (`claude-code--instance-pid`). A spawn passes a generated UUID as `--session-id`, so the session an instance starts on is known before Claude writes anything; afterwards `sessions/<pid>.json` names it (`claude-code--instance-entry`), the last one read standing in while that file is missing or partial.
+A spawn passes a generated UUID as `--session-id`, so the session an instance starts on is known before Claude writes anything; afterwards `sessions/<pid>.json` names it (`claude-code--entry-update`), the last one read standing in while that file is missing or partial.
