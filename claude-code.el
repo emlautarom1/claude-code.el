@@ -147,6 +147,10 @@ again."
         (concat host (or value (concat (file-name-as-directory home) ".claude"))))
     (expand-file-name claude-code-config-dir)))
 
+(defun claude-code--remote-home (host)
+  "Return remote HOST's home directory, as a file name there."
+  (cdr (claude-code--remote-config-env host)))
+
 (defconst claude-code--encoded-cwd-limit 200
   "Length past which Claude cuts a project-directory name and appends a hash.")
 
@@ -1247,7 +1251,8 @@ is where `claude-code--session-display-name' reads it back on the next refresh."
   "Config directory the `claude' exporting a transcript runs with.
 That process files itself under sessions/ as an instance of the session it
 exports, so it is kept away from `claude-code-config-dir', where it would read
-as one.  The CLI creates the directory and keeps nothing there worth keeping."
+as one.  The CLI creates the directory and keeps nothing there worth keeping.
+An export on a remote host runs with ~/.cache/claude-code-export/ there."
   :type 'directory)
 
 (defvar claude-code--export-timeout 30
@@ -1255,6 +1260,16 @@ as one.  The CLI creates the directory and keeps nothing there worth keeping."
 
 (defconst claude-code--export-request-id "claude-code"
   "The id of the one control request a transcript export sends.")
+
+(defconst claude-code--export-exit "claude-code-exit"
+  "The type of the line `claude-code--export-command' prints as the CLI exits.")
+
+(defun claude-code--export-config-dir (host)
+  "Return the config dir an export on HOST runs with, as that host names it."
+  (if host
+      (file-name-concat (claude-code--remote-home host)
+                        ".cache/claude-code-export/")
+    (expand-file-name claude-code-export-config-dir)))
 
 (defun claude-code--export-args (file)
   "Return the CLI arguments that export transcript FILE on request.
@@ -1267,12 +1282,31 @@ not."
         "--output-format" "stream-json" "--verbose"
         "--no-session-persistence" (concat "--resume=" file)))
 
+(defun claude-code--export-command (program file)
+  "Return the command with which PROGRAM exports transcript FILE.
+A `/bin/sh' pipes the export request to PROGRAM and holds that pipe open until
+a line arrives on its own input.  Once PROGRAM exits, the shell prints a line
+of type `claude-code--export-exit' carrying its exit status, then its stderr."
+  (append (list "/bin/sh" "-c"
+                (concat "r=$1; shift; { printf '%s\\n' \"$r\"; read -r _; } | "
+                        "{ e=$(\"$0\" \"$@\" 2>&1 >&3 3>&-); "
+                        (format "printf '\\n{\"type\":\"%s\",\"status\":%%d}\\n%%s'"
+                                claude-code--export-exit)
+                        " $? \"$e\"; } 3>&1 2>&1 | cat")
+                program
+                (json-serialize
+                 `((type . "control_request")
+                   (request_id . ,claude-code--export-request-id)
+                   (request (subtype . "export_conversation")))))
+          (claude-code--export-args file)))
+
 (defun claude-code--export-outcome (line)
-  "Return what stdout LINE of a transcript export settles, or nil for nothing.
+  "Return what stdout LINE of a transcript export tells, or nil for nothing.
 \(text . TEXT) carries the exported text; (error . MESSAGE) a failure
 the CLI reported, as its answer to the request or as the result of a run that
-ended.  A transcript holding no conversation is reported under a session id
-the CLI made up, so the message names none."
+ended; (exit . STATUS) the CLI's exit, as `claude-code--export-command'
+reports it.  A transcript holding no conversation is reported under a session
+id the CLI made up, so the message names none."
   (when-let* ((obj (ignore-errors
                      (json-parse-string line :null-object nil
                                         :false-object nil)))
@@ -1298,7 +1332,10 @@ the CLI made up, so the message names none."
                            (format "%s" (gethash "subtype" obj)))))
            (cons 'error (if (string-prefix-p "No conversation found" message)
                             "No conversation to export"
-                          message))))))))
+                          message)))))
+      ((pred (equal claude-code--export-exit))
+       (let ((status (gethash "status" obj)))
+         (and (integerp status) (cons 'exit status)))))))
 
 (defun claude-code--export-file (session root)
   "Return SESSION's transcript file as it lies now, or signal a `user-error'.
@@ -1319,16 +1356,21 @@ Of its answer, its exit, its timeout and a cancel, only the first is heard."
   (unless (process-get proc 'claude-code-settled)
     (process-put proc 'claude-code-settled t)))
 
+(defun claude-code--export-terminate (proc)
+  "Send SIGTERM to export PROC's process group, a hung CLI under its shell too."
+  (signal-process (- (process-id proc)) 'SIGTERM))
+
 (defun claude-code--export-cancel (proc)
   "Abandon the export PROC runs, calling neither of its callbacks."
   (when (and (claude-code--export-settle proc) (process-live-p proc))
-    (signal-process proc 'SIGTERM)))
+    (claude-code--export-terminate proc)))
 
 (defun claude-code-export-transcript (session root on-text &optional on-error)
   "Export SESSION's transcript as Claude's `/export' does; return the process.
 ROOT is the project SESSION is listed under.  The export is asynchronous:
 ON-TEXT is called with the text, or ON-ERROR, `message' by default, with why
-there is none.  Signals a `user-error' when SESSION has no transcript on disk.
+there is none.  Signals a `user-error' when SESSION has no transcript on disk
+or its host cannot run the CLI.
 The text is the conversation as a terminal shows it, at 80 columns, with tool
 calls collapsed; file paths in it are relative to the directory SESSION works
 in."
@@ -1338,73 +1380,74 @@ in."
                              (claude-code--session-directory session root)))
          (process-environment
           (cons (concat "CLAUDE_CONFIG_DIR="
-                        (expand-file-name claude-code-export-config-dir))
+                        (claude-code--export-config-dir
+                         (file-remote-p default-directory)))
                 process-environment))
-         (stderr "")
          (pending '())
-         ;; Stderr has a pipe of its own, so its lines cannot split the answer.
-         (errors (make-pipe-process
-                  :name "claude-code-export stderr" :noquery t
-                  :filter (lambda (_ chunk) (setq stderr (concat stderr chunk)))))
+         (released nil)
+         ;; The CLI's exit status once reported, and the stderr after it.
+         (status nil)
+         (stderr '())
          (proc
-          (condition-case err
-              (make-process
-               :name "claude-code-export" :noquery t
-               :command (cons claude-code-cli (claude-code--export-args file))
-               :connection-type 'pipe :coding 'utf-8-unix :stderr errors
-               :filter
-               (lambda (proc chunk)
-                 ;; The answer is one line, as long as the transcript.
-                 (let ((start 0) newline)
-                   (while (setq newline (string-search "\n" chunk start))
-                     (push (substring chunk start newline) pending)
-                     (let ((outcome (claude-code--export-outcome
-                                     (apply #'concat (nreverse pending)))))
-                       (setq pending '())
-                       (when (and outcome (claude-code--export-settle proc))
-                         ;; The CLI awaits more requests until its input ends.
-                         (when (process-live-p proc) (process-send-eof proc))
-                         (funcall (if (eq (car outcome) 'text) on-text on-error)
-                                  (cdr outcome))))
-                     (setq start (1+ newline)))
-                   (push (substring chunk start) pending)))
-               :sentinel
-               (lambda (proc event)
-                 (unless (process-live-p proc)
-                   (cancel-timer (process-get proc 'claude-code-timer))
-                   (delete-process errors)
-                   (when (claude-code--export-settle proc)
-                     (funcall on-error
-                              (format "%s ended with no transcript: %s"
-                                      claude-code-cli
-                                      (string-trim
-                                       (if (string-blank-p stderr)
-                                           event
-                                         stderr))))))))
-            (error (delete-process errors)
-                   (signal (car err) (cdr err))))))
+          (make-process
+           :name "claude-code-export" :noquery t :file-handler t
+           :command (claude-code--export-command
+                     (claude-code--resolve-executable claude-code-cli)
+                     (file-local-name file))
+           :connection-type 'pipe
+           :filter
+           (lambda (proc chunk)
+             ;; The answer is one line, as long as the transcript.
+             (let ((start 0) newline)
+               (while (and (not status)
+                           (setq newline (string-search "\n" chunk start)))
+                 (push (substring chunk start newline) pending)
+                 (let ((outcome (claude-code--export-outcome
+                                 (apply #'concat (nreverse pending)))))
+                   (setq pending '())
+                   ;; The shell holds the CLI's input open until a line comes.
+                   (when (and outcome (not released) (process-live-p proc))
+                     (setq released t)
+                     (process-send-string proc "\n"))
+                   (pcase outcome
+                     (`(exit . ,code) (setq status code))
+                     (`(,kind . ,value)
+                      (when (claude-code--export-settle proc)
+                        (funcall (if (eq kind 'text) on-text on-error)
+                                 value)))))
+                 (setq start (1+ newline)))
+               (if status
+                   (push (substring chunk start) stderr)
+                 (push (substring chunk start) pending))))
+           :sentinel
+           (lambda (proc event)
+             (unless (process-live-p proc)
+               (cancel-timer (process-get proc 'claude-code-timer))
+               (when (claude-code--export-settle proc)
+                 (funcall on-error
+                          (if status
+                              (let ((text (string-trim
+                                           (apply #'concat (nreverse stderr)))))
+                                (format "%s exited with status %d and no transcript%s"
+                                        claude-code-cli status
+                                        (if (string-empty-p text)
+                                            ""
+                                          (concat ": " text))))
+                            (format "%s ended with no transcript: %s"
+                                    claude-code-cli (string-trim event))))))))))
+    ;; TRAMP picks a remote process's coding system itself.
+    (set-process-coding-system proc 'utf-8-unix 'utf-8-unix)
     ;; Armed until the process ends, answered or not: a CLI the EOF does not
     ;; end is ended here.
     (process-put proc 'claude-code-timer
                  (run-at-time claude-code--export-timeout nil
                               (lambda ()
                                 (when (process-live-p proc)
-                                  (signal-process proc 'SIGTERM))
+                                  (claude-code--export-terminate proc))
                                 (when (claude-code--export-settle proc)
                                   (funcall on-error
                                            (format "Export timed out after %ss"
                                                    claude-code--export-timeout))))))
-    (condition-case err
-        (process-send-string
-         proc (concat (json-serialize
-                       `((type . "control_request")
-                         (request_id . ,claude-code--export-request-id)
-                         (request (subtype . "export_conversation"))))
-                      "\n"))
-      ;; A CLI gone before it was asked: the caller hears of it here, and only
-      ;; here.
-      (error (claude-code--export-settle proc)
-             (signal (car err) (cdr err))))
     proc))
 
 
