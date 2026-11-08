@@ -17,6 +17,8 @@
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-pre-spawn-hook nil)
 (defvar vc-deduce-backend-nonvc-modes)
+(defvar desktop-save-buffer)
+(defvar bookmark-make-record-function)
 
 ;; `claude-code-instance-mode' derives from `ghostel-mode' and installs
 ;; `ghostel-semi-char-mode-map', so entering it needs both to exist.  An
@@ -1871,6 +1873,24 @@ executable is not the CLI."
     (should (local-variable-p 'ghostel-buffer-name-function))
     (should (eq ghostel-buffer-name-function
                 #'claude-code--ghostel-buffer-name))))
+
+(ert-deftest claude-code-test-instance-mode-is-kept-out-of-desktops-and-bookmarks ()
+  "An instance buffer is neither saved in a desktop nor bookmarked.
+Ghostel would record its command line -- the initial prompt among it -- and
+run that command again on restore or jump, as a terminal no instance owns."
+  (require 'bookmark)
+  (let ((parent (symbol-function 'ghostel-mode)))
+    (cl-letf (((symbol-function 'ghostel-mode)
+               (lambda ()
+                 (funcall parent)
+                 ;; What Ghostel's own mode body installs.
+                 (setq-local desktop-save-buffer #'ignore
+                             bookmark-make-record-function #'ignore))))
+      (with-temp-buffer
+        (claude-code-instance-mode)
+        (should (local-variable-p 'desktop-save-buffer))
+        (should-not desktop-save-buffer)
+        (should-error (bookmark-make-record) :type 'user-error)))))
 
 (ert-deftest claude-code-test-instance-mode-logs-the-names-it-holds ()
   "An instance buffer records each name it takes, and when it took it.

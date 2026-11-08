@@ -56,6 +56,8 @@
 (defvar ghostel-status-notify-states)
 (defvar ghostel-semi-char-mode-map)
 (defvar vc-deduce-backend-nonvc-modes)
+(defvar desktop-save-buffer)
+(defvar bookmark-make-record-function)
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
@@ -956,12 +958,21 @@ taken a PID: the wrapper reports ahead of anything else the terminal shows."
     (setq claude-code--pid (string-to-number pid))
     (setq ghostel-eval-cmds nil)))
 
+(defun claude-code--refuse-bookmark ()
+  "Refuse to bookmark an instance buffer.
+The buffer-local `bookmark-make-record-function' standing in for Ghostel's,
+whose bookmark would run the instance's command line again as a terminal no
+instance owns."
+  (user-error "A Claude instance cannot be bookmarked"))
+
 (define-derived-mode claude-code-instance-mode ghostel-mode "Claude"
   "Major mode for a Ghostel terminal hosting a Claude instance.
 Gives Claude's terminals a `display-buffer-alist' key and a keymap that no
 other Ghostel terminal answers to.  The buffer's `default-directory' follows
 the directory the instance works in (`claude-code--follow-directory'), and VC
-commands act on it.
+commands act on it.  The buffer is kept out of desktop files and bookmarks,
+which Ghostel would fill with the instance's command line, initial prompt
+included.
 
 \\{claude-code-instance-mode-map}"
   :interactive nil
@@ -974,6 +985,8 @@ commands act on it.
   (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name)
   (setq-local ghostel-eval-cmds
               (list (list claude-code--pid-report #'claude-code--report-pid)))
+  (setq-local desktop-save-buffer nil)
+  (setq-local bookmark-make-record-function #'claude-code--refuse-bookmark)
   (claude-code--record-name)
   (add-hook 'buffer-list-update-hook #'claude-code--record-name nil t)
   (add-hook 'ghostel-program-status-functions #'claude-code--follow-directory
