@@ -6150,6 +6150,11 @@ and a transcript as the CLI would, then sleeps under its PID."
               (let ((attached (claude-code-attach root id)))
                 (should (claude-code-tests--await
                          (lambda () (claude-code--session-process attached)) 5))
+                ;; dtach's client stays only once it has connected, so give it
+                ;; the chance to fail that it must not take.
+                (claude-code-tests--await
+                 (lambda () (not (claude-code--session-process attached))) 1)
+                (should (claude-code--session-process attached))
                 (should (eql (buffer-local-value 'claude-code--pid attached) pid))
                 (let ((alive (funcall session id)))
                   (should (claude-code-session-alive-p alive))
