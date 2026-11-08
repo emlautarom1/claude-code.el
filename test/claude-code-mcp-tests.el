@@ -964,8 +964,9 @@ reports that from its buffer."
   (claude-code-tests--with-managed-buffer buf
     (claude-code-mcp-tests--with-server port
       (claude-code--register "a" buf "/r" nil)
-      (claude-code-kill (claude-code-session--create
-                         :id "a" :alive-p t :buffer buf))
+      (cl-letf (((symbol-function 'claude-code--session-process) #'buffer-live-p))
+        (claude-code-kill (claude-code-session--create
+                           :id "a" :alive-p t :buffer buf)))
       (should (zerop (hash-table-count claude-code--managed)))
       (should-not claude-code--mcp-server)
       (should-not (claude-code-tests--listening-p port)))))

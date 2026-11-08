@@ -1138,10 +1138,14 @@ die with its process, so its kill is the one event that retires the entry."
            claude-code--managed))
 
 (defun claude-code--buffer (session)
-  "Return SESSION's live buffer or signal a `user-error'."
+  "Return the buffer of SESSION's instance, or signal a `user-error'.
+Every operation on an alive session reaches its instance through here, which
+refuses one no longer running in Emacs: a struct built before its instance
+exited or was detached names a buffer that is gone."
   (let ((buffer (claude-code-session-buffer session)))
-    (unless (buffer-live-p buffer)
-      (user-error "Session %s has no live buffer" (claude-code-session-id session)))
+    (unless (claude-code--session-process buffer)
+      (user-error "Session %s is not running in Emacs"
+                  (claude-code-session-id session)))
     buffer))
 
 (defcustom claude-code-renderer nil
@@ -1364,31 +1368,28 @@ instance runs, which cannot be attached."
 
 (defun claude-code-kill (session)
   "Kill the process running SESSION, leaving the session dead.
-An alive session's instance is the one in the buffer SESSION names, so a session
-rehosted since SESSION was built keeps the instance its new buffer holds.  A
-non-detachable instance goes with its buffer, and a detachable one, which would
-outlive it, is sent SIGTERM on its host; its buffer closes once it has exited.
-An external session's process is sent SIGTERM on the host of its transcript,
-found by id when called: a session that has stopped since SESSION was built is
+An alive session's instance is the one in the buffer SESSION names (see
+`claude-code--buffer').  A non-detachable instance goes with its buffer, and a
+detachable one, which would outlive it, is sent SIGTERM on its host.  An
+external session's process is sent SIGTERM on the host of its transcript, found
+by id when called: a session that has stopped since SESSION was built is
 refused, and so is one an instance Emacs manages has resumed since, which only
 that instance's alive row kills."
   (let ((id (claude-code-session-id session)))
     (cond
      ((claude-code-session-alive-p session)
-      (let* ((buffer (claude-code-session-buffer session))
-             (entry (and (buffer-live-p buffer)
-                         (gethash buffer claude-code--managed))))
+      (let* ((buffer (claude-code--buffer session))
+             (entry (gethash buffer claude-code--managed))
+             (pid (claude-code--instance-pid buffer)))
         (cond
          ((not (plist-get entry :detachable))
-          (when (buffer-live-p buffer)
-            (let ((kill-buffer-query-functions nil))
-              (kill-buffer buffer))))
-         ((not (claude-code--instance-pid buffer))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buffer)))
+         ((not pid)
           (user-error "Session %s has not reported its process yet" id))
-         ((not (zerop (signal-process (claude-code--instance-pid buffer)
-                                      'SIGTERM (claude-code--entry-host entry))))
-          (user-error "Could not signal process %d of session %s"
-                      (claude-code--instance-pid buffer) id)))))
+         ((not (zerop (signal-process pid 'SIGTERM
+                                      (claude-code--entry-host entry))))
+          (user-error "Could not signal process %d of session %s" pid id)))))
      ((not (claude-code-session-external-p session))
       (user-error "Session %s is not running" id))
      (t
@@ -1407,13 +1408,10 @@ that instance's alive row kills."
 SESSION goes on as an external session.  Refuses a session no instance runs in
 Emacs, and one whose instance is not detachable, which closing its buffer
 would kill."
-  (let ((id (claude-code-session-id session))
-        (buffer (claude-code-session-buffer session)))
-    (unless (and (claude-code-session-alive-p session)
-                 (claude-code--session-process buffer))
-      (user-error "Session %s is not running in Emacs" id))
+  (let ((buffer (claude-code--buffer session)))
     (unless (plist-get (gethash buffer claude-code--managed) :detachable)
-      (user-error "Session %s is not detachable: closing it would kill it" id))
+      (user-error "Session %s is not detachable: closing it would kill it"
+                  (claude-code-session-id session)))
     (let ((kill-buffer-query-functions nil))
       (kill-buffer buffer))))
 
@@ -1450,8 +1448,6 @@ command in it."
   "Rename SESSION to NAME by sending a /rename command to its instance.
 Claude records the new name as a `custom-title' line in the transcript, which
 is where `claude-code--session-display-name' reads it back on the next refresh."
-  (unless (claude-code-session-alive-p session)
-    (user-error "Can only rename an alive session"))
   (claude-code-send-text session (format "/rename %s" name) t))
 
 (defun claude-code-interrupt (session)
@@ -2313,8 +2309,8 @@ the redraw happens however the batch ends."
 (defun claude-code--instance-at-point ()
   "Return the alive session on the current line, or signal a `user-error'.
 Aliveness is tested through the live process, not the row's `alive-p': no redraw
-follows an instance's exit, so a session that ended since the last refresh still
-draws as alive.  The error names that row's remedy."
+follows an instance's exit or detach, so a session that left Emacs since the
+last refresh still draws as alive.  The error names that row's remedy."
   (let* ((session (or (claude-code--session-at-point)
                       (user-error "No session on this line")))
          (id (claude-code-session-id session)))
@@ -2323,7 +2319,7 @@ draws as alive.  The error names that row's remedy."
      ((claude-code-session-external-p session)
       (user-error "Session %s is running outside Emacs" id))
      ((claude-code-session-alive-p session)
-      (user-error "Session %s has exited; press g to refresh" id))
+      (user-error "Session %s has left Emacs; press g to refresh" id))
      (t (user-error "Session %s is not alive; press RET to resume it" id)))))
 
 ;;;;; Commands

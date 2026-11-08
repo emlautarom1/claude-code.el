@@ -233,14 +233,16 @@ connect."
 
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
   "Run BODY with Ghostel paste/key stubbed to push onto CALLS.
-Each call pushes (paste STR) or (key NAME).  Ghostel's native module is absent
-under test, so requiring it is a no-op."
+Each call pushes (paste STR) or (key NAME).  Every live buffer has a running
+terminal, and Ghostel's native module is absent under test, so requiring it is
+a no-op."
   (declare (indent 1))
   `(claude-code-tests--without-requiring '(ghostel)
      (cl-letf (((symbol-function 'ghostel-paste-string)
                 (lambda (s) (push (list 'paste s) ,calls)))
                ((symbol-function 'ghostel-send-key)
-                (lambda (k &rest _) (push (list 'key k) ,calls))))
+                (lambda (k &rest _) (push (list 'key k) ,calls)))
+               ((symbol-function 'claude-code--session-process) #'buffer-live-p))
        ,@body)))
 
 (defmacro claude-code-tests--recording-launch (execs &rest body)
@@ -1835,18 +1837,46 @@ An explicit keyword outranks it."
 (ert-deftest claude-code-test-kill-signals-a-detachable-instance ()
   "Killing an alive detachable instance signals it, since its buffer would not.
 Closing the buffer only detaches it, so its process is sent SIGTERM on its host
-and the buffer stays until the instance exits.  One that has not reported its
-PID yet cannot be signalled, and is refused."
+and the buffer stays until the instance exits.  A signal the host refused is
+reported, and one that has not reported its PID yet cannot be signalled."
   (claude-code-tests--with-managed-buffer (buf 77)
     (claude-code--register "d" buf "/ssh:box:/r" nil t)
     (let ((signals '())
           (session (claude-code-session--create :id "d" :alive-p t :buffer buf)))
-      (claude-code-tests--signalling signals 0
-        (claude-code-kill session)
-        (should (equal signals '((77 SIGTERM "/ssh:box:"))))
-        (should (buffer-live-p buf))
+      (cl-letf (((symbol-function 'claude-code--session-process) #'buffer-live-p))
+        (claude-code-tests--signalling signals 0
+          (claude-code-kill session)
+          (should (equal signals '((77 SIGTERM "/ssh:box:"))))
+          (should (buffer-live-p buf)))
+        (claude-code-tests--signalling signals -1
+          (should-error (claude-code-kill session) :type 'user-error))
         (with-current-buffer buf (setq-local claude-code--pid nil))
-        (should-error (claude-code-kill session) :type 'user-error)))))
+        (setq signals '())
+        (claude-code-tests--signalling signals 0
+          (should-error (claude-code-kill session) :type 'user-error))
+        (should-not signals)))))
+
+(ert-deftest claude-code-test-operations-refuse-an-instance-gone-from-emacs ()
+  "An alive struct whose instance has since left Emacs drives nothing.
+Its buffer is gone, whether the instance exited or was detached and runs on as
+an external session, so kill, detach, rename, send and interrupt all refuse it
+rather than act on nothing."
+  (let ((signals '())
+        (driven '()))
+    (claude-code-tests--signalling signals 0
+      (claude-code-tests--recording-ghostel driven
+        (claude-code-tests--with-managed-buffer buf
+          (claude-code--register "d" buf "/ssh:box:/r" nil t)
+          (let ((stale (claude-code-session--create :id "d" :alive-p t
+                                                    :buffer buf)))
+            (kill-buffer buf)
+            (dolist (operation (list #'claude-code-kill #'claude-code-detach
+                                     (lambda (s) (claude-code-rename s "n"))
+                                     (lambda (s) (claude-code-send-text s "t"))
+                                     #'claude-code-interrupt))
+              (should-error (funcall operation stale) :type 'user-error))))))
+    (should-not signals)
+    (should-not driven)))
 
 (defconst claude-code-tests--holder-socket
   "/run/user/1000/claude-code/0b6f2c8e-1d2a-4c3b-9e4f-5a6b7c8d9e0f"
@@ -2753,8 +2783,9 @@ The entry goes because the buffer died, so the instance is registered through
            (claude-code-last-instance-exit-hook
             (list (lambda () (cl-incf fired)))))
       (claude-code--register "id-k" buf "/r" nil)
-      (claude-code-kill (claude-code-session--create
-                         :id "id-k" :alive-p t :buffer buf))
+      (cl-letf (((symbol-function 'claude-code--session-process) #'buffer-live-p))
+        (claude-code-kill (claude-code-session--create
+                           :id "id-k" :alive-p t :buffer buf)))
       (should (zerop (hash-table-count claude-code--managed)))
       (should-not (buffer-live-p buf))
       (should (= fired 1)))
@@ -2839,7 +2870,7 @@ an alive row's kill ends.  A signal the host refused is reported too."
             (should-error (claude-code-kill gone) :type 'user-error)))))))
 
 (ert-deftest claude-code-test-kill-leaves-a-relaunched-instance-registered ()
-  "Killing a stale struct does not unregister the instance that replaced it.
+  "Killing a stale struct is refused, and leaves the instance that replaced it.
 The struct names the buffer it was built from; once that instance has exited and
 a resume has hosted the same session in another buffer, the registry belongs to
 the new one.  Dropping it by id alone would orphan a running instance -- live,
@@ -2860,7 +2891,7 @@ but invisible to every query and to `claude-code--on-buffer-kill'."
               (kill-buffer old)
               (should (= fired 1))
               (claude-code--register "id-r" new "/r" nil)
-              (claude-code-kill stale)
+              (should-error (claude-code-kill stale) :type 'user-error)
               (should (eq (claude-code-tests--instance "id-r") new))
               (should (buffer-live-p new))))
         (dolist (buffer (list old new))
@@ -4675,7 +4706,7 @@ since the last refresh still draws as alive."
                           (list nil "No session on this line")
                           (list (claude-code-session--create
                                  :id "x" :alive-p t :buffer gone)
-                                "Session x has exited; press g to refresh")
+                                "Session x has left Emacs; press g to refresh")
                           (list (claude-code-session--create :id "e" :external-p t)
                                 "Session e is running outside Emacs")
                           (list (claude-code-session--create :id "d")
