@@ -1120,15 +1120,31 @@ only for the kill that removed the last entry."
                                       handler err)))
                           nil)))))
 
+(defun claude-code--report-exit (buffer event)
+  "Report BUFFER's terminal ending abnormally on EVENT, with its last lines.
+A `ghostel-exit-functions' function: BUFFER dies with its process, and with it
+what a launch that failed printed about why."
+  (unless (equal event "finished\n")
+    (message "%s" (string-join
+                   (cons (concat (buffer-name buffer) " " (string-trim event))
+                         (last (split-string (with-current-buffer buffer
+                                               (buffer-substring-no-properties
+                                                (point-min) (point-max)))
+                                             "\n" t "[ \t]+")
+                               3))
+                   "\n"))))
+
 (defun claude-code--register (id buffer origin worktree &optional detachable)
   "Record the instance BUFFER hosts, launched on session ID from ORIGIN.
 Stored under :worktree is the name of a named WORKTREE request, nil otherwise
 -- an auto-named one has no name to show until Claude writes the transcript
 that carries it -- and under :detachable whether the instance is DETACHABLE.
 Registering a live BUFFER also wires up the entry's removal: BUFFER is made to
-die with its process, so its kill is the one event that retires the entry."
+die with its process, reporting an abnormal exit, so its kill is the one event
+that retires the entry."
   (with-current-buffer buffer
     (setq-local ghostel-kill-buffer-on-exit t)
+    (add-hook 'ghostel-exit-functions #'claude-code--report-exit nil t)
     (add-hook 'kill-buffer-hook #'claude-code--on-buffer-kill nil t))
   (puthash buffer
            (list :origin origin

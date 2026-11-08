@@ -2120,6 +2120,28 @@ ends with its buffer and says nothing."
         (kill-buffer buf))
       (should-not reported))))
 
+(ert-deftest claude-code-test-abnormal-exit-is-reported ()
+  "A terminal ending abnormally reports the last lines it showed.
+Ghostel kills an instance's buffer once its exit hooks have run, taking along
+why a launch failed.  A clean exit says nothing."
+  (let ((reported '()))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) reported))))
+      (claude-code-tests--with-managed-buffer buf
+        (claude-code--register "x" buf "/r" nil)
+        (with-current-buffer buf
+          (insert "starting\n\nmkdir: cannot create directory\n"
+                  "claude-code: cannot hold instances in /x  \n\n")
+          (run-hook-with-args 'ghostel-exit-functions buf "finished\n")
+          (should-not reported)
+          (run-hook-with-args 'ghostel-exit-functions buf
+                              "exited abnormally with code 1\n"))
+        (should (equal reported
+                       (list (concat (buffer-name buf)
+                                     " exited abnormally with code 1\n"
+                                     "starting\nmkdir: cannot create directory\n"
+                                     "claude-code: cannot hold instances in /x"))))))))
+
 (ert-deftest claude-code-test-launch-reports-the-pid ()
   "A launch runs the CLI behind the wrapper that reports its PID."
   (claude-code-tests--with-registry
