@@ -13,16 +13,17 @@
 ;; Orchestrate and manage Claude Code CLI sessions from Emacs, scoped to the
 ;; current `project.el' project.  Running instances are hosted in `ghostel'
 ;; terminal buffers.  A "claude sessions" view lists every session of a project
-;; -- alive, external or dead -- and offers visit, create, resume, kill, delete,
-;; rename, send-text and interrupt actions, and each session's transcript as
-;; Claude exports it.
+;; -- alive, external or dead -- and offers visit, create, resume, kill, detach,
+;; attach, delete, rename, send-text and interrupt actions, and each session's
+;; transcript as Claude exports it.
 ;;
 ;; The package is split into a programmatic model (plain functions operating on
 ;; `claude-code-session' structs) and a view layer.  All knowledge of the
 ;; on-disk `~/.claude' layout is confined to the "Storage adapter" section;
 ;; those formats are Claude internals and are documented in
 ;; docs/storage-model.md.  Reads of the status records Ghostel keeps for an
-;; instance are kept in the "Ghostel adapter" section.
+;; instance are kept in the "Ghostel adapter" section, and how dtach holds a
+;; detachable instance in the "dtach adapter" section.
 
 ;;; Code:
 
@@ -84,10 +85,9 @@ instance."
 (defcustom claude-code-detachable 'remote
   "Which new instances are detachable.
 A detachable instance runs under `claude-code-dtach' on its host, so closing its
-buffer -- `kill-buffer', Emacs exiting, the connection dropping -- leaves it
-running as an external session; only killing it ends it.  It is never wired to
-the MCP server.  `remote' makes an instance in a remote directory detachable,
-t every instance, and nil none.  `claude-code-spawn', `claude-code-resume' and
+buffer leaves it running as an external session, and it is never wired to the
+MCP server.  `remote' makes an instance in a remote directory detachable, t
+every instance, and nil none.  `claude-code-spawn', `claude-code-resume' and
 the create menu's `--detached' take their default from here."
   :type '(choice (const :tag "Remote instances" remote)
                  (const :tag "Every instance" t)
@@ -580,8 +580,9 @@ Keys: :origin (project root the instance was launched from, normalised with
 `claude-code--normalize-root', whose host is the instance's), :worktree (the
 name of the worktree it was asked for, nil for none), :session (the session it
 runs) and :info (what sessions/ says of its process), both as last read
-\(`claude-code--entry-update'), and :named, (ID . ARGS) for the
-`claude-code--transcript-session-args' a query last built for session ID.")
+\(`claude-code--entry-update'), :detachable (whether the instance is), and
+:named, (ID . ARGS) for the `claude-code--transcript-session-args' a query last
+built for session ID.")
 
 (defvar-local claude-code--pid nil
   "PID of the `claude' process this instance buffer hosts, on its host.
@@ -1094,7 +1095,7 @@ included.
             (substring s 17 20) (substring s 20 32))))
 
 (defvar claude-code-last-instance-exit-hook nil
-  "Hook run once the last managed instance has exited.
+  "Hook run once the last managed instance's buffer has closed.
 A handler that signals is reported and skipped, so it costs neither the
 handlers behind it nor the `kill-buffer' this may be running inside.")
 

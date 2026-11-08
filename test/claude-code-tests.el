@@ -2863,10 +2863,8 @@ Every call returns RESULT, 0 for a delivered signal."
 
 (ert-deftest claude-code-test-kill-ends-an-external-process ()
   "Killing an external session sends SIGTERM to the process running it.
-Every kind of `claude' shuts down on SIGTERM, a background agent's worker
-included, which ignores the SIGHUP its terminal closing would send.  The process
-is the one sessions/ names for the session now (pid 1002 for 22222222): the
-struct only says which session to look for."
+The process is the one sessions/ names for the session now (pid 1002 for
+22222222): the struct only says which session to look for."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (claude-code-tests--with-live-pids '(1002)
