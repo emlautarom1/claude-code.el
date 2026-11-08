@@ -11,8 +11,8 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree. A row's status is followed by `✓` when the instance's last turn finished and `✗` when it failed, until you type into it.
 - **Session recaps in the echo area** — Claude writes a short account of where a session stood each time you come back to it after a break. Move point onto a row and the view hands that session's latest recap to ElDoc, the way `emacs-lisp-mode` documents the variable under point; `M-x eldoc-doc-buffer` shows the full text. A finished or failed turn's message, if any, comes first; a session with neither shows nothing.
 - **Transcripts beside the view** — `t` shows the conversation of the session at point the way Claude's own `/export` writes it, MCP tool calls aside, in a window beside the view that the next row's transcript takes over. `g` there exports it again.
-- **External sessions** — one of your `claude` processes running in another terminal is shown in its own group and protected from resume/delete, never disturbed by Emacs.
-- **Actions** — focus an alive instance, resume a dead session, create a new one (with a display name, a chosen model, an effort level, or a git worktree), kill instances, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
+- **External sessions** — one of your `claude` processes running in another terminal is shown in its own group and protected from resume/delete; `k` ends its process.
+- **Actions** — focus an alive instance, resume a dead session, create a new one (with a display name, a chosen model, an effort level, or a git worktree), kill the process running a session, inside Emacs or out, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
 - **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
 - **Renderer override** — `claude-code-renderer` puts instances on the `inline` renderer, where the conversation lands in the Emacs buffer and the mouse stays Emacs's, or on `fullscreen`, whatever your `tui` setting says; it defaults to leaving that choice to Claude. See [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance that finishes a turn, waits on you, or fails raises a desktop notification named after the session, saying how long the turn took, what it waits on, or what went wrong; clicking it brings Emacs forward, switching workspace if needed, and goes to that instance, in the tab or frame already showing it, or pops it into view. An instance already on screen in a focused frame stays quiet, and a notification closes once you see the instance, deal with what it announced, or the instance exits. Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
@@ -54,7 +54,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `TAB`     | collapse or expand the group at point                       |
 | `c`       | open the create menu (name/worktree/model/effort)           |
 | `n` / `p` | move down / up a line (rows and group headers alike)        |
-| `k`       | kill the marked instances, or the one at point              |
+| `k`       | kill the process of each marked running session, or at point |
 | `d`       | delete the marked dead sessions, or the one at point        |
 | `r`       | rename the running session at point                         |
 | `i`       | interrupt (SIGINT) the running session at point             |
@@ -96,7 +96,7 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 
 ;; Resume a session by id, then act on sessions.
 (claude-code-resume root "SESSION-UUID")
-(claude-code-kill session)
+(claude-code-kill session)           ; alive and external sessions
 (claude-code-delete session)         ; dead sessions only
 (claude-code-rename session "name")  ; alive sessions only
 (claude-code-send-text session "hello" t)

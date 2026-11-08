@@ -2380,6 +2380,81 @@ The entry goes because the buffer died, so the instance is registered through
                    (claude-code-session--create :id "d" :alive-p nil))
                   :type 'user-error)))
 
+(defmacro claude-code-tests--signalling (signals result &rest body)
+  "Run BODY with `signal-process' pushing (PID SIGCODE REMOTE) onto SIGNALS.
+Every call returns RESULT, 0 for a delivered signal."
+  (declare (indent 2))
+  `(cl-letf (((symbol-function 'signal-process)
+              (lambda (pid sigcode &optional remote)
+                (push (list pid sigcode remote) ,signals)
+                ,result)))
+     ,@body))
+
+(ert-deftest claude-code-test-kill-ends-an-external-process ()
+  "Killing an external session sends SIGTERM to the process running it.
+Every kind of `claude' shuts down on SIGTERM, a background agent's worker
+included, which ignores the SIGHUP its terminal closing would send.  The process
+is the one sessions/ names for the session now (pid 1002 for 22222222): the
+struct only says which session to look for."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (claude-code-tests--with-live-pids '(1002)
+        (let ((signals '()))
+          (claude-code-tests--signalling signals 0
+            (claude-code-kill (claude-code-session--create
+                               :id "22222222-2222-4222-8222-222222222222"
+                               :external-p t
+                               :transcript "/home/test/proj/2222.jsonl")))
+          (should (equal signals '((1002 SIGTERM nil)))))))))
+
+(ert-deftest claude-code-test-kill-signals-on-the-sessions-host ()
+  "An external session's process is signalled on the host of its transcript."
+  (claude-code-tests--with-registry
+    (let ((signals '())
+          (asked nil))
+      (cl-letf (((symbol-function 'claude-code--running)
+                 (lambda (host)
+                   (setq asked host)
+                   (let ((running (make-hash-table :test 'equal)))
+                     (puthash "e" 31 running)
+                     running))))
+        (claude-code-tests--signalling signals 0
+          (claude-code-kill (claude-code-session--create
+                             :id "e" :external-p t
+                             :transcript "/ssh:box:/home/me/proj/e.jsonl"))))
+      (should (equal asked "/ssh:box:"))
+      (should (equal signals '((31 SIGTERM "/ssh:box:")))))))
+
+(ert-deftest claude-code-test-kill-refuses-what-the-row-no-longer-shows ()
+  "An external session is looked up again by id, so a stale row signals nothing.
+A session that stopped since the query has no process to signal, and one an
+instance Emacs manages has resumed since belongs to that instance, which only
+an alive row's kill ends.  A signal the host refused is reported too."
+  (claude-code-tests--with-fixtures
+    (let ((signals '())
+          (gone (claude-code-session--create
+                 :id "22222222-2222-4222-8222-222222222222" :external-p t
+                 :transcript "/home/test/proj/2222.jsonl")))
+      (claude-code-tests--signalling signals 0
+        (claude-code-tests--with-registry
+          (claude-code-tests--with-live-pids '()
+            (should-error (claude-code-kill gone) :type 'user-error)))
+        (claude-code-tests--with-managed-buffer buf
+          (claude-code--register "resumed" buf "/home/test/proj" nil)
+          (cl-letf (((symbol-function 'claude-code--session-process)
+                     (lambda (b) (eq b buf))))
+            (should-error (claude-code-kill
+                           (claude-code-session--create
+                            :id "resumed" :external-p t
+                            :transcript "/home/test/proj/r.jsonl"))
+                          :type 'user-error))
+          (should (buffer-live-p buf))))
+      (should-not signals)
+      (claude-code-tests--signalling signals -1
+        (claude-code-tests--with-registry
+          (claude-code-tests--with-live-pids '(1002)
+            (should-error (claude-code-kill gone) :type 'user-error)))))))
+
 (ert-deftest claude-code-test-kill-leaves-a-relaunched-instance-registered ()
   "Killing a stale struct does not unregister the instance that replaced it.
 The struct names the buffer it was built from; once that instance has exited and
@@ -3875,20 +3950,21 @@ computed for every row, so one odd id would abort a whole view refresh."
 
 (ert-deftest claude-code-test-target-sessions-by-liveness ()
   "Marked targets are filtered to the liveness a command's operation accepts.
-An external session is neither a killable nor a deletable target, so a batch
-never hands one to an operation that would only refuse it."
+An external session is not a deletable target, so a batch never hands one to an
+operation that would only refuse it."
   (let ((claude-code--session-table (make-hash-table :test 'equal))
         (claude-code--marks '("a" "e" "d")))
     (dolist (s (list (claude-code-session--create :id "a" :alive-p t)
                      (claude-code-session--create :id "e" :external-p t)
                      (claude-code-session--create :id "d")))
       (puthash (claude-code-session-id s) s claude-code--session-table))
-    (let ((ids (lambda (liveness)
+    (let ((ids (lambda (&rest liveness)
                  (mapcar #'claude-code-session-id
-                         (claude-code--target-sessions liveness)))))
-      (should (equal (funcall ids nil) '("a" "e" "d")))
+                         (apply #'claude-code--target-sessions liveness)))))
+      (should (equal (funcall ids) '("a" "e" "d")))
       (should (equal (funcall ids 'alive) '("a")))
       (should (equal (funcall ids 'external) '("e")))
+      (should (equal (funcall ids 'alive 'external) '("a" "e")))
       ;; The external row must not be offered up as dead.
       (should (equal (funcall ids 'dead) '("d"))))))
 
@@ -5336,6 +5412,35 @@ are dropped, and what was skipped is reported."
           ;; Only the refused target stays armed, ready for a retry.
           (should (equal claude-code--marks '("b")))
           (should (string-match-p "Session b is alive" reported)))))))
+
+(ert-deftest claude-code-test-batch-kill-takes-external-rows-and-survives-a-refusal ()
+  "Kill acts on alive and external rows, and a refusal does not abort the batch.
+An external session whose process stopped since the view was drawn is refused
+mid-batch; the rest are still killed and the refusal reported."
+  (let ((killed '()) (refreshed 0) (reported nil))
+    (cl-letf (((symbol-function 'claude-code-kill)
+               (lambda (s)
+                 (let ((id (claude-code-session-id s)))
+                   (when (equal id "b") (user-error "Session %s is not running" id))
+                   (push id killed))))
+              ((symbol-function 'claude-code--refresh-views)
+               (lambda () (cl-incf refreshed)))
+              ((symbol-function 'yes-or-no-p) (lambda (_) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
+      (claude-code-tests--in-view
+        (setq-local claude-code--project "/r")
+        (dolist (s (list (claude-code-session--create :id "a" :alive-p t)
+                         (claude-code-session--create :id "b" :external-p t)
+                         (claude-code-session--create :id "c" :external-p t)
+                         (claude-code-session--create :id "d")))
+          (puthash (claude-code-session-id s) s claude-code--session-table))
+        (setq-local claude-code--marks (list "a" "b" "c" "d"))
+        (claude-code-sessions-kill)
+        (should (equal (reverse killed) '("a" "c")))
+        (should (= refreshed 1))
+        (should (equal claude-code--marks '("b" "d")))
+        (should (equal reported "Killed 2, refused 1: Session b is not running"))))))
 
 (ert-deftest claude-code-test-batch-delete-propagates-a-real-fault ()
   "Only a refusal is caught; anything else reaches the debugger.

@@ -27,7 +27,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
 - **Dead session** — a session that no `claude` process is running: its transcript exists on disk but neither Emacs nor any external process is handling it. A dead session is the only kind that can be resumed or deleted.
 
-- **External session** — a session running in a `claude` process **outside** Emacs (for example, one started in a plain terminal). It is neither alive nor dead: a process is handling it, but not one Emacs manages. The view lists it in its own *external* group and flags it so it is never resumed or deleted out from under the other process.
+- **External session** — a session running in a `claude` process **outside** Emacs (for example, one started in a plain terminal). It is neither alive nor dead: a process is handling it, but not one Emacs manages. The view lists it in its own *external* group and flags it so it is never resumed or deleted out from under the other process; killing it ends that process.
 
 - **Worktree session** — a session spawned with `--worktree`, running in a git worktree under the project's `.claude/worktrees/`. It is listed under its parent project's view, with the worktree named in the *Worktree* column, and stays one across a resume: Claude drops the worktree on a clean exit, so `claude-code-resume` reads the name back out of the transcript and hands it to `--worktree` (see [storage model](storage-model.md#the-binding--worktree-state)). A session that merely *runs* in a worktree directory — started there with no `--worktree` — is not one of these: Claude bound it to nothing, so the column is blank and a resume lands in the parent tree.
 

@@ -1206,15 +1206,32 @@ Refuses a session a `claude' outside Emacs is running."
      (plist-get (claude-code--transcript-for root id) :worktree-binding))))
 
 (defun claude-code-kill (session)
-  "Kill the running instance of SESSION and its buffer.
-Killing the buffer is what unregisters, so a session rehosted since SESSION was
-built keeps the registration its new buffer holds."
-  (unless (claude-code-session-alive-p session)
-    (user-error "Session %s is not alive" (claude-code-session-id session)))
-  (let ((buffer (claude-code-session-buffer session)))
-    (when (buffer-live-p buffer)
-      (let ((kill-buffer-query-functions nil))
-        (kill-buffer buffer)))))
+  "Kill the process running SESSION, leaving the session dead.
+An alive session's instance goes with its buffer, the one SESSION names: killing
+the buffer is what unregisters, so a session rehosted since SESSION was built
+keeps the registration its new buffer holds.  An external session's process is
+sent SIGTERM on the host of its transcript, found by id when called: a session
+that has stopped since SESSION was built is refused, and so is one an instance
+Emacs manages has resumed since, which only that instance's alive row kills."
+  (let ((id (claude-code-session-id session)))
+    (cond
+     ((claude-code-session-alive-p session)
+      (let ((buffer (claude-code-session-buffer session)))
+        (when (buffer-live-p buffer)
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buffer)))))
+     ((not (claude-code-session-external-p session))
+      (user-error "Session %s is not running" id))
+     (t
+      (let* ((host (file-remote-p (claude-code-session-transcript session)))
+             (runner (gethash id (claude-code--running host))))
+        (cond
+         ((bufferp runner)
+          (user-error "Session %s runs in Emacs now; refresh to kill it" id))
+         ((null runner) (user-error "Session %s is not running" id))
+         ((not (zerop (signal-process runner 'SIGTERM host)))
+          (user-error "Could not signal process %d of session %s"
+                      runner id))))))))
 
 (defun claude-code-delete (session)
   "Delete dead SESSION's transcript from disk.
@@ -2065,20 +2082,41 @@ keeps a mark visible through reprints that bypass `claude-code--redraw'."
       (forward-line -1)
       (tabulated-list-put-tag "*"))))
 
-(defun claude-code--target-sessions (&optional liveness)
+(defun claude-code--target-sessions (&rest liveness)
   "Return the marked sessions, or the session at point when none are marked.
-LIVENESS, when given, keeps only the sessions in that state
-\(`claude-code--session-liveness'), so a command's targets are exactly the ones
-its model operation accepts."
+LIVENESS, when given, are the states (`claude-code--session-liveness') to keep,
+so a command's targets are exactly the ones its model operation accepts."
   (let ((targets (if claude-code--marks
                      (delq nil (mapcar (lambda (id)
                                          (gethash id claude-code--session-table))
                                        claude-code--marks))
                    (when-let* ((s (claude-code--session-at-point))) (list s)))))
     (if liveness
-        (seq-filter (lambda (s) (eq liveness (claude-code--session-liveness s)))
+        (seq-filter (lambda (s) (memq (claude-code--session-liveness s) liveness))
                     targets)
       targets)))
+
+(defun claude-code--act-on (targets operation done)
+  "Call OPERATION on each session in TARGETS, then redraw every view.
+A refusal from OPERATION does not end the batch: the other targets are still
+acted on and the refusals reported, DONE naming what OPERATION did.  Only the
+ids acted on lose their marks, leaving a refused one armed for a retry, and
+the redraw happens however the batch ends."
+  (let ((acted '())
+        (refused '()))
+    (unwind-protect
+        (dolist (session targets)
+          (condition-case err
+              (progn (funcall operation session)
+                     (push (claude-code-session-id session) acted))
+            ;; A refusal is a `user-error' and belongs in the report; a real
+            ;; fault must still reach the debugger.
+            (user-error (push (error-message-string err) refused))))
+      (claude-code--drop-marks acted)
+      (claude-code--refresh-views))
+    (when refused
+      (message "%s %d, refused %d: %s" done (length acted) (length refused)
+               (string-join (nreverse refused) "; ")))))
 
 (defun claude-code--instance-at-point ()
   "Return the alive session on the current line, or signal a `user-error'.
@@ -2240,45 +2278,25 @@ Called with the directory of the session at point by
     (tabulated-list-put-tag " " t)))
 
 (defun claude-code-sessions-kill ()
-  "Kill the marked instances, or the one at point."
+  "Kill the processes of the marked running sessions, or of the one at point.
+A running session is an alive or an external one; see `claude-code-kill'."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (let ((targets (claude-code--target-sessions 'alive)))
+  (let ((targets (claude-code--target-sessions 'alive 'external)))
     (if (null targets)
-        (user-error "No alive session selected")
+        (user-error "No running session selected")
       (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
-        (mapc #'claude-code-kill targets)
-        (claude-code--drop-marks (mapcar #'claude-code-session-id targets))
-        (claude-code--refresh-views)))))
+        (claude-code--act-on targets #'claude-code-kill "Killed")))))
 
 (defun claude-code-sessions-delete ()
-  "Delete the marked dead sessions, or the one at point.
-A refusal from `claude-code-delete' does not end the batch: the other targets
-are still deleted and the refusals reported.  Only the ids actually deleted lose
-their marks, leaving a refused one armed for a retry, and the redraw happens
-however the batch ends."
+  "Delete the marked dead sessions, or the one at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
         (user-error "No dead session selected")
       (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))
-        (let ((deleted '())
-              (refused '()))
-          (unwind-protect
-              (dolist (session targets)
-                (condition-case err
-                    (progn (claude-code-delete session)
-                           (push (claude-code-session-id session) deleted))
-                  ;; A refusal is a `user-error' and belongs in the report; a
-                  ;; real fault must still reach the debugger.
-                  (user-error (push (error-message-string err) refused))))
-            (claude-code--drop-marks deleted)
-            (claude-code--refresh-views))
-          (when refused
-            (message "Deleted %d, refused %d: %s"
-                     (length deleted) (length refused)
-                     (string-join (nreverse refused) "; "))))))))
+        (claude-code--act-on targets #'claude-code-delete "Deleted")))))
 
 (defun claude-code-sessions-rename ()
   "Rename the alive session at point."
