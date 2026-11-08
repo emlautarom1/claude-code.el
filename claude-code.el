@@ -1128,8 +1128,9 @@ what a launch that failed printed about why."
   (unless (equal event "finished\n")
     (message "%s" (string-join
                    (cons (concat (buffer-name buffer) " " (string-trim event))
+                         ;; Ghostel's filter joins the lines it wrapped.
                          (last (split-string (with-current-buffer buffer
-                                               (buffer-substring-no-properties
+                                               (filter-buffer-substring
                                                 (point-min) (point-max)))
                                              "\n" t "[ \t]+")
                                3))
