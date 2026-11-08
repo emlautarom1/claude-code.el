@@ -533,10 +533,12 @@ keeps."
 (defun claude-code--attaching-command (dtach socket)
   "Return the command attaching a terminal through DTACH to SOCKET.
 Claude does not repeat the terminal modes it set at startup when a client
-attaches, so the shell first sets the two it needs from the terminal: bracketed
-paste, which `claude-code-send-text' relies on, and focus reporting."
+attaches, so the shell first sets them as Claude does: bracketed paste, which
+`claude-code-send-text' relies on, palette reports, focus reporting, and the
+kitty keyboard flags, without which modified keys arrive in the legacy
+encoding."
   (list "/bin/sh" "-c"
-        (concat "printf '\\033[?2004h\\033[?1004h';"
+        (concat "printf '\\033[?2004h\\033[?2031h\\033[?1004h\\033[>5u';"
                 " exec \"$0\" -a \"$1\" " claude-code--dtach-flags)
         dtach socket))
 

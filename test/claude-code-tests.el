@@ -1935,7 +1935,7 @@ external session, and every dead one, has none."
           (should (equal (seq-count #'claude-code-session-holder sessions) 1)))))))
 
 (ert-deftest claude-code-test-attaching-command ()
-  "Attaching sets bracketed paste and focus reporting, then runs dtach's client.
+  "Attaching sets the modes Claude set at startup, then runs dtach's client.
 A real `/bin/sh' runs it, over a dtach that prints its arguments."
   (claude-code-tests--with-executable dir "dtach"
     (let ((dtach (expand-file-name "dtach" dir)))
@@ -1945,7 +1945,8 @@ A real `/bin/sh' runs it, over a dtach that prints its arguments."
                          (apply #'call-process (car command) nil t nil
                                 (cdr command))
                          (buffer-string))
-                       "\e[?2004h\e[?1004h-a|/run/s|-E|-z|-r|ctrl_l|"))))))
+                       (concat "\e[?2004h\e[?2031h\e[?1004h\e[>5u"
+                               "-a|/run/s|-E|-z|-r|ctrl_l|")))))))
 
 (defmacro claude-code-tests--attaching (execs &rest body)
   "Run BODY with `ghostel-exec' stubbed to push (BUFFER PROGRAM ARGS) onto EXECS.
