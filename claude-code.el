@@ -482,6 +482,11 @@ nil when Claude sent none."
 ;; How a detachable instance is held on its host: the `dtach' master that owns
 ;; its terminal, and the socket a client attaches through.
 
+(defconst claude-code--dtach-flags "-E -z -r ctrl_l"
+  "The dtach flags every master and client runs with.
+No detach key and no suspend key, leaving every key to Claude, and a Ctrl-L on
+attach, which makes Claude redraw.")
+
 (defconst claude-code--holding-script
   (concat
    "if [ -n \"$XDG_RUNTIME_DIR\" ]; then d=$XDG_RUNTIME_DIR/claude-code;"
@@ -490,29 +495,23 @@ nil when Claude sent none."
    " && chmod 700 \"$d\""
    " || { printf 'claude-code: cannot hold instances in %s\\n' \"$d\" >&2;"
    " exit 1; };"
-   " n=$1; shift; exec \"$0\" -c \"$d/$n\" -E -z -r ctrl_l \"$@\"")
+   " n=$1; shift; exec \"$0\" -c \"$d/$n\" " claude-code--dtach-flags " \"$@\"")
   "The `/bin/sh' script starting a detachable instance under dtach.
 Called with dtach as $0, the socket's name, and the command.  The socket lives
-in a directory of the user's own, mode 0700, under `$XDG_RUNTIME_DIR' or in
-`/tmp'.  The master runs the command and attaches the terminal running the
-script, so that terminal answers what Claude asks of it at startup.  dtach's
-detach and suspend keys are off, leaving every key to Claude, and a client
-attaching asks Claude to redraw with a Ctrl-L.")
+in a directory of the user's own, mode 0700.  The terminal running the script
+becomes the first client, so it answers what Claude asks of it at startup.")
 
-(defun claude-code--holding-command (dtach command)
-  "Return COMMAND run as a detachable instance under the DTACH program.
-The socket gets a fresh random name."
-  (append (list "/bin/sh" "-c" claude-code--holding-script
-                dtach (claude-code--new-uuid))
+(defun claude-code--holding-command (dtach name command)
+  "Return COMMAND run as a detachable instance under DTACH, on socket NAME."
+  (append (list "/bin/sh" "-c" claude-code--holding-script dtach name)
           command))
 
 (defconst claude-code--holder-args-re
   (rx bos (+ (not blank)) " -c "
       (group "/" (* (not blank)) "/claude-code" (? "-" (+ digit))
-             "/" (= 36 (any hex "-")))
-      " -E -z -r ctrl_l ")
-  "Matches the command line of a master `claude-code--holding-script' started.
-A dtach master keeps the command line it was started with, socket included.")
+             "/" (+ (not (any blank "/"))))
+      " " (literal claude-code--dtach-flags) " ")
+  "Matches the command line of a master `claude-code--holding-script' started.")
 
 (defun claude-code--holder-socket (args)
   "Return the socket named by ARGS, a dtach master's command line, or nil.
@@ -521,6 +520,16 @@ Nil unless the master is one `claude-code--holding-command' started."
        (string-match claude-code--holder-args-re args)
        (match-string 1 args)))
 
+(defun claude-code--holder (pid &optional host)
+  "Return the dtach socket on HOST of the detachable instance PID, or nil.
+The instance's parent is its dtach master, which keeps the command line it was
+started with, socket included.  Read from HOST's process table as its last
+`list-system-processes' left it, which on a remote host is the one table TRAMP
+keeps."
+  (let ((default-directory (concat host "/")))
+    (when-let* ((ppid (alist-get 'ppid (process-attributes pid))))
+      (claude-code--holder-socket (alist-get 'args (process-attributes ppid))))))
+
 (defun claude-code--attaching-command (dtach socket)
   "Return the command attaching a terminal through DTACH to SOCKET.
 Claude does not repeat the terminal modes it set at startup when a client
@@ -528,7 +537,7 @@ attaches, so the shell first sets the two it needs from the terminal: bracketed
 paste, which `claude-code-send-text' relies on, and focus reporting."
   (list "/bin/sh" "-c"
         (concat "printf '\\033[?2004h\\033[?1004h';"
-                " exec \"$0\" -a \"$1\" -E -z -r ctrl_l")
+                " exec \"$0\" -a \"$1\" " claude-code--dtach-flags)
         dtach socket))
 
 
@@ -680,15 +689,6 @@ any other `claude' runs the one sessions/ names while
       (when (claude-code--session-process buffer)
         (puthash (plist-get entry :session) buffer running)))
     running))
-
-(defun claude-code--holder (pid &optional host)
-  "Return the dtach socket on HOST of the detachable instance PID, or nil.
-The instance's parent is the dtach master, whose command line names the socket.
-Read from HOST's process table as its last `list-system-processes' left it,
-which on a remote host is the one table TRAMP keeps."
-  (let ((default-directory (concat host "/")))
-    (when-let* ((ppid (alist-get 'ppid (process-attributes pid))))
-      (claude-code--holder-socket (alist-get 'args (process-attributes ppid))))))
 
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
@@ -1259,7 +1259,8 @@ and, unless detachable, with the arguments and environment
                    (append (car mcp)
                            (apply #'claude-code--build-args :session-id id opts))))
          (command (if dtach
-                      (claude-code--holding-command dtach command)
+                      (claude-code--holding-command
+                       dtach (claude-code--new-uuid) command)
                     command))
          (env (append renderer-env
                       (list (cons "CLAUDE_CONFIG_DIR" config))

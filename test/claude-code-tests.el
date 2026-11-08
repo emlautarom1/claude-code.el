@@ -1733,13 +1733,13 @@ gets on a line of the file ARGS, then runs the command behind dtach's six."
 
 (ert-deftest claude-code-test-holding-command ()
   "A detachable instance runs under dtach, on a socket in a directory of its own.
-dtach gets the socket in `$XDG_RUNTIME_DIR/claude-code', made mode 0700, with
-its detach and suspend keys off and a Ctrl-L redraw on attach.  The command
-runs with Emacs's own umask, not the one that made the directory."
+dtach gets the named socket in `$XDG_RUNTIME_DIR/claude-code', made mode 0700,
+and `claude-code--dtach-flags'.  The command runs with Emacs's own umask, not
+the one that made the directory."
   (claude-code-tests--holding (runtime dtach args)
     (let ((output (with-temp-buffer
                     (let ((command (claude-code--holding-command
-                                    dtach '("/bin/sh" "-c" "umask"))))
+                                    dtach "sock" '("/bin/sh" "-c" "umask"))))
                       (apply #'call-process (car command) nil t nil
                              (cdr command)))
                     (buffer-string)))
@@ -1747,16 +1747,12 @@ runs with Emacs's own umask, not the one that made the directory."
       (should (= (string-to-number output 8)
                  (logand #o777 (lognot (default-file-modes)))))
       (should (= (file-modes dir) #o700))
-      (pcase-let ((`(,c ,socket . ,flags)
-                   (with-temp-buffer
-                     (insert-file-contents args)
-                     (split-string (buffer-string) "\n" t))))
-        (should (equal c "-c"))
-        (should (equal (file-name-directory socket)
-                       (file-name-as-directory dir)))
-        (should (string-match-p claude-code-tests--uuid-re
-                                (file-name-nondirectory socket)))
-        (should (equal flags '("-E" "-z" "-r" "ctrl_l" "/bin/sh" "-c" "umask")))))))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents args)
+                       (split-string (buffer-string) "\n" t))
+                     `("-c" ,(expand-file-name "sock" dir)
+                       ,@(split-string claude-code--dtach-flags)
+                       "/bin/sh" "-c" "umask"))))))
 
 (ert-deftest claude-code-test-holding-command-refuses-a-directory-not-its-own ()
   "A socket directory that is a symlink is not used, and dtach never runs.
@@ -1767,7 +1763,7 @@ running Claude."
       (unwind-protect
           (progn
             (make-symbolic-link elsewhere (expand-file-name "claude-code" runtime))
-            (let ((command (claude-code--holding-command dtach '("true"))))
+            (let ((command (claude-code--holding-command dtach "s" '("true"))))
               (should (= (apply #'call-process (car command) nil nil nil
                                 (cdr command))
                          1)))
@@ -1796,6 +1792,8 @@ the launch before anything starts."
               (should (equal (seq-take raw 4)
                              (list "/bin/sh" "-c" claude-code--holding-script
                                    "dtach")))
+              ;; Each instance gets a socket of its own.
+              (should (string-match-p claude-code-tests--uuid-re (nth 4 raw)))
               (should (equal (nthcdr 5 raw)
                              (claude-code--reporting-command
                               "claude" (list "--session-id" id))))
