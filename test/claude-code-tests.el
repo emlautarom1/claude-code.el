@@ -1970,8 +1970,9 @@ afterwards."
 (ert-deftest claude-code-test-attach ()
   "Attaching hosts a detachable instance's session in a new, registered buffer.
 The buffer runs dtach's client on the instance's socket, in the directory its
-sessions/ file names, and is named after the session.  It holds the instance's
-PID, and expects no report of it; the instance is detachable again."
+sessions/ file names, and is named after the name given.  It holds the
+instance's PID, and expects no report of it; the instance is detachable again.
+Attaching it again returns that buffer."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (claude-code-tests--with-processes
@@ -1981,7 +1982,7 @@ PID, and expects no report of it; the instance is detachable again."
               (claude-code-dtach "dtach")
               (id "22222222-2222-4222-8222-222222222222"))
           (claude-code-tests--attaching execs
-            (let ((buffer (claude-code-attach "/home/test/proj" id)))
+            (let ((buffer (claude-code-attach "/home/test/proj" id "held")))
               (pcase-let ((`(,exec-buffer ,program ,args) (car execs)))
                 (should (eq exec-buffer buffer))
                 (should (equal (cons program args)
@@ -1992,11 +1993,47 @@ PID, and expects no report of it; the instance is detachable again."
                 (should (equal default-directory "/home/test/proj/"))
                 (should (eql claude-code--pid 1002))
                 (should-not ghostel-eval-cmds))
-              (should (string-prefix-p "*claude: " (buffer-name buffer)))
+              (should (equal (buffer-name buffer) "*claude: held*"))
               (let ((entry (gethash buffer claude-code--managed)))
                 (should (equal (plist-get entry :session) id))
                 (should (equal (plist-get entry :origin) "/home/test/proj"))
-                (should (plist-get entry :detachable))))))))))
+                (should (plist-get entry :detachable)))
+              (cl-letf (((symbol-function 'claude-code--session-process)
+                         (lambda (b) (eq b buffer))))
+                (should (eq (claude-code-attach "/home/test/proj" id) buffer)))
+              (should (= (length execs) 1)))))))))
+
+(ert-deftest claude-code-test-attach-on-a-remote-host ()
+  "A remote session is attached on its own host.
+The instance and its socket are looked for there, and dtach's client runs
+there, in the directory the instance works in."
+  (claude-code-tests--with-registry
+    (let ((execs '())
+          (asked '())
+          (claude-code-dtach "dtach"))
+      (claude-code-tests--attaching execs
+        (cl-letf (((symbol-function 'claude-code--normalize-root) #'identity)
+                  ((symbol-function 'claude-code--running)
+                   (lambda (host)
+                     (push (list 'running host) asked)
+                     (let ((running (make-hash-table :test 'equal)))
+                       (puthash "e" 31 running)
+                       running)))
+                  ((symbol-function 'claude-code--holder)
+                   (lambda (pid host) (push (list 'holder pid host) asked) "/run/s"))
+                  ((symbol-function 'claude-code--pid-cwd)
+                   (lambda (_pid _host) "/ssh:box:/home/me/proj/wt"))
+                  ((symbol-function 'file-exists-p)
+                   (lambda (file) (push (list 'exists file) asked) t))
+                  ((symbol-function 'ghostel-exec)
+                   (lambda (buffer _program _args)
+                     (with-current-buffer buffer (setq-local ghostel--process nil))
+                     (push (list buffer default-directory) execs))))
+          (claude-code-attach "/ssh:box:/home/me/proj" "e")))
+      (should (equal (reverse asked)
+                     '((running "/ssh:box:") (holder 31 "/ssh:box:")
+                       (exists "/ssh:box:/run/s"))))
+      (should (equal (nth 1 (car execs)) "/ssh:box:/home/me/proj/wt/")))))
 
 (ert-deftest claude-code-test-attach-refuses-what-it-cannot-attach ()
   "Only a detachable instance whose socket is still there can be attached.
@@ -4415,7 +4452,8 @@ model alone (`claude-code-test-resume-refuses-external')."
            (stale (claude-code-session--create :id "s" :alive-p t :buffer 'exited))
            (external (claude-code-session--create :id "e" :external-p t))
            (attachable (claude-code-session--create :id "h" :external-p t
-                                                    :holder "/run/s"))
+                                                    :holder "/run/s"
+                                                    :title "held"))
            (dead (claude-code-session--create :id "d" :worktree-binding binding))
            (at-point nil) (calls '()))
       (cl-letf (((symbol-function 'claude-code--session-at-point)
@@ -4426,8 +4464,8 @@ model alone (`claude-code-test-resume-refuses-external')."
                  (lambda (root id b _detachable)
                    (push (list 'resume root id b) calls) terminal))
                 ((symbol-function 'claude-code-attach)
-                 (lambda (root id)
-                   (push (list 'attach root id) calls) terminal))
+                 (lambda (root id name)
+                   (push (list 'attach root id name) calls) terminal))
                 ((symbol-function 'claude-code--show)
                  (lambda (b &rest _) (push (list 'show b) calls)))
                 ((symbol-function 'claude-code--refresh-views)
@@ -4461,11 +4499,13 @@ model alone (`claude-code-test-resume-refuses-external')."
             (setq at-point external calls nil)
             (claude-code-sessions-visit)
             (should (equal (car (last calls)) '(resume "/r" "e" nil)))
-            ;; An attachable row is attached, and the views catch up.
+            ;; An attachable row is attached under the name it shows, and the
+            ;; views catch up.
             (setq at-point attachable calls nil)
             (claude-code-sessions-visit)
             (should (equal (reverse calls)
-                           `((attach "/r" "h") (refresh) (show ,terminal))))
+                           `((attach "/r" "h" "held") (refresh)
+                             (show ,terminal))))
             ;; A dead row resumes, refreshes and displays.
             (setq at-point dead calls nil)
             (claude-code-sessions-visit)

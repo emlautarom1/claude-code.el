@@ -1227,6 +1227,27 @@ then `exec's PROGRAM under that PID."
                 program)
           args))
 
+(defun claude-code--start-terminal (buffer command env &optional pid)
+  "Run COMMAND as the terminal of an instance in BUFFER, with ENV set.
+ENV is a list of cells as `claude-code--apply-env' takes them.  PID is the
+instance's when it is already known, and then no report of it is awaited."
+  ;; Ahead of the spawn: Ghostel refuses a mode change once the terminal
+  ;; process is live.
+  (with-current-buffer buffer
+    (claude-code-instance-mode)
+    (when pid
+      (setq-local ghostel-eval-cmds nil
+                  claude-code--pid pid)))
+  (let ((env-hook (lambda () (claude-code--apply-env env))))
+    ;; The default value is the one Ghostel reads in the instance's own buffer.
+    (set-default 'ghostel-pre-spawn-hook
+                 (cons env-hook (default-value 'ghostel-pre-spawn-hook)))
+    (unwind-protect
+        (ghostel-exec buffer (car command) (cdr command))
+      (set-default 'ghostel-pre-spawn-hook
+                   (delq env-hook (default-value 'ghostel-pre-spawn-hook)))))
+  (claude-code--install-notifications buffer))
+
 (defun claude-code--launch (id project-root detachable &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
@@ -1257,26 +1278,15 @@ and, unless detachable, with the arguments and environment
          (command (claude-code--reporting-command
                    program
                    (append (car mcp)
-                           (apply #'claude-code--build-args :session-id id opts))))
-         (command (if dtach
-                      (claude-code--holding-command
-                       dtach (claude-code--new-uuid) command)
-                    command))
-         (env (append renderer-env
-                      (list (cons "CLAUDE_CONFIG_DIR" config))
-                      (cdr mcp)))
-         (env-hook (lambda () (claude-code--apply-env env))))
-    ;; Ahead of the spawn: Ghostel refuses a mode change once the terminal
-    ;; process is live.
-    (with-current-buffer buffer (claude-code-instance-mode))
-    ;; The default value is the one Ghostel reads in the instance's own buffer.
-    (set-default 'ghostel-pre-spawn-hook
-                 (cons env-hook (default-value 'ghostel-pre-spawn-hook)))
-    (unwind-protect
-        (ghostel-exec buffer (car command) (cdr command))
-      (set-default 'ghostel-pre-spawn-hook
-                   (delq env-hook (default-value 'ghostel-pre-spawn-hook))))
-    (claude-code--install-notifications buffer)
+                           (apply #'claude-code--build-args :session-id id opts)))))
+    (claude-code--start-terminal
+     buffer
+     (if dtach
+         (claude-code--holding-command dtach (claude-code--new-uuid) command)
+       command)
+     (append renderer-env
+             (list (cons "CLAUDE_CONFIG_DIR" config))
+             (cdr mcp)))
     (claude-code--register id buffer root (plist-get opts :worktree)
                            (and detachable t))
     buffer))
@@ -1343,14 +1353,15 @@ Emacs is running."
      (plist-get (claude-code--transcript-for root id) :worktree-binding)
      detachable)))
 
-(defun claude-code-attach (project-root id)
+;;;###autoload
+(defun claude-code-attach (project-root id &optional name)
   "Attach to the detachable instance running session ID; return its buffer.
 The session is one PROJECT-ROOT lists, running as an external session, and the
-instance is found by id when called.  It is hosted in a new buffer, launched
-from PROJECT-ROOT and working where its sessions/ file says, and becomes alive
-again.  When an instance Emacs manages already runs ID, return its buffer.
-Refuses a session no process runs, and one a process other than a detachable
-instance runs, which cannot be attached."
+instance is found by id when called.  It is hosted in a new buffer, named after
+NAME until Claude's next title, and becomes alive again.  When an instance
+Emacs manages already runs ID, return its buffer.  Refuses a session no process
+runs, one a process other than a detachable instance runs, and one whose socket
+is gone."
   (require 'ghostel)
   (let* ((root (claude-code--normalize-root project-root))
          (host (file-remote-p root))
@@ -1367,19 +1378,11 @@ instance runs, which cannot be attached."
       (let* ((default-directory (file-name-as-directory
                                  (or (claude-code--pid-cwd runner host) root)))
              (dtach (claude-code--resolve-executable claude-code-dtach))
-             (tr (claude-code--transcript-for root id))
              (buffer (generate-new-buffer
-                      (or (claude-code--ghostel-buffer-name
-                           (or (plist-get tr :title) (plist-get tr :last-prompt)))
-                          (funcall claude-code-buffer-name-function root))))
-             (command (claude-code--attaching-command dtach socket)))
-        (with-current-buffer buffer
-          (claude-code-instance-mode)
-          ;; The PID is known, and no report of it is coming.
-          (setq-local ghostel-eval-cmds nil
-                      claude-code--pid runner))
-        (ghostel-exec buffer (car command) (cdr command))
-        (claude-code--install-notifications buffer)
+                      (or (and name (claude-code--ghostel-buffer-name name))
+                          (funcall claude-code-buffer-name-function root)))))
+        (claude-code--start-terminal
+         buffer (claude-code--attaching-command dtach socket) nil runner)
         (claude-code--register id buffer root nil t)
         buffer)))))
 
@@ -2425,7 +2428,9 @@ session is resumed."
          (buffer (cond
                   ((claude-code--session-process drawn) drawn)
                   ((claude-code-session-holder session)
-                   (claude-code-attach claude-code--project id))
+                   (claude-code-attach claude-code--project id
+                                       (claude-code--session-display-name
+                                        session)))
                   (t (claude-code--resume
                       claude-code--project id
                       (claude-code-session-worktree-binding session)
