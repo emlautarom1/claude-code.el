@@ -2137,23 +2137,42 @@ A refusal does not end the batch, and only what was detached loses its mark."
                        "Detached 1, refused 1: Session n is not detachable"))))))
 
 (ert-deftest claude-code-test-closing-a-detachable-instance-announces-it ()
-  "Closing a running detachable instance's buffer unregisters it and says so.
-Its instance runs on, so the user learns where it went; a non-detachable one
-ends with its buffer and says nothing."
+  "A detachable instance that runs on without its buffer is announced as such.
+That is one whose buffer closes while its terminal runs, and one whose terminal
+is lost once it has started, which is no abnormal exit of the instance's.  One
+whose terminal ended cleanly has ended with it, one whose terminal failed
+before it started never ran, and a non-detachable one ends with its buffer."
   (let ((reported '()))
     (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args) (push (apply #'format fmt args) reported)))
-              ((symbol-function 'claude-code--session-process) #'identity))
-      (claude-code-tests--with-managed-buffer buf
-        (claude-code--register "d" buf "/r" nil t)
-        (kill-buffer buf)
-        (should (zerop (hash-table-count claude-code--managed))))
-      (should (string-match-p "runs on as an external session" (car reported)))
-      (setq reported '())
-      (claude-code-tests--with-managed-buffer buf
-        (claude-code--register "n" buf "/r" nil)
-        (kill-buffer buf))
-      (should-not reported))))
+               (lambda (fmt &rest args) (push (apply #'format fmt args) reported))))
+      ;; (DETACHABLE TERMINAL-RUNS PID EVENT ANNOUNCED EXIT-REPORTED)
+      (pcase-dolist (`(,detachable ,runs ,pid ,event ,announced ,exit-reported)
+                     '((t t 77 nil t nil)
+                       (t nil 77 "exited abnormally with code 255\n" t nil)
+                       (t nil 77 "finished\n" nil nil)
+                       (t nil nil "exited abnormally with code 1\n" nil t)
+                       (nil t 77 nil nil nil)))
+        (setq reported '())
+        (let ((process (and runs (make-pipe-process :name "cc-live" :noquery t))))
+          (unwind-protect
+              (claude-code-tests--with-managed-buffer (buf pid)
+                (claude-code--register "d" buf "/r" nil detachable)
+                (with-current-buffer buf
+                  (setq-local ghostel--process process)
+                  (when event
+                    (run-hook-with-args 'ghostel-exit-functions buf event)))
+                (kill-buffer buf)
+                (should (zerop (hash-table-count claude-code--managed))))
+            (when process (delete-process process))))
+        (should (eq announced
+                    (and (seq-some (lambda (m)
+                                     (string-search "runs on as an external" m))
+                                   reported)
+                         t)))
+        (should (eq exit-reported
+                    (and (seq-some (lambda (m) (string-search "abnormally" m))
+                                   reported)
+                         t)))))))
 
 (ert-deftest claude-code-test-abnormal-exit-is-reported ()
   "A terminal ending abnormally reports the last lines it showed.

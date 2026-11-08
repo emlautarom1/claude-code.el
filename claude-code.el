@@ -1099,16 +1099,29 @@ included.
 A handler that signals is reported and skipped, so it costs neither the
 handlers behind it nor the `kill-buffer' this may be running inside.")
 
+(defvar-local claude-code--exit-event nil
+  "The event this instance's terminal ended on, nil while it runs.")
+
+(defun claude-code--runs-on-p (buffer)
+  "Return non-nil when BUFFER's instance goes on running without BUFFER.
+That is a detachable instance that has started -- its terminal runs, or it
+reported its PID -- and whose terminal has not ended cleanly, as dtach's client
+does once the instance has ended."
+  (and (plist-get (gethash buffer claude-code--managed) :detachable)
+       (not (equal (buffer-local-value 'claude-code--exit-event buffer)
+                   "finished\n"))
+       (or (claude-code--session-process buffer)
+           (claude-code--instance-pid buffer))))
+
 (defun claude-code--on-buffer-kill ()
   "Unregister the instance hosted in the buffer being killed.
 This buffer-local `kill-buffer-hook' is the one report of a buffer closing: a
-non-detachable instance ends with it, and a detachable one closed while it runs
-goes on as an external session, which is announced.  A terminal this package
-does not manage retires nothing, and `claude-code-last-instance-exit-hook' runs
+non-detachable instance ends with it, and a detachable one that runs on, which
+is announced, goes on as an external session.  A terminal this package does
+not manage retires nothing, and `claude-code-last-instance-exit-hook' runs
 only for the kill that removed the last entry."
-  (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
-    (when (and (plist-get entry :detachable)
-               (claude-code--session-process (current-buffer)))
+  (when (gethash (current-buffer) claude-code--managed)
+    (when (claude-code--runs-on-p (current-buffer))
       (message "Detached %s: its instance runs on as an external session"
                (buffer-name)))
     (remhash (current-buffer) claude-code--managed)
@@ -1122,10 +1135,13 @@ only for the kill that removed the last entry."
                           nil)))))
 
 (defun claude-code--report-exit (buffer event)
-  "Report BUFFER's terminal ending abnormally on EVENT, with its last lines.
+  "Record the EVENT BUFFER's terminal ended on, reporting an abnormal end.
 A `ghostel-exit-functions' function: BUFFER dies with its process, and with it
-what a launch that failed printed about why."
-  (unless (equal event "finished\n")
+what a launch that failed printed about why, which is reported with the
+terminal's last lines.  A terminal lost under an instance that runs on is
+left to `claude-code--on-buffer-kill', which announces the detach."
+  (with-current-buffer buffer (setq claude-code--exit-event event))
+  (unless (or (equal event "finished\n") (claude-code--runs-on-p buffer))
     (message "%s" (string-join
                    (cons (concat (buffer-name buffer) " " (string-trim event))
                          ;; Ghostel's filter joins the lines it wrapped.
