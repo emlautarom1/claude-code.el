@@ -13,10 +13,10 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Transcripts beside the view** — `t` shows the conversation of the session at point the way Claude's own `/export` writes it, MCP tool calls aside, in a window beside the view that the next row's transcript takes over. `g` there exports it again.
 - **External sessions** — one of your `claude` processes running in another terminal is shown in its own group and protected from resume/delete; `k` ends its process.
 - **Actions** — focus an alive instance, resume a dead session, create a new one (with a display name, a chosen model, an effort level, or a git worktree), kill the process running a session, inside Emacs or out, delete dead sessions from disk, rename, send text, and interrupt (SIGINT). Marks allow bulk kill/delete.
-- **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
+- **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort, and whether it is detached.
 - **Renderer override** — `claude-code-renderer` puts instances on the `inline` renderer, where the conversation lands in the Emacs buffer and the mouse stays Emacs's, or on `fullscreen`, whatever your `tui` setting says; it defaults to leaving that choice to Claude. See [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance that finishes a turn, waits on you, or fails raises a desktop notification named after the session, saying how long the turn took, what it waits on, or what went wrong; clicking it brings Emacs forward, switching workspace if needed, and goes to that instance, in the tab or frame already showing it, or pops it into view. An instance already on screen in a focused frame stays quiet, and a notification closes once you see the instance, deal with what it announced, or the instance exits. Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
-- **Detachable instances** — with `claude-code-detachable`, an instance runs under `dtach` on its host, so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills and `RET` attaches again, marked `⇄`; `x` detaches one on purpose. See [what a reattach redraws](docs/architecture.md#detachable-instances).
+- **Detachable instances** — an instance in a remote directory runs under `dtach` on its host by default (`claude-code-detachable`, or `--detached` in the create menu), so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills and `RET` attaches again, marked `⇄`; `x` detaches one on purpose. See [what a reattach redraws](docs/architecture.md#detachable-instances).
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -26,7 +26,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - [Ghostel](https://github.com/dakra/ghostel) — hosts each instance's terminal. Loaded lazily, so the package byte-compiles and tests without its native module.
 - [`web-server`](https://github.com/eschulte/emacs-web-server) — HTTP transport for the MCP server.
 - The `claude` CLI on your `PATH`
-- For detachable instances: [`dtach`](https://github.com/crigler/dtach) on the host they run on
+- For detachable instances, the default on a remote host: [`dtach`](https://github.com/crigler/dtach) on the host they run on
 - For desktop notifications: an Emacs built with D-Bus, and a notification daemon. Verified on GNOME, where a click raises Emacs and shows the instance but does not hand over the keyboard — you click once to start typing. Other daemons dispatch a click differently and are not covered yet.
 
 ## Install
@@ -54,7 +54,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `RET`     | focus an alive session / attach a detached one (`⇄`) / resume a dead one / toggle a group |
 | `o`       | like `RET`, but visit the session in another window         |
 | `TAB`     | collapse or expand the group at point                       |
-| `c`       | open the create menu (name/worktree/model/effort)           |
+| `c`       | open the create menu (name/worktree/model/effort/detached)  |
 | `n` / `p` | move down / up a line (rows and group headers alike)        |
 | `k`       | kill the process of each marked running session, or at point |
 | `x`       | detach the marked alive sessions, or the one at point       |
@@ -89,6 +89,9 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 
 ;; Spawn under a display name, which is what the sessions view shows.
 (claude-code-spawn root :name "release audit")
+
+;; Spawn detached, so it outlives its buffer and Emacs.
+(claude-code-spawn root :detachable t)
 
 ;; Spawn in a git worktree.
 (claude-code-spawn root :worktree t)          ; a fresh one Claude names

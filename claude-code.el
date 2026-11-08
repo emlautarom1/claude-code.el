@@ -81,14 +81,14 @@ has to run under the PID it was started with: that PID is what names the
 instance."
   :type 'string)
 
-(defcustom claude-code-detachable nil
+(defcustom claude-code-detachable 'remote
   "Which new instances are detachable.
 A detachable instance runs under `claude-code-dtach' on its host, so closing its
 buffer -- `kill-buffer', Emacs exiting, the connection dropping -- leaves it
 running as an external session; only killing it ends it.  It is never wired to
 the MCP server.  `remote' makes an instance in a remote directory detachable,
-t every instance, and nil none.  `claude-code-spawn' and `claude-code-resume'
-take their default from here."
+t every instance, and nil none.  `claude-code-spawn', `claude-code-resume' and
+the create menu's `--detached' take their default from here."
   :type '(choice (const :tag "Remote instances" remote)
                  (const :tag "Every instance" t)
                  (const :tag "None" nil)))
@@ -2786,7 +2786,10 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
                    :name (transient-arg-value "--name=" args)
                    :worktree (claude-code--args-worktree args)
                    :model (transient-arg-value "--model=" args)
-                   :effort (transient-arg-value "--effort=" args))))
+                   :effort (transient-arg-value "--effort=" args)
+                   :detachable (if transient-current-command
+                                   (and (member "--detached" args) t)
+                                 (claude-code--detachable-default root)))))
     (claude-code--refresh-views)
     (claude-code--show (cdr instance))))
 
@@ -2838,15 +2841,19 @@ in it rather than building another -- and takes any other name as typed.
                   nil nil initial-input history)))
     (if (equal choice claude-code--worktree-auto) "" choice)))
 
-(defun claude-code--seed-worktree (obj worktree)
-  "Add a request for WORKTREE to the value menu OBJ opens with.
-The prefix's `:init-value', which is what outranks a pinned value -- `:value'
-names the `default-value' slot, and a pinned value beats a default.  Unbinding
-the slot hands OBJ back to `transient-init-value' to resolve its own value,
-so the request joins that rather than standing in for it."
+(defun claude-code--seed-menu (obj worktree detached)
+  "Add WORKTREE and DETACHED to the value menu OBJ opens with.
+A request for WORKTREE is added when it is a name, and `--detached' when
+DETACHED is non-nil.  The prefix's `:init-value', which is what outranks a
+pinned value -- `:value' names the `default-value' slot, and a pinned value
+beats a default.  Unbinding the slot hands OBJ back to `transient-init-value'
+to resolve its own value, so the requests join that rather than standing in
+for it."
   (slot-makeunbound obj 'init-value)
   (transient-init-value obj)
-  (oset obj value (cons (concat "--worktree=" worktree) (oref obj value))))
+  (oset obj value (append (and worktree (list (concat "--worktree=" worktree)))
+                          (and detached (list "--detached"))
+                          (oref obj value))))
 
 ;;;###autoload
 (transient-define-prefix claude-code-spawn-menu ()
@@ -2864,18 +2871,23 @@ so the request joins that rather than standing in for it."
     :allow-empty t
     :unsavable t)
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
-   ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))]
+   ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))
+   ;; Seeded per invocation from `claude-code-detachable' and the project's
+   ;; host, so pinning it would only override that.
+   ("-d" "Detached" "--detached" :unsavable t)]
   ["Create"
    ("c" "New session" claude-code--spawn-session)]
   (interactive)
-  (pcase-let ((`(,root . ,worktree) (claude-code--current-project)))
-    ;; Nothing is seeded outside a worktree, so the menu opens on its own value
-    ;; the way every other prefix does.
+  (pcase-let* ((`(,root . ,worktree) (claude-code--current-project))
+               (detached (claude-code--detachable-default root)))
+    ;; With nothing to seed, the menu opens on its own value the way every
+    ;; other prefix does.
     (apply #'transient-setup 'claude-code-spawn-menu nil nil
            :scope root
-           (and worktree
+           (and (or worktree detached)
                 (list :init-value
-                      (lambda (obj) (claude-code--seed-worktree obj worktree)))))))
+                      (lambda (obj)
+                        (claude-code--seed-menu obj worktree detached)))))))
 
 ;;;###autoload
 (defun claude-code-sessions ()

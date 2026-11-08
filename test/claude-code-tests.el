@@ -1663,6 +1663,7 @@ What Ghostel is handed is the name that host's shell runs."
       (let ((execs '())
             (resolve (symbol-function 'claude-code--resolve-executable))
             (claude-code-cli "claude-code-tests-cli")
+            (claude-code-detachable nil)
             (exec-path '()))
         (claude-code-tests--on-mock-host (list dir)
           (let ((root default-directory)
@@ -4436,6 +4437,7 @@ The dispatch is shared with RET \(`claude-code-test-sessions-visit-dispatch')."
               ((symbol-function 'switch-to-buffer-other-window)
                (lambda (b) (setq shown b))))
       (claude-code-tests--in-view
+        (setq-local claude-code--project "/r")
         (should-error (claude-code-sessions-visit-other-window)
                       :type 'user-error)
         (setq at-point alive)
@@ -5081,8 +5083,8 @@ checkout the menu could not name is not offered."
                 ((symbol-function 'project-root) #'identity)
                 ;; Keep the pick out of the user's project list.
                 ((symbol-function 'project--remember-dir) #'ignore)
-                ((symbol-function 'claude-code--seed-worktree)
-                 (lambda (_obj worktree) worktree))
+                ((symbol-function 'claude-code--seed-menu)
+                 (lambda (_obj worktree _detached) worktree))
                 ((symbol-function 'transient-setup)
                  (lambda (_name _layout _edit &rest props)
                    (push (cons (plist-get props :scope)
@@ -5147,14 +5149,15 @@ other buffer asks `project.el', which prompts when the buffer has no project."
         (let ((transient-current-command nil))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/r" :name nil :worktree nil :model nil :effort nil)))
+                       '("/r" :name nil :worktree nil :model nil :effort nil
+                         :detachable nil)))
         ;; With a menu live the root comes from its scope, not from whichever
         ;; buffer the suffix happens to run in.
         (let ((transient-current-command 'claude-code-spawn-menu))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
                        '("/scoped" :name "a long name" :worktree t
-                         :model "opus" :effort "xhigh")))))))
+                         :model "opus" :effort "xhigh" :detachable nil)))))))
 
 (defmacro claude-code-tests--driving-spawn-menu (spawns &rest body)
   "Run BODY able to work the real menu, pushing (ROOT . OPTIONS) onto SPAWNS.
@@ -5205,7 +5208,24 @@ is stubbed here."
     (should (equal (car spawns)
                    (list (claude-code--normalize-root "/home/test/proj")
                          :name "review" :worktree t
-                         :model nil :effort nil)))))
+                         :model nil :effort nil :detachable nil)))))
+
+(ert-deftest claude-code-test-spawn-menu-detached ()
+  "`--detached' opens as `claude-code-detachable' says for the project's host.
+`-d' turns it either way for the one session; the next menu opens on the
+option again."
+  (claude-code-tests--driving-spawn-menu spawns
+    (dolist (option '(t nil))
+      (let ((claude-code-detachable option))
+        (with-temp-buffer
+          (claude-code-spawn-menu)
+          (execute-kbd-macro (kbd "c")))
+        (with-temp-buffer
+          (claude-code-spawn-menu)
+          (execute-kbd-macro (kbd "- d c")))))
+    (should (equal (mapcar (lambda (spawn) (plist-get (cdr spawn) :detachable))
+                           (reverse spawns))
+                   '(t nil nil t)))))
 
 (ert-deftest claude-code-test-spawn-menu-worktree-by-name ()
   "The one worktree key takes a name, and a second press withdraws the request.
@@ -5263,7 +5283,7 @@ pinned."
     (should (equal (car spawns)
                    (list (claude-code--normalize-root "/home/test/proj")
                          :name nil :worktree "my.feat"
-                         :model "opus" :effort nil)))))
+                         :model "opus" :effort nil :detachable nil)))))
 
 (ert-deftest claude-code-test-spawn-menu-forgets-the-worktree ()
   "A worktree is spent on the session it spawns, and a seeded one is refusable.
