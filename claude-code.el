@@ -567,11 +567,11 @@ WORKTREE-BINDING is the storage adapter's record behind it, which the resume
 path reads (see `claude-code--resume-worktree').  RECAP is Claude's own
 one-paragraph account of where the session stood, nil for a session that has
 none.
-TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
-session's last genuine activity, taken from the newest timestamped transcript
-line.  HOLDER is the dtach socket, on the session's host, of the detachable
-instance running an external session, which can therefore be attached; nil
-for every other session."
+TRANSCRIPT is the absolute `.jsonl' path, nil before Claude writes one.
+LAST-ACTIVE is the session's last genuine activity, taken from the newest
+timestamped transcript line.  HOLDER is the dtach socket, as a file name on the
+session's host, of the detachable instance running an external session, which
+can therefore be attached; nil for every other session."
   id status waiting-for modifier modifier-message alive-p pid buffer
   worktree worktree-binding title last-prompt recap transcript external-p
   last-active holder)
@@ -626,6 +626,11 @@ That is ORIGIN's parent when ORIGIN is a worktree, so the instance belongs to
 the same project wherever it goes to work."
   (or (car (claude-code--worktree-parent origin)) origin))
 
+(defun claude-code--under-root-p (dir root)
+  "Return non-nil when an instance in DIR belongs to project ROOT.
+DIR is ROOT itself or a worktree Claude built under it."
+  (or (equal dir root) (equal (claude-code--origin-project dir) root)))
+
 (defun claude-code--entry-update (entry info)
   "Record INFO, what sessions/ says of ENTRY's process, in ENTRY; return ENTRY.
 A nil INFO, from a file that is gone or caught mid-rewrite, keeps what was
@@ -664,14 +669,15 @@ read, and every PID then reads as running."
         (lambda (pid) (memql pid pids))
       #'always)))
 
-(defun claude-code--running (&optional host)
+(defun claude-code--running (&optional host live)
   "Return a hash of session id -> what runs it on HOST.
 That is the buffer of an instance Emacs manages, or the PID of a `claude'
 outside Emacs.  A managed instance runs the session its entry names, refreshed
 from sessions/ (`claude-code--entry-update'), while its buffer's process lives;
 any other `claude' runs the one sessions/ names while
-`claude-code--pid-running-p' says its PID does."
-  (let* ((live (claude-code--live-table host))
+`claude-code--pid-running-p' says its PID does.  LIVE is HOST's
+`claude-code--live-table' when the caller has already read it."
+  (let* ((live (or live (claude-code--live-table host)))
          (running-p (unless (hash-table-empty-p live)
                       (claude-code--pid-running-p host)))
          (instances (cl-loop for buffer being the hash-keys of claude-code--managed
@@ -803,36 +809,46 @@ belong to two roots (see docs/storage-model.md).  The launch root recorded in
 PROJECT-ROOT, or from a worktree of it, whose session has no transcript here.
 A session a program drove is left out unless Emacs manages an instance for it
 \(`claude-code--interactive-transcript-p').  An external session a detachable
-instance runs names its `claude-code--holder'."
+instance runs names its `claude-code--holder', and is listed before Claude
+writes its transcript when sessions/ has the instance in PROJECT-ROOT or a
+worktree of it."
   (let* ((root (claude-code--normalize-root project-root))
          (host (file-remote-p root))
-         (running (claude-code--running host))
+         (live (claude-code--live-table host))
+         (running (claude-code--running host live))
+         (holder (lambda (pid)
+                   (when-let* ((socket (claude-code--holder pid host)))
+                     (concat host socket))))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (dolist (tr (claude-code--project-transcripts root))
       (let* ((id (plist-get tr :id))
              (runner (gethash id running)))
+        (puthash id t seen)
         ;; An instance Emacs manages is the user's whatever it is stamped with.
         (when (or (bufferp runner) (plist-get tr :interactive-p))
-          (puthash id t seen)
           (push (if (bufferp runner)
                     (claude-code--alive-session
                      runner (claude-code--transcript-session-args tr))
                   (apply #'claude-code-session--create
                          :id id :alive-p nil :external-p (and runner t)
-                         :holder (and runner
-                                      (claude-code--holder runner host))
+                         :holder (and runner (funcall holder runner))
                          (claude-code--transcript-session-args tr)))
                 sessions))))
     (maphash (lambda (id runner)
-               (when-let* (((bufferp runner))
-                           (origin (plist-get (gethash runner claude-code--managed)
-                                              :origin))
-                           ((not (gethash id seen)))
-                           ((or (equal root origin)
-                                (equal root (claude-code--origin-project
-                                             origin)))))
-                 (push (claude-code--alive-session runner) sessions)))
+               (unless (gethash id seen)
+                 (if (bufferp runner)
+                     (when-let* ((origin (plist-get (gethash runner
+                                                             claude-code--managed)
+                                                    :origin))
+                                 ((claude-code--under-root-p origin root)))
+                       (push (claude-code--alive-session runner) sessions))
+                   (when-let* ((cwd (plist-get (gethash runner live) :cwd))
+                               ((claude-code--under-root-p cwd root))
+                               (socket (funcall holder runner)))
+                     (push (claude-code-session--create :id id :external-p t
+                                                        :holder socket)
+                           sessions)))))
              running)
     (nreverse sessions)))
 
@@ -1411,10 +1427,10 @@ is gone."
 An alive session's instance is the one in the buffer SESSION names (see
 `claude-code--buffer').  A non-detachable instance goes with its buffer, and a
 detachable one, which would outlive it, is sent SIGTERM on its host.  An
-external session's process is sent SIGTERM on the host of its transcript, found
-by id when called: a session that has stopped since SESSION was built is
-refused, and so is one an instance Emacs manages has resumed since, which only
-that instance's alive row kills."
+external session's process is sent SIGTERM on the host of its transcript, or
+of its holder before it has one, found by id when called: a session that has
+stopped since SESSION was built is refused, and so is one an instance Emacs
+manages has resumed since, which only that instance's alive row kills."
   (let ((id (claude-code-session-id session)))
     (cond
      ((claude-code-session-alive-p session)
@@ -1433,7 +1449,8 @@ that instance's alive row kills."
      ((not (claude-code-session-external-p session))
       (user-error "Session %s is not running" id))
      (t
-      (let* ((host (file-remote-p (claude-code-session-transcript session)))
+      (let* ((host (file-remote-p (or (claude-code-session-transcript session)
+                                      (claude-code-session-holder session))))
              (runner (gethash id (claude-code--running host))))
         (cond
          ((bufferp runner)

@@ -1920,19 +1920,86 @@ Every pid in it is live, as is Emacs's own."
 (ert-deftest claude-code-test-sessions-name-the-holder-of-a-detached-instance ()
   "An external session a detachable instance runs is listed with its socket.
 Its process's parent is the dtach master, whose command line names it; any other
-external session, and every dead one, has none."
+external session, and every dead one, has none.  A held session a program
+drove (88888888) stays unlisted: its transcript leaves it out."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-registry
       (claude-code-tests--with-processes
           `((1002 900 "claude") (900 1 ,(claude-code-tests--master-args
                                          claude-code-tests--holder-socket))
-            (1003 1 "claude"))
+            (1003 1 "claude")
+            (1005 901 "claude") (901 1 ,(claude-code-tests--master-args
+                                         "/run/user/1000/claude-code/p")))
         (let ((sessions (claude-code-project-sessions "/home/test/proj")))
           (should (equal (claude-code-session-holder
                           (claude-code-tests--find-session
                            sessions "22222222-2222-4222-8222-222222222222"))
                          claude-code-tests--holder-socket))
+          (should-not (claude-code-tests--find-session
+                       sessions "88888888-8888-4888-8888-888888888888"))
           (should (equal (seq-count #'claude-code-session-holder sessions) 1)))))))
+
+(ert-deftest claude-code-test-sessions-list-a-held-instance-before-its-transcript ()
+  "A detachable instance's session is external before Claude writes a transcript.
+It is listed under the project its sessions/ file works in, or a worktree of
+it, with its socket and nothing a transcript would give.  A held instance
+elsewhere, one with no cwd, and an unheld `claude' stay unlisted."
+  (claude-code-tests--with-config
+    (claude-code-tests--with-registry
+      (pcase-dolist (`(,pid ,id ,cwd)
+                     '((2001 "root" "/home/test/proj")
+                       (2002 "wt" "/home/test/proj/.claude/worktrees/feat")
+                       (2003 "other" "/home/other")
+                       (2004 "unheld" "/home/test/proj")))
+        (claude-code-tests--write-session-file
+         pid (format "{\"pid\":%d,\"sessionId\":\"%s\",\"cwd\":\"%s\"}"
+                     pid id cwd)))
+      (claude-code-tests--write-session-file 2005 "no-cwd")
+      (let ((socket (lambda (n) (format "/run/user/1000/claude-code/%d" n))))
+        (claude-code-tests--with-processes
+            `((2001 901 "claude") (901 1 ,(claude-code-tests--master-args
+                                           (funcall socket 1)))
+              (2002 902 "claude") (902 1 ,(claude-code-tests--master-args
+                                           (funcall socket 2)))
+              (2003 903 "claude") (903 1 ,(claude-code-tests--master-args
+                                           (funcall socket 3)))
+              (2004 1 "claude")
+              (2005 905 "claude") (905 1 ,(claude-code-tests--master-args
+                                           (funcall socket 5))))
+          (let ((sessions (claude-code-project-sessions "/home/test/proj")))
+            (should (equal (sort (mapcar #'claude-code-session-id sessions)
+                                 #'string<)
+                           '("root" "wt")))
+            (dolist (session sessions)
+              (should (claude-code-session-external-p session))
+              (should-not (claude-code-session-transcript session))
+              (should-not (claude-code-session-worktree session)))
+            (should (equal (claude-code-session-holder
+                            (claude-code-tests--find-session sessions "wt"))
+                           (funcall socket 2))))
+          (should (equal (mapcar #'claude-code-session-id
+                                 (claude-code-project-sessions
+                                  "/home/test/proj/.claude/worktrees/feat"))
+                         '("wt"))))))))
+
+(ert-deftest claude-code-test-sessions-name-a-remote-holder-on-its-host ()
+  "A remote session's socket is a file name on its host."
+  (claude-code-tests--with-registry
+    (let ((live (make-hash-table)))
+      (puthash 31 '(:session "e" :cwd "/ssh:box:/home/me/proj") live)
+      (cl-letf (((symbol-function 'claude-code--normalize-root) #'identity)
+                ((symbol-function 'claude-code--live-table)
+                 (lambda (host) (and (equal host "/ssh:box:") live)))
+                ((symbol-function 'claude-code--pid-running-p)
+                 (lambda (_host) #'always))
+                ((symbol-function 'claude-code--project-transcripts) #'ignore)
+                ((symbol-function 'claude-code--holder)
+                 (lambda (pid host) (and (eql pid 31) (equal host "/ssh:box:")
+                                         "/run/s"))))
+        (should (equal (mapcar #'claude-code-session-holder
+                               (claude-code-project-sessions
+                                "/ssh:box:/home/me/proj"))
+                       '("/ssh:box:/run/s")))))))
 
 (ert-deftest claude-code-test-attaching-command ()
   "Attaching sets the modes Claude set at startup, then runs dtach's client.
@@ -2909,22 +2976,28 @@ The process is the one sessions/ names for the session now (pid 1002 for
           (should (equal signals '((1002 SIGTERM nil)))))))))
 
 (ert-deftest claude-code-test-kill-signals-on-the-sessions-host ()
-  "An external session's process is signalled on the host of its transcript."
-  (claude-code-tests--with-registry
-    (let ((signals '())
-          (asked nil))
-      (cl-letf (((symbol-function 'claude-code--running)
-                 (lambda (host)
-                   (setq asked host)
-                   (let ((running (make-hash-table :test 'equal)))
-                     (puthash "e" 31 running)
-                     running))))
-        (claude-code-tests--signalling signals 0
-          (claude-code-kill (claude-code-session--create
-                             :id "e" :external-p t
-                             :transcript "/ssh:box:/home/me/proj/e.jsonl"))))
-      (should (equal asked "/ssh:box:"))
-      (should (equal signals '((31 SIGTERM "/ssh:box:")))))))
+  "An external session's process is signalled on the host of its transcript.
+A session a detachable instance runs before Claude writes its transcript is
+signalled on the host of its holder."
+  (pcase-dolist (`(,transcript ,holder ,host)
+                 '(("/ssh:box:/home/me/proj/e.jsonl" nil "/ssh:box:")
+                   (nil "/ssh:box:/run/s" "/ssh:box:")
+                   (nil "/run/s" nil)))
+    (claude-code-tests--with-registry
+      (let ((signals '())
+            (asked 'none))
+        (cl-letf (((symbol-function 'claude-code--running)
+                   (lambda (host)
+                     (setq asked host)
+                     (let ((running (make-hash-table :test 'equal)))
+                       (puthash "e" 31 running)
+                       running))))
+          (claude-code-tests--signalling signals 0
+            (claude-code-kill (claude-code-session--create
+                               :id "e" :external-p t
+                               :transcript transcript :holder holder))))
+        (should (equal asked host))
+        (should (equal signals `((31 SIGTERM ,host))))))))
 
 (ert-deftest claude-code-test-kill-refuses-what-the-row-no-longer-shows ()
   "An external session is looked up again by id, so a stale row signals nothing.
