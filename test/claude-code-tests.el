@@ -2175,6 +2175,18 @@ before it started never ran, and a non-detachable one ends with its buffer."
                                    reported)
                          t)))))))
 
+(ert-deftest claude-code-test-an-instance-runs-while-its-terminal-does ()
+  "An alive struct reaches its instance only while the terminal process runs.
+A buffer outliving its process, as one does until Ghostel's sentinel kills it,
+is refused like one already gone."
+  (claude-code-tests--with-managed-buffer buf
+    (let ((session (claude-code-session--create :id "a" :alive-p t :buffer buf))
+          (process (make-pipe-process :name "cc-live" :noquery t)))
+      (with-current-buffer buf (setq-local ghostel--process process))
+      (should (eq (claude-code--buffer session) buf))
+      (delete-process process)
+      (should-error (claude-code--buffer session) :type 'user-error))))
+
 (ert-deftest claude-code-test-abnormal-exit-is-reported ()
   "A terminal ending abnormally reports the last lines it showed.
 Ghostel kills an instance's buffer once its exit hooks have run, taking along
