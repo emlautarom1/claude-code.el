@@ -16,7 +16,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
 - **Renderer override** — `claude-code-renderer` puts instances on the `inline` renderer, where the conversation lands in the Emacs buffer and the mouse stays Emacs's, or on `fullscreen`, whatever your `tui` setting says; it defaults to leaving that choice to Claude. See [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance that finishes a turn, waits on you, or fails raises a desktop notification named after the session, saying how long the turn took, what it waits on, or what went wrong; clicking it brings Emacs forward, switching workspace if needed, and goes to that instance, in the tab or frame already showing it, or pops it into view. An instance already on screen in a focused frame stays quiet, and a notification closes once you see the instance, deal with what it announced, or the instance exits. Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
-- **Detachable instances** — with `claude-code-detachable`, an instance runs under `dtach` on its host, so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills.
+- **Detachable instances** — with `claude-code-detachable`, an instance runs under `dtach` on its host, so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills; `x` detaches one on purpose.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -57,6 +57,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `c`       | open the create menu (name/worktree/model/effort)           |
 | `n` / `p` | move down / up a line (rows and group headers alike)        |
 | `k`       | kill the process of each marked running session, or at point |
+| `x`       | detach the marked alive sessions, or the one at point       |
 | `d`       | delete the marked dead sessions, or the one at point        |
 | `r`       | rename the running session at point                         |
 | `i`       | interrupt (SIGINT) the running session at point             |
@@ -99,6 +100,7 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 ;; Resume a session by id, then act on sessions.
 (claude-code-resume root "SESSION-UUID")
 (claude-code-kill session)           ; alive and external sessions
+(claude-code-detach session)         ; alive detachable sessions only
 (claude-code-delete session)         ; dead sessions only
 (claude-code-rename session "name")  ; alive sessions only
 (claude-code-send-text session "hello" t)

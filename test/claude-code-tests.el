@@ -1847,6 +1847,67 @@ PID yet cannot be signalled, and is refused."
         (with-current-buffer buf (setq-local claude-code--pid nil))
         (should-error (claude-code-kill session) :type 'user-error)))))
 
+(ert-deftest claude-code-test-detach ()
+  "Detaching closes a detachable instance's buffer and nothing else.
+Its process is not signalled, so the session goes on as an external one.  A
+session that is not running in Emacs has nothing to detach, and one whose
+instance is not detachable would die with its buffer, so both are refused."
+  (let ((signals '()))
+    (claude-code-tests--signalling signals 0
+      (cl-letf (((symbol-function 'claude-code--session-process) #'buffer-live-p)
+                ((symbol-function 'message) #'ignore))
+        (claude-code-tests--with-managed-buffer buf
+          (claude-code--register "d" buf "/r" nil t)
+          (claude-code-detach
+           (claude-code-session--create :id "d" :alive-p t :buffer buf))
+          (should-not (buffer-live-p buf))
+          (should (zerop (hash-table-count claude-code--managed)))
+          (should-error (claude-code-detach
+                         (claude-code-session--create :id "d" :alive-p t
+                                                      :buffer buf))
+                        :type 'user-error))
+        (claude-code-tests--with-managed-buffer buf
+          (claude-code--register "n" buf "/r" nil)
+          (should-error (claude-code-detach
+                         (claude-code-session--create :id "n" :alive-p t
+                                                      :buffer buf))
+                        :type 'user-error)
+          (should (buffer-live-p buf)))
+        (should-error (claude-code-detach
+                       (claude-code-session--create :id "e" :external-p t))
+                      :type 'user-error)))
+    (should-not signals)))
+
+(ert-deftest claude-code-test-sessions-detach ()
+  "`x' detaches the marked alive sessions, or the one at point, and redraws.
+A refusal does not end the batch, and only what was detached loses its mark."
+  (let ((detached '()) (refreshed 0) (reported nil))
+    (cl-letf (((symbol-function 'claude-code-detach)
+               (lambda (s)
+                 (let ((id (claude-code-session-id s)))
+                   (when (equal id "n")
+                     (user-error "Session %s is not detachable" id))
+                   (push id detached))))
+              ((symbol-function 'claude-code--refresh-views)
+               (lambda () (cl-incf refreshed)))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
+      (claude-code-tests--in-view
+        (setq-local claude-code--project "/r")
+        (dolist (s (list (claude-code-session--create :id "d" :alive-p t)
+                         (claude-code-session--create :id "n" :alive-p t)
+                         (claude-code-session--create :id "e" :external-p t)))
+          (puthash (claude-code-session-id s) s claude-code--session-table))
+        (setq-local claude-code--marks (list "d" "n" "e"))
+        (should (eq (keymap-lookup claude-code-sessions-mode-map "x")
+                    #'claude-code-sessions-detach))
+        (claude-code-sessions-detach)
+        (should (equal detached '("d")))
+        (should (= refreshed 1))
+        (should (equal claude-code--marks '("n" "e")))
+        (should (equal reported
+                       "Detached 1, refused 1: Session n is not detachable"))))))
+
 (ert-deftest claude-code-test-closing-a-detachable-instance-announces-it ()
   "Closing a running detachable instance's buffer unregisters it and says so.
 Its instance runs on, so the user learns where it went; a non-detachable one

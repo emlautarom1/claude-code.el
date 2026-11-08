@@ -1322,6 +1322,21 @@ that instance's alive row kills."
           (user-error "Could not signal process %d of session %s"
                       runner id))))))))
 
+(defun claude-code-detach (session)
+  "Close alive SESSION's buffer, leaving its detachable instance running.
+SESSION goes on as an external session.  Refuses a session no instance runs in
+Emacs, and one whose instance is not detachable, which closing its buffer
+would kill."
+  (let ((id (claude-code-session-id session))
+        (buffer (claude-code-session-buffer session)))
+    (unless (and (claude-code-session-alive-p session)
+                 (claude-code--session-process buffer))
+      (user-error "Session %s is not running in Emacs" id))
+    (unless (plist-get (gethash buffer claude-code--managed) :detachable)
+      (user-error "Session %s is not detachable: closing it would kill it" id))
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer buffer))))
+
 (defun claude-code-delete (session)
   "Delete dead SESSION's transcript from disk.
 Refuses an alive session and one running outside Emacs, checked by id on the
@@ -2378,6 +2393,16 @@ A running session is an alive or an external one; see `claude-code-kill'."
       (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
         (claude-code--act-on targets #'claude-code-kill "Killed")))))
 
+(defun claude-code-sessions-detach ()
+  "Detach the marked alive sessions, or the one at point.
+See `claude-code-detach'."
+  (interactive nil claude-code-sessions-mode)
+  (claude-code--ensure-sessions-mode)
+  (let ((targets (claude-code--target-sessions 'alive)))
+    (if (null targets)
+        (user-error "No alive session selected")
+      (claude-code--act-on targets #'claude-code-detach "Detached"))))
+
 (defun claude-code-sessions-delete ()
   "Delete the marked dead sessions, or the one at point."
   (interactive nil claude-code-sessions-mode)
@@ -2566,6 +2591,7 @@ rather than wrapping them a second time.
   "TAB" #'claude-code-sessions-toggle-group
   "c"   #'claude-code-spawn-menu
   "k"   #'claude-code-sessions-kill
+  "x"   #'claude-code-sessions-detach
   "d"   #'claude-code-sessions-delete
   "r"   #'claude-code-sessions-rename
   "i"   #'claude-code-sessions-interrupt

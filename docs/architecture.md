@@ -11,7 +11,7 @@ dtach adapter     how a detachable instance is held on its host
         │
 Model             claude-code-session structs, the sessions query, process usage
         │  structs only
-Operations        spawn / resume / kill / delete / rename / send / interrupt / export
+Operations        spawn / resume / kill / detach / delete / rename / send / interrupt / export
         │
 Notifications     an instance asking for attention -> claude-code-notify-function
         │
@@ -20,7 +20,7 @@ View              claude-code-sessions-mode + transcripts + create menu + claude
 
 ## Model / view separation
 
-Every fundamental capability is a plain function usable from Elisp without the UI: `claude-code-spawn`, `claude-code-resume`, `claude-code-kill`, `claude-code-delete`, `claude-code-rename`, `claude-code-send-text`, `claude-code-interrupt`, `claude-code-export-transcript`, and the query `claude-code-project-sessions`. The view is a thin presentation and command layer over these.
+Every fundamental capability is a plain function usable from Elisp without the UI: `claude-code-spawn`, `claude-code-resume`, `claude-code-kill`, `claude-code-detach`, `claude-code-delete`, `claude-code-rename`, `claude-code-send-text`, `claude-code-interrupt`, `claude-code-export-transcript`, and the query `claude-code-project-sessions`. The view is a thin presentation and command layer over these.
 
 ## Storage-adapter boundary
 
@@ -55,7 +55,7 @@ Registering an instance is also what wires up its removal: `claude-code--registe
 
 ### Detachable instances
 
-Two verbs act on an instance, and they differ in what they end. **Kill** ends the process. **Close** ends the buffer — `kill-buffer`, `C-x k`, Emacs exiting, a TRAMP connection dropping — and the process goes with it unless the instance is *detachable*: launched under `dtach` on its host, which holds its terminal in place of Emacs. Closing a detachable instance's buffer leaves it running, and with no buffer in Emacs it is an [external](glossary.md) session like any `claude` in another terminal. `claude-code--on-buffer-kill` says so when a buffer closes on one that runs.
+Two verbs act on an instance, and they differ in what they end. **Kill** ends the process. **Close** ends the buffer — `kill-buffer`, `C-x k`, Emacs exiting, a TRAMP connection dropping — and the process goes with it unless the instance is *detachable*: launched under `dtach` on its host, which holds its terminal in place of Emacs. Closing a detachable instance's buffer leaves it running, and with no buffer in Emacs it is an [external](glossary.md) session like any `claude` in another terminal. `claude-code--on-buffer-kill` says so when a buffer closes on one that runs, and `claude-code-detach` (`x` in the view) closes one on purpose, refusing an instance that is not detachable, which closing would kill.
 
 `claude-code-detachable` decides which launches are detachable (`remote`, `t` or `nil`), and `claude-code-spawn` and `claude-code-resume` take `:detachable` over it. The launch wraps the reporting command in `claude-code--holding-command`: a `/bin/sh` on the host makes a directory of the user's own, mode 0700 — `$XDG_RUNTIME_DIR/claude-code`, or `/tmp/claude-code-<uid>` without one — and `exec`s `dtach -c` with a socket of a fresh random name in it. dtach's detach and suspend keys are off, so every key reaches Claude. The terminal Ghostel runs the script in is dtach's first client, which is what answers the probes Claude sends its terminal at startup, OSC 7501 status among them. A `claude-code-dtach` the host lacks refuses the launch before anything starts.
 
@@ -130,7 +130,7 @@ A row is one line and a [recap](glossary.md#recap) is a paragraph, so the recap 
 
 `t` shows the [export](#exporting-a-transcript) of a row's transcript in `*claude-transcript: <name>*`, a `claude-code-transcript-mode` buffer, one per session and found by its id the way a view is found by its project. The buffer is displayed at once, beside the view and without selecting it, so a run of rows is read by moving through the view: another row's transcript takes the window an earlier one holds (`display-buffer-reuse-mode-window`), and only the first splits the view's window to the right. The text arrives some 0.3 s later, with `:exporting` in the mode line until it does. `t` again, or `g` in the buffer, exports afresh and abandons an export the buffer still awaits; killing the buffer abandons it too. Every window showing the buffer keeps its place through the new text (`claude-code--transcript-fill`): one at the end stays at the end, at the conversation's latest, and any other keeps its line and column, where `erase-buffer` alone would send each window but the selected one to the top. A failed export is reported in the echo area and leaves the text there was. Claude wraps the text at 80 columns, so the buffer truncates lines rather than wrapping them a second time.
 
-Spawn, resume, kill and delete change which sessions exist, so they redraw through `claude-code--refresh-views`; kill and delete also retire the marks they consumed through `claude-code--drop-marks`. `claude-code--refresh-views` and `claude-code--drop-marks` each cover **every** view whether or not it is displayed: no view owns a session (per the [session model](#the-session-model) above), so any of them can be holding the row a command just changed, or a spent mark. Each view recomputes independently. `g`, `TAB` and `G` change one view's own presentation only, and redraw that buffer alone.
+Spawn, resume, kill, detach and delete change which sessions exist or where they run, so they redraw through `claude-code--refresh-views`; kill, detach and delete also retire the marks they consumed through `claude-code--drop-marks`. `claude-code--refresh-views` and `claude-code--drop-marks` each cover **every** view whether or not it is displayed: no view owns a session (per the [session model](#the-session-model) above), so any of them can be holding the row a command just changed, or a spent mark. Each view recomputes independently. `g`, `TAB` and `G` change one view's own presentation only, and redraw that buffer alone.
 
 Each redraw goes through `claude-code--redraw`, which is what makes it the place to say where the cursor lands. `tabulated-list-print` puts point back on the row it was on, by session id, and at the top of the buffer when that row is no longer printed — a session just deleted, or one a fold hides. A caller that acted on a group says so and that outranks the row: `claude-code-sessions-toggle-group` names the group it folded, which is what makes `TAB TAB` fold and unfold in place.
 
