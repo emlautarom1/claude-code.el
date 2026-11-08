@@ -81,6 +81,24 @@ has to run under the PID it was started with: that PID is what names the
 instance."
   :type 'string)
 
+(defcustom claude-code-detachable nil
+  "Which new instances are detachable.
+A detachable instance runs under `claude-code-dtach' on its host, so closing its
+buffer -- `kill-buffer', Emacs exiting, the connection dropping -- leaves it
+running as an external session; only killing it ends it.  It is never wired to
+the MCP server.  `remote' makes an instance in a remote directory detachable,
+t every instance, and nil none.  `claude-code-spawn' and `claude-code-resume'
+take their default from here."
+  :type '(choice (const :tag "Remote instances" remote)
+                 (const :tag "Every instance" t)
+                 (const :tag "None" nil)))
+
+(defcustom claude-code-dtach "dtach"
+  "Executable a detachable instance runs under.
+Searched for on the instance's host as `claude-code-cli' is; a launch that
+cannot find it is refused."
+  :type 'string)
+
 (defcustom claude-code-config-dir
   (let ((env (getenv "CLAUDE_CONFIG_DIR")))
     (if (member env '(nil "")) (expand-file-name "~/.claude") env))
@@ -457,6 +475,36 @@ nil when Claude sent none."
   (when-let* ((record (cdr (assoc "" (buffer-local-value 'ghostel-program-status
                                                          buffer)))))
     (cons (plist-get record :state) (plist-get record :msg))))
+
+
+;;;; dtach adapter
+;;
+;; How a detachable instance is held on its host: the `dtach' master that owns
+;; its terminal, and the socket a client attaches through.
+
+(defconst claude-code--holding-script
+  (concat
+   "if [ -n \"$XDG_RUNTIME_DIR\" ]; then d=$XDG_RUNTIME_DIR/claude-code;"
+   " else d=/tmp/claude-code-$(id -u); fi;"
+   " (umask 077; mkdir -p \"$d\") && [ -O \"$d\" ] && [ ! -L \"$d\" ]"
+   " && chmod 700 \"$d\""
+   " || { printf 'claude-code: cannot hold instances in %s\\n' \"$d\" >&2;"
+   " exit 1; };"
+   " n=$1; shift; exec \"$0\" -c \"$d/$n\" -E -z -r ctrl_l \"$@\"")
+  "The `/bin/sh' script starting a detachable instance under dtach.
+Called with dtach as $0, the socket's name, and the command.  The socket lives
+in a directory of the user's own, mode 0700, under `$XDG_RUNTIME_DIR' or in
+`/tmp'.  The master runs the command and attaches the terminal running the
+script, so that terminal answers what Claude asks of it at startup.  dtach's
+detach and suspend keys are off, leaving every key to Claude, and a client
+attaching asks Claude to redraw with a Ctrl-L.")
+
+(defun claude-code--holding-command (dtach command)
+  "Return COMMAND run as a detachable instance under the DTACH program.
+The socket gets a fresh random name."
+  (append (list "/bin/sh" "-c" claude-code--holding-script
+                dtach (claude-code--new-uuid))
+          command))
 
 
 ;;;; Model
@@ -1012,11 +1060,16 @@ handlers behind it nor the `kill-buffer' this may be running inside.")
 
 (defun claude-code--on-buffer-kill ()
   "Unregister the instance hosted in the buffer being killed.
-An instance shares its buffer's lifetime, so this buffer-local
-`kill-buffer-hook' is the one report of one ending.  A terminal this package
+This buffer-local `kill-buffer-hook' is the one report of a buffer closing: a
+non-detachable instance ends with it, and a detachable one closed while it runs
+goes on as an external session, which is announced.  A terminal this package
 does not manage retires nothing, and `claude-code-last-instance-exit-hook' runs
 only for the kill that removed the last entry."
-  (when (gethash (current-buffer) claude-code--managed)
+  (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
+    (when (and (plist-get entry :detachable)
+               (claude-code--session-process (current-buffer)))
+      (message "Detached %s: its instance runs on as an external session"
+               (buffer-name)))
     (remhash (current-buffer) claude-code--managed)
     (when (zerop (hash-table-count claude-code--managed))
       (run-hook-wrapped 'claude-code-last-instance-exit-hook
@@ -1027,20 +1080,21 @@ only for the kill that removed the last entry."
                                       handler err)))
                           nil)))))
 
-(defun claude-code--register (id buffer origin worktree)
+(defun claude-code--register (id buffer origin worktree &optional detachable)
   "Record the instance BUFFER hosts, launched on session ID from ORIGIN.
 Stored under :worktree is the name of a named WORKTREE request, nil otherwise
 -- an auto-named one has no name to show until Claude writes the transcript
-that carries it.  Registering a live BUFFER also wires up the entry's removal:
-BUFFER is made to die with its process, so its kill is the one event that
-retires the entry."
+that carries it -- and under :detachable whether the instance is DETACHABLE.
+Registering a live BUFFER also wires up the entry's removal: BUFFER is made to
+die with its process, so its kill is the one event that retires the entry."
   (with-current-buffer buffer
     (setq-local ghostel-kill-buffer-on-exit t)
     (add-hook 'kill-buffer-hook #'claude-code--on-buffer-kill nil t))
   (puthash buffer
            (list :origin origin
                  :worktree (and (stringp worktree) worktree)
-                 :session id)
+                 :session id
+                 :detachable detachable)
            claude-code--managed))
 
 (defun claude-code--buffer (session)
@@ -1113,17 +1167,19 @@ then `exec's PROGRAM under that PID."
                 program)
           args))
 
-(defun claude-code--launch (id project-root &rest opts)
+(defun claude-code--launch (id project-root detachable &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
-origin.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort' as
+origin, and a non-nil DETACHABLE makes the instance detachable.  OPTS are
+`:prompt', `:name', `:worktree', `:model' and `:effort' as
 `claude-code--build-args' takes them, or `:resume' ID to resume that session
 rather than start it, which `:worktree' may accompany; the `:worktree' request
 is also recorded in the registry.
-The instance is launched through `claude-code--reporting-command', with
-`CLAUDE_CONFIG_DIR' as `claude-code--config-env' has it, on
-`claude-code-renderer' when it names one, and with the arguments and
-environment `claude-code--mcp-wiring' asks for."
+The instance is launched through `claude-code--reporting-command', under
+`claude-code--holding-command' when detachable, with `CLAUDE_CONFIG_DIR' as
+`claude-code--config-env' has it, on `claude-code-renderer' when it names one,
+and, unless detachable, with the arguments and environment
+`claude-code--mcp-wiring' asks for."
   (require 'ghostel)
   (require 'claude-code-mcp)
   (let* (;; Resolved first so a bad value aborts before a buffer is created or
@@ -1132,14 +1188,19 @@ environment `claude-code--mcp-wiring' asks for."
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
          (program (claude-code--resolve-executable claude-code-cli))
+         (dtach (and detachable
+                     (claude-code--resolve-executable claude-code-dtach)))
          (config (claude-code--config-env (file-remote-p root)))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
-         (mcp (claude-code--mcp-wiring buffer))
+         (mcp (unless detachable (claude-code--mcp-wiring buffer)))
          (command (claude-code--reporting-command
                    program
                    (append (car mcp)
                            (apply #'claude-code--build-args :session-id id opts))))
+         (command (if dtach
+                      (claude-code--holding-command dtach command)
+                    command))
          (env (append renderer-env
                       (list (cons "CLAUDE_CONFIG_DIR" config))
                       (cdr mcp)))
@@ -1155,12 +1216,21 @@ environment `claude-code--mcp-wiring' asks for."
       (set-default 'ghostel-pre-spawn-hook
                    (delq env-hook (default-value 'ghostel-pre-spawn-hook))))
     (claude-code--install-notifications buffer)
-    (claude-code--register id buffer root (plist-get opts :worktree))
+    (claude-code--register id buffer root (plist-get opts :worktree)
+                           (and detachable t))
     buffer))
+
+(defun claude-code--detachable-default (root)
+  "Return whether `claude-code-detachable' makes an instance in ROOT detachable."
+  (pcase claude-code-detachable
+    ('remote (and (file-remote-p root) t))
+    (value (and value t))))
 
 ;;;###autoload
 (cl-defun claude-code-spawn (project-root
-                             &key prompt name worktree model effort)
+                             &key prompt name worktree model effort
+                             (detachable (claude-code--detachable-default
+                                          project-root)))
   "Spawn a new Claude Code instance for PROJECT-ROOT; return (ID . BUFFER).
 ID is the generated session id -- a session's only durable name, and what a
 caller needs to find the session again once Claude renames BUFFER after its
@@ -1169,14 +1239,16 @@ display name, which the sessions view shows in place of any title Claude
 generates for it.
 WORKTREE requests a git worktree: t for an auto-named one, or a string to
 name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
-\"max\")."
+\"max\").  DETACHABLE makes the instance detachable, defaulting to what
+`claude-code-detachable' says for PROJECT-ROOT."
   (let ((id (claude-code--new-uuid)))
-    (cons id (claude-code--launch id project-root
+    (cons id (claude-code--launch id project-root detachable
                                   :prompt prompt :name name :worktree worktree
                                   :model model :effort effort))))
 
-(defun claude-code--resume (root id binding)
+(defun claude-code--resume (root id binding detachable)
   "Resume session ID under ROOT with worktree BINDING; return its buffer.
+A new instance is detachable when DETACHABLE is non-nil.
 The one resume path: `claude-code-resume' reads BINDING off disk for a caller
 holding nothing but an id, while a caller holding a `claude-code-session' hands
 over the one it already has.  A binding that went stale between the two costs
@@ -1188,38 +1260,55 @@ documents."
      ((bufferp runner) runner)
      (runner (user-error "Session %s is running outside Emacs" id))
      (t (claude-code--launch
-         id root :resume id
+         id root detachable :resume id
          :worktree (claude-code--resume-worktree
                     (claude-code--normalize-root root) binding))))))
 
 ;;;###autoload
-(defun claude-code-resume (project-root id)
+(cl-defun claude-code-resume (project-root id
+                              &key (detachable (claude-code--detachable-default
+                                                project-root)))
   "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
 The instance is launched from PROJECT-ROOT and lands wherever the session was
 working, `claude-code--resume-worktree' naming the worktree Claude has
-forgotten.  When an instance Emacs manages already runs ID, return that
-instance's buffer rather than starting a second `claude' for the same session.
-Refuses a session a `claude' outside Emacs is running."
+forgotten.  DETACHABLE makes it detachable, defaulting to what
+`claude-code-detachable' says for PROJECT-ROOT.  When an instance Emacs
+manages already runs ID, return that instance's buffer rather than starting a
+second `claude' for the same session.  Refuses a session a `claude' outside
+Emacs is running."
   (let ((root (claude-code--normalize-root project-root)))
     (claude-code--resume
      project-root id
-     (plist-get (claude-code--transcript-for root id) :worktree-binding))))
+     (plist-get (claude-code--transcript-for root id) :worktree-binding)
+     detachable)))
 
 (defun claude-code-kill (session)
   "Kill the process running SESSION, leaving the session dead.
-An alive session's instance goes with its buffer, the one SESSION names: killing
-the buffer is what unregisters, so a session rehosted since SESSION was built
-keeps the registration its new buffer holds.  An external session's process is
-sent SIGTERM on the host of its transcript, found by id when called: a session
-that has stopped since SESSION was built is refused, and so is one an instance
-Emacs manages has resumed since, which only that instance's alive row kills."
+An alive session's instance is the one in the buffer SESSION names, so a session
+rehosted since SESSION was built keeps the instance its new buffer holds.  A
+non-detachable instance goes with its buffer, and a detachable one, which would
+outlive it, is sent SIGTERM on its host; its buffer closes once it has exited.
+An external session's process is sent SIGTERM on the host of its transcript,
+found by id when called: a session that has stopped since SESSION was built is
+refused, and so is one an instance Emacs manages has resumed since, which only
+that instance's alive row kills."
   (let ((id (claude-code-session-id session)))
     (cond
      ((claude-code-session-alive-p session)
-      (let ((buffer (claude-code-session-buffer session)))
-        (when (buffer-live-p buffer)
-          (let ((kill-buffer-query-functions nil))
-            (kill-buffer buffer)))))
+      (let* ((buffer (claude-code-session-buffer session))
+             (entry (and (buffer-live-p buffer)
+                         (gethash buffer claude-code--managed))))
+        (cond
+         ((not (plist-get entry :detachable))
+          (when (buffer-live-p buffer)
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer buffer))))
+         ((not (claude-code--instance-pid buffer))
+          (user-error "Session %s has not reported its process yet" id))
+         ((not (zerop (signal-process (claude-code--instance-pid buffer)
+                                      'SIGTERM (claude-code--entry-host entry))))
+          (user-error "Could not signal process %d of session %s"
+                      (claude-code--instance-pid buffer) id)))))
      ((not (claude-code-session-external-p session))
       (user-error "Session %s is not running" id))
      (t
@@ -2219,7 +2308,8 @@ The instance the row was drawn for is shown while it runs, even once a
                    (claude-code--resume
                     claude-code--project
                     (claude-code-session-id session)
-                    (claude-code-session-worktree-binding session)))))
+                    (claude-code-session-worktree-binding session)
+                    (claude-code--detachable-default claude-code--project)))))
     (unless (and (eq buffer drawn)
                  (equal (plist-get (claude-code--instance-entry buffer) :session)
                         (claude-code-session-id session)))

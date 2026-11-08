@@ -16,6 +16,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
 - **Renderer override** — `claude-code-renderer` puts instances on the `inline` renderer, where the conversation lands in the Emacs buffer and the mouse stays Emacs's, or on `fullscreen`, whatever your `tui` setting says; it defaults to leaving that choice to Claude. See [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance that finishes a turn, waits on you, or fails raises a desktop notification named after the session, saying how long the turn took, what it waits on, or what went wrong; clicking it brings Emacs forward, switching workspace if needed, and goes to that instance, in the tab or frame already showing it, or pops it into view. An instance already on screen in a focused frame stays quiet, and a notification closes once you see the instance, deal with what it announced, or the instance exits. Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
+- **Detachable instances** — with `claude-code-detachable`, an instance runs under `dtach` on its host, so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills.
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -25,6 +26,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - [Ghostel](https://github.com/dakra/ghostel) — hosts each instance's terminal. Loaded lazily, so the package byte-compiles and tests without its native module.
 - [`web-server`](https://github.com/eschulte/emacs-web-server) — HTTP transport for the MCP server.
 - The `claude` CLI on your `PATH`
+- For detachable instances: [`dtach`](https://github.com/crigler/dtach) on the host they run on
 - For desktop notifications: an Emacs built with D-Bus, and a notification daemon. Verified on GNOME, where a click raises Emacs and shows the instance but does not hand over the keyboard — you click once to start typing. Other daemons dispatch a click differently and are not covered yet.
 
 ## Install

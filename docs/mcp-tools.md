@@ -48,4 +48,4 @@ The tool returns the id `claude-code-spawn` generates, which is the only durable
 
 The instance takes no window of its own. Displaying one is the view's business — `claude-code-spawn` shows nothing by itself, and the display a user sees comes from the create menu — so a tool-driven spawn leaves the window layout alone. The sessions views are deliberately not refreshed either: a spawn the user did not ask for should not reprint a view they may be working in, so new rows appear on their next refresh (`g`). Nothing after the launch can fail, so an error the caller sees never leaves a live instance behind it.
 
-The instance it starts is pre-authorized for the catalog like any other, this tool included — what that costs is the [threat model](architecture.md#decisions)'s subject.
+The instance is detachable when `claude-code-detachable` makes one in the caller's directory so, and a detachable instance is wired to no MCP server. Otherwise the instance it starts is pre-authorized for the catalog like any other, this tool included — what that costs is the [threat model](architecture.md#decisions)'s subject.

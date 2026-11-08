@@ -16,6 +16,10 @@ Terms used throughout `claude-code.el` and its documentation. They are chosen to
 
 - **Managed instance** — an instance this package launched and tracks (it has an instance buffer in Emacs). Only managed instances make a session *alive* in the view.
 
+- **Kill** / **close** — killing an instance ends its process; closing it ends its instance buffer (`kill-buffer`, Emacs exiting, a dropped TRAMP connection). Closing ends the process too, unless the instance is detachable.
+
+- **Detachable instance** — an instance run under `dtach` on its host, so that closing its buffer leaves it running as an *external* session. `claude-code-detachable` decides which instances are (see [the architecture notes](architecture.md#detachable-instances)).
+
 A session's *liveness* is one of three states — *alive*, *external*, or *dead*:
 
 - **Alive session** — a session with a live managed instance. Its **status** is Claude's native value:

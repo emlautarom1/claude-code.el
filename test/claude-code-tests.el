@@ -1707,6 +1707,165 @@ as Ghostel dispatches an OSC 52 eval."
           ;; Nothing the terminal shows later is evaluated.
           (should-not ghostel-eval-cmds))))))
 
+(defmacro claude-code-tests--holding (spec &rest body)
+  "Run BODY with a scratch runtime dir and a dtach that records its arguments.
+SPEC is (RUNTIME DTACH ARGS): RUNTIME is bound to a fresh directory that
+`$XDG_RUNTIME_DIR' names, DTACH to an executable that writes each argument it
+gets on a line of the file ARGS, then runs the command behind dtach's six."
+  (declare (indent 1))
+  (pcase-let ((`(,runtime ,dtach ,args) spec))
+    `(ert-with-temp-directory ,runtime
+       (let* ((,dtach (expand-file-name "dtach" ,runtime))
+              (,args (expand-file-name "args" ,runtime))
+              (process-environment
+               (append (list (concat "XDG_RUNTIME_DIR="
+                                     (directory-file-name ,runtime))
+                             (concat "CC_ARGS=" ,args))
+                       process-environment)))
+         (write-region (concat "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CC_ARGS\"\n"
+                               "shift 6\nexec \"$@\"\n")
+                       nil ,dtach)
+         (set-file-modes ,dtach #o700)
+         ,@body))))
+
+(ert-deftest claude-code-test-holding-command ()
+  "A detachable instance runs under dtach, on a socket in a directory of its own.
+dtach gets the socket in `$XDG_RUNTIME_DIR/claude-code', made mode 0700, with
+its detach and suspend keys off and a Ctrl-L redraw on attach.  The command
+runs with Emacs's own umask, not the one that made the directory."
+  (claude-code-tests--holding (runtime dtach args)
+    (let ((output (with-temp-buffer
+                    (let ((command (claude-code--holding-command
+                                    dtach '("/bin/sh" "-c" "umask"))))
+                      (apply #'call-process (car command) nil t nil
+                             (cdr command)))
+                    (buffer-string)))
+          (dir (expand-file-name "claude-code" runtime)))
+      (should (= (string-to-number output 8)
+                 (logand #o777 (lognot (default-file-modes)))))
+      (should (= (file-modes dir) #o700))
+      (pcase-let ((`(,c ,socket . ,flags)
+                   (with-temp-buffer
+                     (insert-file-contents args)
+                     (split-string (buffer-string) "\n" t))))
+        (should (equal c "-c"))
+        (should (equal (file-name-directory socket)
+                       (file-name-as-directory dir)))
+        (should (string-match-p claude-code-tests--uuid-re
+                                (file-name-nondirectory socket)))
+        (should (equal flags '("-E" "-z" "-r" "ctrl_l" "/bin/sh" "-c" "umask")))))))
+
+(ert-deftest claude-code-test-holding-command-refuses-a-directory-not-its-own ()
+  "A socket directory that is a symlink is not used, and dtach never runs.
+Another user could have planted it, and every socket in it attaches a terminal
+running Claude."
+  (claude-code-tests--holding (runtime dtach args)
+    (let ((elsewhere (make-temp-file "cc-elsewhere" t)))
+      (unwind-protect
+          (progn
+            (make-symbolic-link elsewhere (expand-file-name "claude-code" runtime))
+            (let ((command (claude-code--holding-command dtach '("true"))))
+              (should (= (apply #'call-process (car command) nil nil nil
+                                (cdr command))
+                         1)))
+            (should-not (file-exists-p args)))
+        (delete-directory elsewhere t)))))
+
+(ert-deftest claude-code-test-launch-holds-a-detachable-instance ()
+  "A detachable launch runs the reporting command under dtach, wired to no MCP.
+The instance is registered as detachable, and a dtach the host lacks refuses
+the launch before anything starts."
+  (claude-code-tests--with-registry
+    (let ((execs '())
+          (raw nil)
+          (mcp-calls 0)
+          (claude-code-cli "claude")
+          (claude-code-dtach "dtach"))
+      (claude-code-tests--recording-launch execs
+        (let ((recorded (symbol-function 'ghostel-exec)))
+          (cl-letf (((symbol-function 'ghostel-exec)
+                     (lambda (buffer program args)
+                       (setq raw (cons program args))
+                       (funcall recorded buffer program args)))
+                    ((symbol-function 'claude-code--mcp-wiring)
+                     (lambda (_buffer) (cl-incf mcp-calls) nil)))
+            (pcase-let ((`(,id . ,buffer) (claude-code-spawn "/r" :detachable t)))
+              (should (equal (seq-take raw 4)
+                             (list "/bin/sh" "-c" claude-code--holding-script
+                                   "dtach")))
+              (should (equal (nthcdr 5 raw)
+                             (claude-code--reporting-command
+                              "claude" (list "--session-id" id))))
+              (should (zerop mcp-calls))
+              (should (plist-get (gethash buffer claude-code--managed)
+                                 :detachable)))
+            ;; Not detachable: no dtach, and MCP is wired as ever.
+            (claude-code-spawn "/r" :detachable nil)
+            (should (equal (car raw) "/bin/sh"))
+            (should-not (member "dtach" raw))
+            (should (= mcp-calls 1))
+            (setq execs nil)
+            (cl-letf (((symbol-function 'claude-code--resolve-executable)
+                       (lambda (program)
+                         (if (equal program "dtach")
+                             (user-error "Cannot find `dtach'")
+                           program))))
+              (should-error (claude-code-spawn "/r" :detachable t)
+                            :type 'user-error))
+            (should-not execs)))))))
+
+(ert-deftest claude-code-test-detachable-default ()
+  "`claude-code-detachable' decides, per host, whether an instance is detachable.
+An explicit keyword outranks it."
+  (dolist (case '((remote "/r" nil) (remote "/ssh:box:/r" t)
+                  (t "/r" t) (t "/ssh:box:/r" t)
+                  (nil "/r" nil) (nil "/ssh:box:/r" nil)))
+    (pcase-let ((`(,option ,root ,expected) case))
+      (let ((claude-code-detachable option))
+        (should (eq (claude-code--detachable-default root) expected)))))
+  (let ((claude-code-detachable t)
+        (seen '()))
+    (cl-letf (((symbol-function 'claude-code--launch)
+               (lambda (_id _root detachable &rest _) (push detachable seen))))
+      (claude-code-spawn "/r")
+      (claude-code-spawn "/r" :detachable nil))
+    (should (equal seen '(nil t)))))
+
+(ert-deftest claude-code-test-kill-signals-a-detachable-instance ()
+  "Killing an alive detachable instance signals it, since its buffer would not.
+Closing the buffer only detaches it, so its process is sent SIGTERM on its host
+and the buffer stays until the instance exits.  One that has not reported its
+PID yet cannot be signalled, and is refused."
+  (claude-code-tests--with-managed-buffer (buf 77)
+    (claude-code--register "d" buf "/ssh:box:/r" nil t)
+    (let ((signals '())
+          (session (claude-code-session--create :id "d" :alive-p t :buffer buf)))
+      (claude-code-tests--signalling signals 0
+        (claude-code-kill session)
+        (should (equal signals '((77 SIGTERM "/ssh:box:"))))
+        (should (buffer-live-p buf))
+        (with-current-buffer buf (setq-local claude-code--pid nil))
+        (should-error (claude-code-kill session) :type 'user-error)))))
+
+(ert-deftest claude-code-test-closing-a-detachable-instance-announces-it ()
+  "Closing a running detachable instance's buffer unregisters it and says so.
+Its instance runs on, so the user learns where it went; a non-detachable one
+ends with its buffer and says nothing."
+  (let ((reported '()))
+    (cl-letf (((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) reported)))
+              ((symbol-function 'claude-code--session-process) #'identity))
+      (claude-code-tests--with-managed-buffer buf
+        (claude-code--register "d" buf "/r" nil t)
+        (kill-buffer buf)
+        (should (zerop (hash-table-count claude-code--managed))))
+      (should (string-match-p "runs on as an external session" (car reported)))
+      (setq reported '())
+      (claude-code-tests--with-managed-buffer buf
+        (claude-code--register "n" buf "/r" nil)
+        (kill-buffer buf))
+      (should-not reported))))
+
 (ert-deftest claude-code-test-launch-reports-the-pid ()
   "A launch runs the CLI behind the wrapper that reports its PID."
   (claude-code-tests--with-registry
@@ -3987,7 +4146,7 @@ An external row is refused by the model alone
                 ((symbol-function 'claude-code--session-process)
                  (lambda (b) (eq b terminal)))
                 ((symbol-function 'claude-code--resume)
-                 (lambda (root id b)
+                 (lambda (root id b _detachable)
                    (push (list 'resume root id b) calls) terminal))
                 ((symbol-function 'claude-code--show)
                  (lambda (b &rest _) (push (list 'show b) calls)))

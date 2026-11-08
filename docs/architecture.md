@@ -1,12 +1,14 @@
 # Architecture
 
-The package is two files. `claude-code.el` is the core, organized as six layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
+The package is two files. `claude-code.el` is the core, organized as seven layers, top to bottom in the source; each layer only depends on the ones above it. `claude-code-mcp.el` is a self-contained addition (the [MCP server](#mcp-server)) that sits beside the core: it `require`s `claude-code.el` at load, while the core loads *it* lazily from the spawn path and `declare-function`s its single entry point, so the dependency stays one-way and acyclic.
 
 ```
 Storage adapter   ~/.claude parsing + cwd encoding   (Claude internals live here)
         │  returns plain data
 Ghostel adapter   an instance's program status records
         │  returns plain data
+dtach adapter     how a detachable instance is held on its host
+        │
 Model             claude-code-session structs, the sessions query, process usage
         │  structs only
 Operations        spawn / resume / kill / delete / rename / send / interrupt / export
@@ -24,7 +26,7 @@ Every fundamental capability is a plain function usable from Elisp without the U
 
 All knowledge of Claude's on-disk formats is quarantined in the *Storage adapter* section (see [`storage-model.md`](storage-model.md)). It exposes only plain data — hashes and plists — so a format change is a single-section fix and never ripples through the model, operations, or view.
 
-The *Ghostel adapter* section holds the reads of the program status records Ghostel keeps for an instance; the status hooks receive those records from Ghostel as they change.
+The *Ghostel adapter* section holds the reads of the program status records Ghostel keeps for an instance; the status hooks receive those records from Ghostel as they change. The *dtach adapter* section holds what holding a [detachable instance](#detachable-instances) takes of the `dtach` program.
 
 ## The session model
 
@@ -49,7 +51,15 @@ The struct holds the transcript's raw name sources (the `title` and the last pro
 
 `claude-code-spawn` / `claude-code-resume` create a Ghostel buffer and record it in `claude-code--managed` under that buffer. The instance's PID is the one the launch wrapper reports before it `exec`s the CLI (`claude-code--reporting-command`). A spawn generates the session id, so it hands back `(ID . BUFFER)`: the buffer is renamed after Claude's terminal title, leaving the id as the caller's only stable handle on what it just started.
 
-Registering an instance is also what wires up its removal, and it does so by making the instance and its buffer share a lifetime: `claude-code--register` sets `ghostel-kill-buffer-on-exit` buffer-locally, so Ghostel kills the buffer the moment the process exits, whatever the user's global preference. Every way an instance can end therefore passes through `kill-buffer`, and a buffer-local `kill-buffer-hook` (`claude-code--on-buffer-kill`) is the single event that retires the entry — for a process that exited, for `claude-code-kill`, and for a user's own `C-x k` alike. Only the kill that removes the last entry runs `claude-code-last-instance-exit-hook`, whose handlers are individually shielded (see its docstring). Once the entry is gone the session naturally becomes dead on the next query.
+Registering an instance is also what wires up its removal: `claude-code--register` sets `ghostel-kill-buffer-on-exit` buffer-locally, so Ghostel kills the buffer the moment the process exits, whatever the user's global preference. Every way an instance's buffer can close therefore passes through `kill-buffer`, and a buffer-local `kill-buffer-hook` (`claude-code--on-buffer-kill`) is the single event that retires the entry — for a process that exited, for `claude-code-kill`, and for a user's own `C-x k` alike. Only the kill that removes the last entry runs `claude-code-last-instance-exit-hook`, whose handlers are individually shielded (see its docstring). Once the entry is gone the session becomes dead on the next query — or external, for a detachable instance its buffer's close left running.
+
+### Detachable instances
+
+Two verbs act on an instance, and they differ in what they end. **Kill** ends the process. **Close** ends the buffer — `kill-buffer`, `C-x k`, Emacs exiting, a TRAMP connection dropping — and the process goes with it unless the instance is *detachable*: launched under `dtach` on its host, which holds its terminal in place of Emacs. Closing a detachable instance's buffer leaves it running, and with no buffer in Emacs it is an [external](glossary.md) session like any `claude` in another terminal. `claude-code--on-buffer-kill` says so when a buffer closes on one that runs.
+
+`claude-code-detachable` decides which launches are detachable (`remote`, `t` or `nil`), and `claude-code-spawn` and `claude-code-resume` take `:detachable` over it. The launch wraps the reporting command in `claude-code--holding-command`: a `/bin/sh` on the host makes a directory of the user's own, mode 0700 — `$XDG_RUNTIME_DIR/claude-code`, or `/tmp/claude-code-<uid>` without one — and `exec`s `dtach -c` with a socket of a fresh random name in it. dtach's detach and suspend keys are off, so every key reaches Claude. The terminal Ghostel runs the script in is dtach's first client, which is what answers the probes Claude sends its terminal at startup, OSC 7501 status among them. A `claude-code-dtach` the host lacks refuses the launch before anything starts.
+
+`claude-code-kill` signals a detachable instance rather than closing its buffer, since closing it would only detach it: the PID the wrapper reported gets SIGTERM on its host, and the buffer closes once dtach reports the instance gone. A detachable instance is wired to no MCP server (see [Decision 9](#decisions)).
 
 ### Resource usage
 
@@ -190,6 +200,6 @@ All JSON crosses the wire through the C built-ins `json-serialize`/`json-parse-s
 
    A `0600` file passed as `--mcp-config <file>` would be readable by the same users as the environment, and would need cleaning up.
 
-   An instance in a remote directory gets no MCP at all (`claude-code--mcp-wiring`). A TRAMP method is how work is kept on another host, in a container or under another user, and wiring the instance would hand whatever controls that place a way to run Elisp here.
+   An instance in a remote directory gets no MCP at all (`claude-code--mcp-wiring`). A TRAMP method is how work is kept on another host, in a container or under another user, and wiring the instance would hand whatever controls that place a way to run Elisp here. Nor does a detachable instance: it outlives the Emacs that minted its token and the port it was told to call.
 
    Turn it off with `claude-code-mcp-enabled nil`, or drop auto-approval with `claude-code-mcp-auto-approve nil` (Claude then prompts per call).
