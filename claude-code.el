@@ -2799,15 +2799,17 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
                    (list (or (transient-scope) (claude-code--project-root))
                          (transient-args transient-current-command))
                  (list (claude-code--project-root))))
-  (let ((instance (claude-code-spawn
-                   root
-                   :name (transient-arg-value "--name=" args)
-                   :worktree (claude-code--args-worktree args)
-                   :model (transient-arg-value "--model=" args)
-                   :effort (transient-arg-value "--effort=" args)
-                   :detachable (if transient-current-command
-                                   (and (member "--detached" args) t)
-                                 (claude-code--detachable-default root)))))
+  (let ((instance (apply #'claude-code-spawn
+                         root
+                         :name (transient-arg-value "--name=" args)
+                         :worktree (claude-code--args-worktree args)
+                         :model (transient-arg-value "--model=" args)
+                         :effort (transient-arg-value "--effort=" args)
+                         ;; Only a live menu has a say; `claude-code-spawn'
+                         ;; defaults it otherwise.
+                         (and transient-current-command
+                              (list :detachable
+                                    (transient-arg-value "--detached" args))))))
     (claude-code--refresh-views)
     (claude-code--show (cdr instance))))
 

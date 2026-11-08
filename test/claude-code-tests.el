@@ -5240,8 +5240,7 @@ other buffer asks `project.el', which prompts when the buffer has no project."
         (let ((transient-current-command nil))
           (call-interactively #'claude-code--spawn-session))
         (should (equal spawn-args
-                       '("/r" :name nil :worktree nil :model nil :effort nil
-                         :detachable nil)))
+                       '("/r" :name nil :worktree nil :model nil :effort nil)))
         ;; With a menu live the root comes from its scope, not from whichever
         ;; buffer the suffix happens to run in.
         (let ((transient-current-command 'claude-code-spawn-menu))
@@ -5375,6 +5374,20 @@ pinned."
                    (list (claude-code--normalize-root "/home/test/proj")
                          :name nil :worktree "my.feat"
                          :model "opus" :effort nil :detachable nil)))))
+
+(ert-deftest claude-code-test-spawn-menu-seeds-the-worktree-and-detached ()
+  "A menu with both a worktree and `--detached' to seed opens on both."
+  (claude-code-tests--driving-spawn-menu spawns
+    (cl-letf (((symbol-function 'project-root)
+               (lambda (_project) "/home/test/proj/.claude/worktrees/my.feat")))
+      (let ((claude-code-detachable t))
+        (with-temp-buffer
+          (claude-code-spawn-menu)
+          (execute-kbd-macro (kbd "c")))))
+    (should (equal (car spawns)
+                   (list (claude-code--normalize-root "/home/test/proj")
+                         :name nil :worktree "my.feat"
+                         :model nil :effort nil :detachable t)))))
 
 (ert-deftest claude-code-test-spawn-menu-forgets-the-worktree ()
   "A worktree is spent on the session it spawns, and a seeded one is refusable.
