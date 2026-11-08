@@ -1847,6 +1847,168 @@ PID yet cannot be signalled, and is refused."
         (with-current-buffer buf (setq-local claude-code--pid nil))
         (should-error (claude-code-kill session) :type 'user-error)))))
 
+(defconst claude-code-tests--holder-socket
+  "/run/user/1000/claude-code/0b6f2c8e-1d2a-4c3b-9e4f-5a6b7c8d9e0f"
+  "A socket `claude-code--holding-script' could have named.")
+
+(defun claude-code-tests--master-args (socket)
+  "Return the command line of the dtach master holding an instance on SOCKET."
+  (concat "/usr/bin/dtach -c " socket " -E -z -r ctrl_l /bin/sh -c printf"
+          " '\\033]52;e;claude-code-pid %s\\a' $$; exec \"$0\" \"$@\" claude"))
+
+(ert-deftest claude-code-test-holder-socket ()
+  "A dtach master names its socket only when the holding command started it.
+Another master -- one the user started for a `claude' of their own, with its
+own flags -- holds nothing this package attaches to."
+  (let ((socket claude-code-tests--holder-socket)
+        (fallback "/tmp/claude-code-1000/0b6f2c8e-1d2a-4c3b-9e4f-5a6b7c8d9e0f"))
+    (should (equal (claude-code--holder-socket
+                    (claude-code-tests--master-args socket))
+                   socket))
+    (should (equal (claude-code--holder-socket
+                    (claude-code-tests--master-args fallback))
+                   fallback))
+    (should-not (claude-code--holder-socket
+                 (concat "dtach -c " socket " -z claude")))
+    (should-not (claude-code--holder-socket
+                 (claude-code-tests--master-args "/tmp/mine/claude.sock")))
+    (should-not (claude-code--holder-socket nil))))
+
+(defmacro claude-code-tests--with-processes (table &rest body)
+  "Run BODY with the process table TABLE, an alist of (PID PPID ARGS).
+Every pid in it is live, as is Emacs's own."
+  (declare (indent 1))
+  (let ((rows (gensym "rows")))
+    `(let ((,rows ,table))
+       (cl-letf (((symbol-function 'list-system-processes)
+                  (lambda () (cons (emacs-pid) (mapcar #'car ,rows))))
+                 ((symbol-function 'process-attributes)
+                  (lambda (pid)
+                    (when-let* ((row (assq pid ,rows)))
+                      (list (cons 'ppid (nth 1 row)) (cons 'args (nth 2 row)))))))
+         ,@body))))
+
+(ert-deftest claude-code-test-sessions-name-the-holder-of-a-detached-instance ()
+  "An external session a detachable instance runs is listed with its socket.
+Its process's parent is the dtach master, whose command line names it; any other
+external session, and every dead one, has none."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (claude-code-tests--with-processes
+          `((1002 900 "claude") (900 1 ,(claude-code-tests--master-args
+                                         claude-code-tests--holder-socket))
+            (1003 1 "claude"))
+        (let ((sessions (claude-code-project-sessions "/home/test/proj")))
+          (should (equal (claude-code-session-holder
+                          (claude-code-tests--find-session
+                           sessions "22222222-2222-4222-8222-222222222222"))
+                         claude-code-tests--holder-socket))
+          (should (equal (seq-count #'claude-code-session-holder sessions) 1)))))))
+
+(ert-deftest claude-code-test-attaching-command ()
+  "Attaching sets bracketed paste and focus reporting, then runs dtach's client.
+A real `/bin/sh' runs it, over a dtach that prints its arguments."
+  (claude-code-tests--with-executable dir "dtach"
+    (let ((dtach (expand-file-name "dtach" dir)))
+      (write-region "#!/bin/sh\nprintf '%s|' \"$@\"\n" nil dtach)
+      (let ((command (claude-code--attaching-command dtach "/run/s")))
+        (should (equal (with-temp-buffer
+                         (apply #'call-process (car command) nil t nil
+                                (cdr command))
+                         (buffer-string))
+                       "\e[?2004h\e[?1004h-a|/run/s|-E|-z|-r|ctrl_l|"))))))
+
+(defmacro claude-code-tests--attaching (execs &rest body)
+  "Run BODY with `ghostel-exec' stubbed to push (BUFFER PROGRAM ARGS) onto EXECS.
+The dtach of `claude-code-dtach' is launched as named, the socket every
+attach asks after exists, and every buffer an attach hosted is killed
+afterwards."
+  (declare (indent 1))
+  `(claude-code-tests--without-requiring '(ghostel)
+     (cl-letf (((symbol-function 'ghostel-exec)
+                (lambda (buffer program args)
+                  (with-current-buffer buffer (setq-local ghostel--process nil))
+                  (push (list buffer program args) ,execs)))
+               ((symbol-function 'claude-code--resolve-executable) #'identity)
+               ((symbol-function 'file-exists-p)
+                (lambda (f) (or (equal f claude-code-tests--holder-socket)
+                                (file-attributes f))))
+               (after-focus-change-function after-focus-change-function))
+       (unwind-protect (progn ,@body)
+         (dolist (exec ,execs)
+           (when (buffer-live-p (car exec)) (kill-buffer (car exec))))))))
+
+(ert-deftest claude-code-test-attach ()
+  "Attaching hosts a detachable instance's session in a new, registered buffer.
+The buffer runs dtach's client on the instance's socket, in the directory its
+sessions/ file names, and is named after the session.  It holds the instance's
+PID, and expects no report of it; the instance is detachable again."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (claude-code-tests--with-processes
+          `((1002 900 "claude") (900 1 ,(claude-code-tests--master-args
+                                         claude-code-tests--holder-socket)))
+        (let ((execs '())
+              (claude-code-dtach "dtach")
+              (id "22222222-2222-4222-8222-222222222222"))
+          (claude-code-tests--attaching execs
+            (let ((buffer (claude-code-attach "/home/test/proj" id)))
+              (pcase-let ((`(,exec-buffer ,program ,args) (car execs)))
+                (should (eq exec-buffer buffer))
+                (should (equal (cons program args)
+                               (claude-code--attaching-command
+                                "dtach" claude-code-tests--holder-socket))))
+              (with-current-buffer buffer
+                (should (eq major-mode 'claude-code-instance-mode))
+                (should (equal default-directory "/home/test/proj/"))
+                (should (eql claude-code--pid 1002))
+                (should-not ghostel-eval-cmds))
+              (should (string-prefix-p "*claude: " (buffer-name buffer)))
+              (let ((entry (gethash buffer claude-code--managed)))
+                (should (equal (plist-get entry :session) id))
+                (should (equal (plist-get entry :origin) "/home/test/proj"))
+                (should (plist-get entry :detachable))))))))))
+
+(ert-deftest claude-code-test-attach-refuses-what-it-cannot-attach ()
+  "Only a detachable instance whose socket is still there can be attached.
+A session no process runs, one a `claude' outside dtach runs, and one whose
+socket is gone are refused, and nothing is launched."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (let ((execs '())
+            (id "22222222-2222-4222-8222-222222222222")
+            (gone "/run/user/1000/claude-code/00000000-1d2a-4c3b-9e4f-5a6b7c8d9e0f"))
+        (claude-code-tests--attaching execs
+          (claude-code-tests--with-processes '()
+            (should-error (claude-code-attach "/home/test/proj" id)
+                          :type 'user-error))
+          (claude-code-tests--with-processes '((1002 1 "claude"))
+            (should-error (claude-code-attach "/home/test/proj" id)
+                          :type 'user-error))
+          (claude-code-tests--with-processes
+              `((1002 900 "claude") (900 1 ,(claude-code-tests--master-args gone)))
+            (should-error (claude-code-attach "/home/test/proj" id)
+                          :type 'user-error)))
+        (should-not execs)))))
+
+(ert-deftest claude-code-test-attachable-rows ()
+  "An attachable row's status is followed by the attach glyph.
+A collapsed group counts its attachable sessions in its header."
+  (let* ((attachable (claude-code-session--create :id "h" :external-p t
+                                                  :holder "/run/s"))
+         (other (claude-code-session--create :id "e" :external-p t))
+         (status (lambda (s)
+                   (substring-no-properties
+                    (aref (claude-code--format-session s nil (current-time))
+                          0)))))
+    (should (equal (funcall status attachable) "external ⇄"))
+    (should (equal (funcall status other) "external"))
+    (claude-code-tests--in-view
+      (should (string-match-p
+               "(2, 1 attachable)"
+               (claude-code--group-header "external" (list attachable other)
+                                          t))))))
+
 (ert-deftest claude-code-test-detach ()
   "Detaching closes a detachable instance's buffer and nothing else.
 Its process is not signalled, so the session goes on as an external one.  A
@@ -4189,9 +4351,9 @@ operation that would only refuse it."
       (should (equal (funcall ids 'dead) '("d"))))))
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
-  "RET shows a row's running instance, else what `claude-code--resume' returns.
-An external row is refused by the model alone
-\(`claude-code-test-resume-refuses-external')."
+  "RET shows a row's running instance, else what attaching or resuming returns.
+An attachable row is attached, and any other external row is refused by the
+model alone (`claude-code-test-resume-refuses-external')."
   (claude-code-tests--with-managed-buffer (terminal 70)
     (let* ((binding '(:name "feat" :path "/r/.claude/worktrees/feat" :bound nil))
            (alive (claude-code-session--create :id "a" :alive-p t :pid 70
@@ -4200,6 +4362,8 @@ An external row is refused by the model alone
                                                :buffer terminal))
            (stale (claude-code-session--create :id "s" :alive-p t :buffer 'exited))
            (external (claude-code-session--create :id "e" :external-p t))
+           (attachable (claude-code-session--create :id "h" :external-p t
+                                                    :holder "/run/s"))
            (dead (claude-code-session--create :id "d" :worktree-binding binding))
            (at-point nil) (calls '()))
       (cl-letf (((symbol-function 'claude-code--session-at-point)
@@ -4209,6 +4373,9 @@ An external row is refused by the model alone
                 ((symbol-function 'claude-code--resume)
                  (lambda (root id b _detachable)
                    (push (list 'resume root id b) calls) terminal))
+                ((symbol-function 'claude-code-attach)
+                 (lambda (root id)
+                   (push (list 'attach root id) calls) terminal))
                 ((symbol-function 'claude-code--show)
                  (lambda (b &rest _) (push (list 'show b) calls)))
                 ((symbol-function 'claude-code--refresh-views)
@@ -4242,6 +4409,11 @@ An external row is refused by the model alone
             (setq at-point external calls nil)
             (claude-code-sessions-visit)
             (should (equal (car (last calls)) '(resume "/r" "e" nil)))
+            ;; An attachable row is attached, and the views catch up.
+            (setq at-point attachable calls nil)
+            (claude-code-sessions-visit)
+            (should (equal (reverse calls)
+                           `((attach "/r" "h") (refresh) (show ,terminal))))
             ;; A dead row resumes, refreshes and displays.
             (setq at-point dead calls nil)
             (claude-code-sessions-visit)
@@ -5799,6 +5971,74 @@ the instance is still retired."
       (should-not asked)
       (should (zerop (hash-table-count claude-code--managed)))
       (should (= fired 1)))))
+
+(ert-deftest claude-code-test-integration-detach-and-attach ()
+  "A detachable instance outlives its buffer, is attached again, then killed.
+Real dtach and Ghostel hold a stand-in `claude' that files a sessions/ entry
+and a transcript as the CLI would, then sleeps under its PID."
+  (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
+  (skip-unless (executable-find "dtach"))
+  (require 'ghostel)
+  (ert-with-temp-directory dir
+    (let* ((root (directory-file-name (file-truename dir)))
+           (cli (expand-file-name "claude" dir))
+           (claude-code-cli cli)
+           (claude-code-config-dir (expand-file-name "config" dir))
+           (process-environment
+            (append (list (concat "XDG_RUNTIME_DIR=" root)
+                          (concat "CC_ENC=" (claude-code--encode-cwd root)))
+                    process-environment))
+           (after-focus-change-function after-focus-change-function)
+           (session (lambda (id)
+                      (claude-code-tests--find-session
+                       (claude-code-project-sessions root) id)))
+           pid)
+      (write-region
+       (concat "#!/bin/sh\nid=$2; c=$CLAUDE_CONFIG_DIR\n"
+               "mkdir -p \"$c/sessions\" \"$c/projects/$CC_ENC\"\n"
+               "printf '{\"type\":\"user\",\"entrypoint\":\"cli\",\"timestamp\":"
+               "\"2026-11-08T00:00:00.000Z\"}\\n' > \"$c/projects/$CC_ENC/$id.jsonl\"\n"
+               "printf '{\"pid\":%d,\"sessionId\":\"%s\",\"cwd\":\"%s\","
+               "\"status\":\"idle\"}' $$ \"$id\" \"$PWD\" > \"$c/sessions/$$.json\"\n"
+               "exec sleep 600\n")
+       nil cli)
+      (set-file-modes cli #o700)
+      (claude-code-tests--with-registry
+        (unwind-protect
+            (pcase-let ((`(,id . ,buffer)
+                         (claude-code-spawn root :detachable t)))
+              (should (claude-code-tests--await
+                       (lambda ()
+                         (when-let* ((reported (buffer-local-value
+                                                'claude-code--pid buffer)))
+                           (claude-code--pid-info reported)))
+                       10))
+              (setq pid (buffer-local-value 'claude-code--pid buffer))
+              (should (claude-code-session-alive-p (funcall session id)))
+              ;; Closing the buffer detaches: the instance runs on, external
+              ;; and attachable.
+              (let ((kill-buffer-query-functions nil)) (kill-buffer buffer))
+              ;; Give it the chance to die that it must not take.
+              (claude-code-tests--await (lambda () (not (process-attributes pid))) 1)
+              (should (process-attributes pid))
+              (let ((external (funcall session id)))
+                (should (claude-code-session-external-p external))
+                (should (claude-code-session-holder external)))
+              ;; Attaching makes it alive again, in a buffer of its own.
+              (let ((attached (claude-code-attach root id)))
+                (should (claude-code-tests--await
+                         (lambda () (claude-code--session-process attached)) 5))
+                (should (eql (buffer-local-value 'claude-code--pid attached) pid))
+                (let ((alive (funcall session id)))
+                  (should (claude-code-session-alive-p alive))
+                  (should (eq (claude-code-session-buffer alive) attached))
+                  ;; Killing it ends the instance, and its buffer with it.
+                  (claude-code-kill alive))
+                (should (claude-code-tests--await
+                         (lambda () (not (buffer-live-p attached))) 10))
+                (should-not (process-attributes pid))))
+          (when (and pid (process-attributes pid))
+            (signal-process pid 'SIGKILL)))))))
 
 (ert-deftest claude-code-test-integration-lifecycle ()
   "Spawn a real named instance, see it register a session, then kill and delete.

@@ -16,7 +16,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **`transient` create menu** (`M-x claude-code-spawn-menu` from any buffer, `c` in the view) for the options a new session takes: name, worktree, model, effort.
 - **Renderer override** — `claude-code-renderer` puts instances on the `inline` renderer, where the conversation lands in the Emacs buffer and the mouse stays Emacs's, or on `fullscreen`, whatever your `tui` setting says; it defaults to leaving that choice to Claude. See [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance that finishes a turn, waits on you, or fails raises a desktop notification named after the session, saying how long the turn took, what it waits on, or what went wrong; clicking it brings Emacs forward, switching workspace if needed, and goes to that instance, in the tab or frame already showing it, or pops it into view. An instance already on screen in a focused frame stays quiet, and a notification closes once you see the instance, deal with what it announced, or the instance exits. Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
-- **Detachable instances** — with `claude-code-detachable`, an instance runs under `dtach` on its host, so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills; `x` detaches one on purpose.
+- **Detachable instances** — with `claude-code-detachable`, an instance runs under `dtach` on its host, so closing its buffer, quitting Emacs or losing the TRAMP connection leaves it running as an external session, which `k` still kills and `RET` attaches again, marked `⇄`; `x` detaches one on purpose. See [what a reattach redraws](docs/architecture.md#detachable-instances).
 - **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
@@ -51,7 +51,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 
 | Key       | Action                                                      |
 |-----------|-------------------------------------------------------------|
-| `RET`     | focus an alive session / resume a dead one / toggle a group |
+| `RET`     | focus an alive session / attach a detached one (`⇄`) / resume a dead one / toggle a group |
 | `o`       | like `RET`, but visit the session in another window         |
 | `TAB`     | collapse or expand the group at point                       |
 | `c`       | open the create menu (name/worktree/model/effort)           |
@@ -101,6 +101,7 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 (claude-code-resume root "SESSION-UUID")
 (claude-code-kill session)           ; alive and external sessions
 (claude-code-detach session)         ; alive detachable sessions only
+(claude-code-attach root "SESSION-UUID") ; an external session a detachable instance runs
 (claude-code-delete session)         ; dead sessions only
 (claude-code-rename session "name")  ; alive sessions only
 (claude-code-send-text session "hello" t)

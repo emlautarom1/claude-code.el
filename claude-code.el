@@ -506,6 +506,31 @@ The socket gets a fresh random name."
                 dtach (claude-code--new-uuid))
           command))
 
+(defconst claude-code--holder-args-re
+  (rx bos (+ (not blank)) " -c "
+      (group "/" (* (not blank)) "/claude-code" (? "-" (+ digit))
+             "/" (= 36 (any hex "-")))
+      " -E -z -r ctrl_l ")
+  "Matches the command line of a master `claude-code--holding-script' started.
+A dtach master keeps the command line it was started with, socket included.")
+
+(defun claude-code--holder-socket (args)
+  "Return the socket named by ARGS, a dtach master's command line, or nil.
+Nil unless the master is one `claude-code--holding-command' started."
+  (and (stringp args)
+       (string-match claude-code--holder-args-re args)
+       (match-string 1 args)))
+
+(defun claude-code--attaching-command (dtach socket)
+  "Return the command attaching a terminal through DTACH to SOCKET.
+Claude does not repeat the terminal modes it set at startup when a client
+attaches, so the shell first sets the two it needs from the terminal: bracketed
+paste, which `claude-code-send-text' relies on, and focus reporting."
+  (list "/bin/sh" "-c"
+        (concat "printf '\\033[?2004h\\033[?1004h';"
+                " exec \"$0\" -a \"$1\" -E -z -r ctrl_l")
+        dtach socket))
+
 
 ;;;; Model
 ;;
@@ -533,10 +558,12 @@ one-paragraph account of where the session stood, nil for a session that has
 none.
 TRANSCRIPT is the absolute `.jsonl' path.  LAST-ACTIVE is the
 session's last genuine activity, taken from the newest timestamped transcript
-line."
+line.  HOLDER is the dtach socket, on the session's host, of the detachable
+instance running an external session, which can therefore be attached; nil
+for every other session."
   id status waiting-for modifier modifier-message alive-p pid buffer
   worktree worktree-binding title last-prompt recap transcript external-p
-  last-active)
+  last-active holder)
 
 (defvar claude-code--managed (make-hash-table :test 'eq)
   "Hash of instance buffer -> plist describing the Emacs-managed instance in it.
@@ -654,6 +681,15 @@ any other `claude' runs the one sessions/ names while
         (puthash (plist-get entry :session) buffer running)))
     running))
 
+(defun claude-code--holder (pid &optional host)
+  "Return the dtach socket on HOST of the detachable instance PID, or nil.
+The instance's parent is the dtach master, whose command line names the socket.
+Read from HOST's process table as its last `list-system-processes' left it,
+which on a remote host is the one table TRAMP keeps."
+  (let ((default-directory (concat host "/")))
+    (when-let* ((ppid (alist-get 'ppid (process-attributes pid))))
+      (claude-code--holder-socket (alist-get 'args (process-attributes ppid))))))
+
 (defun claude-code--session-liveness (session)
   "Return SESSION's liveness: `alive', `external', or `dead'.
 `alive' means Emacs manages a live instance for it; `external' means a
@@ -763,9 +799,11 @@ belong to two roots (see docs/storage-model.md).  The launch root recorded in
 `claude-code--managed' is consulted only to list the instances launched from
 PROJECT-ROOT, or from a worktree of it, whose session has no transcript here.
 A session a program drove is left out unless Emacs manages an instance for it
-\(`claude-code--interactive-transcript-p')."
+\(`claude-code--interactive-transcript-p').  An external session a detachable
+instance runs names its `claude-code--holder'."
   (let* ((root (claude-code--normalize-root project-root))
-         (running (claude-code--running (file-remote-p root)))
+         (host (file-remote-p root))
+         (running (claude-code--running host))
          (seen (make-hash-table :test 'equal))
          (sessions '()))
     (dolist (tr (claude-code--project-transcripts root))
@@ -779,6 +817,8 @@ A session a program drove is left out unless Emacs manages an instance for it
                      runner (claude-code--transcript-session-args tr))
                   (apply #'claude-code-session--create
                          :id id :alive-p nil :external-p (and runner t)
+                         :holder (and runner
+                                      (claude-code--holder runner host))
                          (claude-code--transcript-session-args tr)))
                 sessions))))
     (maphash (lambda (id runner)
@@ -1281,6 +1321,46 @@ Emacs is running."
      project-root id
      (plist-get (claude-code--transcript-for root id) :worktree-binding)
      detachable)))
+
+(defun claude-code-attach (project-root id)
+  "Attach to the detachable instance running session ID; return its buffer.
+The session is one PROJECT-ROOT lists, running as an external session, and the
+instance is found by id when called.  It is hosted in a new buffer, launched
+from PROJECT-ROOT and working where its sessions/ file says, and becomes alive
+again.  When an instance Emacs manages already runs ID, return its buffer.
+Refuses a session no process runs, and one a process other than a detachable
+instance runs, which cannot be attached."
+  (require 'ghostel)
+  (let* ((root (claude-code--normalize-root project-root))
+         (host (file-remote-p root))
+         (runner (gethash id (claude-code--running host)))
+         (socket (and (integerp runner) (claude-code--holder runner host))))
+    (cond
+     ((bufferp runner) runner)
+     ((null runner) (user-error "Session %s is not running" id))
+     ((null socket) (user-error "Session %s is running outside Emacs" id))
+     ((not (file-exists-p (concat host socket)))
+      (user-error "Session %s has lost its socket %s and cannot be attached"
+                  id socket))
+     (t
+      (let* ((default-directory (file-name-as-directory
+                                 (or (claude-code--pid-cwd runner host) root)))
+             (dtach (claude-code--resolve-executable claude-code-dtach))
+             (tr (claude-code--transcript-for root id))
+             (buffer (generate-new-buffer
+                      (or (claude-code--ghostel-buffer-name
+                           (or (plist-get tr :title) (plist-get tr :last-prompt)))
+                          (funcall claude-code-buffer-name-function root))))
+             (command (claude-code--attaching-command dtach socket)))
+        (with-current-buffer buffer
+          (claude-code-instance-mode)
+          ;; The PID is known, and no report of it is coming.
+          (setq-local ghostel-eval-cmds nil
+                      claude-code--pid runner))
+        (ghostel-exec buffer (car command) (cdr command))
+        (claude-code--install-notifications buffer)
+        (claude-code--register id buffer root nil t)
+        buffer)))))
 
 (defun claude-code-kill (session)
   "Kill the process running SESSION, leaving the session dead.
@@ -2005,11 +2085,17 @@ The empty string is returned when TIME is nil."
     ('done (propertize "✓" 'face 'success 'help-echo "Turn finished"))
     ('error (propertize "✗" 'face 'error 'help-echo "Turn failed"))))
 
+(defconst claude-code--attachable-glyph
+  (propertize "⇄" 'help-echo "Detached instance: RET attaches it")
+  "The glyph following an attachable external session's status.")
+
 (defun claude-code--format-session (session usage now)
   "Return the column vector for SESSION.
 USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
   (let ((status (claude-code--status-display session))
-        (glyph (claude-code--modifier-glyph session)))
+        (glyph (if (claude-code-session-holder session)
+                   claude-code--attachable-glyph
+                 (claude-code--modifier-glyph session))))
     (vector (concat (propertize (car status) 'face (cdr status))
                     (and glyph (concat " " glyph)))
             (propertize (claude-code--format-relative-time
@@ -2048,7 +2134,8 @@ splits out by status, and only when grouping by status."
 (defun claude-code--group-header (key sessions collapsed)
   "Return the header line for group KEY holding SESSIONS.
 A COLLAPSED group also counts how many of them are marked and how many carry
-each status modifier, standing in for the tags and flags it is not showing."
+each status modifier, or are attachable, standing in for the tags and flags it
+is not showing."
   (let ((counts
          (when collapsed
            (cl-loop for (label . pred)
@@ -2058,7 +2145,8 @@ each status modifier, standing in for the tags and flags it is not showing."
                          ("done" . ,(lambda (s)
                                       (eq (claude-code-session-modifier s) 'done)))
                          ("error" . ,(lambda (s)
-                                       (eq (claude-code-session-modifier s) 'error))))
+                                       (eq (claude-code-session-modifier s) 'error)))
+                         ("attachable" . ,#'claude-code-session-holder))
                     for n = (seq-count pred sessions)
                     unless (zerop n) collect (format "%d %s" n label)))))
     (propertize (format "%s %s (%s)" (if collapsed "▸" "▾") (capitalize key)
@@ -2314,26 +2402,31 @@ the group's header."
     (claude-code--redraw group)))
 
 (defun claude-code--visit-session (session display)
-  "Show SESSION's instance buffer through DISPLAY, resuming SESSION if it has none.
+  "Show SESSION's instance buffer through DISPLAY, getting it one if it has none.
 The instance the row was drawn for is shown while it runs, even once a
-`/clear' has moved it onto another session, which refreshes the views."
+`/clear' has moved it onto another session, which refreshes the views.  An
+external session a detachable instance runs is attached, and any other
+session is resumed."
   (let* ((drawn (claude-code-session-buffer session))
-         (buffer (if (claude-code--session-process drawn)
-                     drawn
-                   (claude-code--resume
-                    claude-code--project
-                    (claude-code-session-id session)
-                    (claude-code-session-worktree-binding session)
-                    (claude-code--detachable-default claude-code--project)))))
+         (id (claude-code-session-id session))
+         (buffer (cond
+                  ((claude-code--session-process drawn) drawn)
+                  ((claude-code-session-holder session)
+                   (claude-code-attach claude-code--project id))
+                  (t (claude-code--resume
+                      claude-code--project id
+                      (claude-code-session-worktree-binding session)
+                      (claude-code--detachable-default
+                       claude-code--project))))))
     (unless (and (eq buffer drawn)
                  (equal (plist-get (claude-code--instance-entry buffer) :session)
-                        (claude-code-session-id session)))
+                        id))
       (claude-code--refresh-views))
     (funcall display buffer)))
 
 (defun claude-code-sessions-visit ()
   "Visit the session at point, preferring the selected window, or toggle a group.
-A dead session is resumed first."
+An attachable session is attached first, and a dead one resumed."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (if-let* ((session (claude-code--session-at-point)))
@@ -2342,7 +2435,7 @@ A dead session is resumed first."
 
 (defun claude-code-sessions-visit-other-window ()
   "Visit the session at point in a window other than the selected one.
-A dead session is resumed first."
+An attachable session is attached first, and a dead one resumed."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (claude-code--visit-session (or (claude-code--session-at-point)
@@ -2614,7 +2707,7 @@ rather than wrapping them a second time.
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-printer #'claude-code--print-entry)
   (setq-local tabulated-list-format
-              (vector '("Status" 9 t)
+              (vector '("Status" 10 t)
                       (list "Active" 8 #'claude-code--time-less-p :right-align t)
                       '("Id" 9 t)
                       '("Worktree" 14 t)
