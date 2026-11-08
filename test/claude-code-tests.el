@@ -6161,8 +6161,13 @@ and a transcript as the CLI would, then sleeps under its PID."
                 (should (claude-code-tests--await
                          (lambda () (not (buffer-live-p attached))) 10))
                 (should-not (process-attributes pid))))
-          (when (and pid (process-attributes pid))
-            (signal-process pid 'SIGKILL)))))))
+          ;; dtach's master and clients name the socket under ROOT, and the
+          ;; master's end takes the instance with it.
+          (dolist (process (list-system-processes))
+            (when (string-search root (or (alist-get 'args
+                                                     (process-attributes process))
+                                          ""))
+              (signal-process process 'SIGKILL))))))))
 
 (ert-deftest claude-code-test-integration-lifecycle ()
   "Spawn a real named instance, see it register a session, then kill and delete.
