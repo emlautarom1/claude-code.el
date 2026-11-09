@@ -2228,17 +2228,17 @@ sorts lowest."
        (or (funcall get (gethash (car b) claude-code--usage-table)) -1))))
 
 (defun claude-code--entry-time (entry)
-  "Return the last-active time of ENTRY's session as a float, 0 when unknown.
+  "Return the last-active time of ENTRY's session as a float, infinity if unknown.
 ENTRY is a tabulated-list entry whose car is the session id, looked up in
 `claude-code--session-table'."
   (if-let* ((session (gethash (car entry) claude-code--session-table))
             (time (claude-code-session-last-active session)))
       (float-time time)
-    0))
+    1.0e+INF))
 
 (defun claude-code--time-less-p (a b)
   "Order tabulated-list entries A and B by their session's last-active time.
-A session without a known time sorts as oldest."
+A session without a known time has no transcript yet, and sorts as newest."
   (< (claude-code--entry-time a) (claude-code--entry-time b)))
 
 (defun claude-code--tabulated-groups ()

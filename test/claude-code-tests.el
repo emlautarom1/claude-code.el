@@ -4473,7 +4473,8 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
                          (- now (* 14 86400)) now)))))
 
 (ert-deftest claude-code-test-time-less-p ()
-  "The Active-column sorter orders older sessions before newer ones."
+  "The Active-column sorter orders older sessions before newer ones.
+A session without a time has no transcript yet, so it is the newest."
   (let ((claude-code--session-table (make-hash-table :test 'equal)))
     (puthash "old" (claude-code-session--create :id "old" :last-active 100)
              claude-code--session-table)
@@ -4483,8 +4484,8 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
              claude-code--session-table)
     (should (claude-code--time-less-p '("old" []) '("new" [])))
     (should-not (claude-code--time-less-p '("new" []) '("old" [])))
-    ;; A session without a time sorts as oldest.
-    (should (claude-code--time-less-p '("none" []) '("old" [])))))
+    (should (claude-code--time-less-p '("new" []) '("none" [])))
+    (should-not (claude-code--time-less-p '("none" []) '("new" [])))))
 
 (ert-deftest claude-code-test-session-display-name ()
   "The display name draws on one ordered set of transcript sources."
