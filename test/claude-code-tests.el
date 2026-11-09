@@ -1238,6 +1238,14 @@ rewritten -- here 102 would inherit 101 and sum 9.0 instead of 7.0."
       (should (equal (claude-code--process-usage 102 snapshot) '(7.0 . 7000)))
       (should (equal (claude-code--process-usage 100 snapshot) '(10.0 . 10000))))))
 
+(ert-deftest claude-code-test-process-usage-skips-non-finite-cpu ()
+  "A child too young to have an age adds no CPU, rather than poisoning the sum."
+  (claude-code-tests--with-process-tree
+      '((100 . ((ppid . 1) (pcpu . 2.0) (rss . 1000)))
+        (101 . ((ppid . 100) (pcpu . 0.0e+NaN) (rss . 10)))
+        (102 . ((ppid . 100) (pcpu . 1.0e+INF) (rss . 20))))
+    (should (equal (claude-code--process-usage 100) '(2.0 . 1030)))))
+
 (ert-deftest claude-code-test-child-pids ()
   "`claude-code--child-pids' names the children of a live process."
   (skip-unless claude-code--proc-children-p)

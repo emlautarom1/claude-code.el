@@ -922,7 +922,11 @@ RSS is in kibibytes."
         (let* ((p (pop stack)) (a (funcall attrs p)))
           (when a
             (setq found t)
-            (cl-incf cpu (or (alist-get 'pcpu a) 0.0))
+            (let ((pcpu (alist-get 'pcpu a)))
+              ;; Linux divides CPU time by age, so a process younger than a
+              ;; tick reads NaN or infinity.
+              (when (and pcpu (< (abs pcpu) 1.0e+INF))
+                (cl-incf cpu pcpu)))
             (cl-incf rss (or (alist-get 'rss a) 0))
             (setq stack (append (funcall children p) stack)))))
       (and found (cons cpu rss)))))

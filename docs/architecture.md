@@ -61,7 +61,7 @@ An external session a detachable instance runs is *attachable*, which the sessio
 
 ### Resource usage
 
-`claude-code--process-usage` sums `pcpu`/`rss` over a PID's whole subtree, because Claude spawns child processes for its tool calls. `pcpu` may be a lifetime average depending on platform. Usage is nil when no process runs under the PID — one that died before it was sampled reads as unknown, not as idle — and the view leaves those cells empty.
+`claude-code--process-usage` sums `pcpu`/`rss` over a PID's whole subtree, because Claude spawns child processes for its tool calls. `pcpu` may be a lifetime average depending on platform, and a process too young to have a measurable age adds no CPU. Usage is nil when no process runs under the PID — one that died before it was sampled reads as unknown, not as idle — and the view leaves those cells empty.
 
 A subtree needs to know who parents whom, and the two ways of learning that differ in how much of the machine they read. Where the system names a process's children directly (`claude-code--proc-children-p`, Linux's `/proc/<pid>/task/<pid>/children`), the cost is one read per process in the subtree: 30 two-process subtrees take **5 ms** on a machine running 700. Where it does not, `claude-code--process-snapshot` reads every process to invert their `ppid`s — **33 ms** however little of it is wanted, and the reason a redraw builds that table at most once and shares it across every row. Only a subtree of several hundred processes would make the direct path the slower one.
 
