@@ -1817,7 +1817,8 @@ the launch before anything starts."
 
 (ert-deftest claude-code-test-detachable-default ()
   "`claude-code-detachable' decides, per host, whether an instance is detachable.
-An explicit keyword outranks it."
+It decides for a spawn, a resume and the resume RET makes alike, and an
+explicit keyword outranks it."
   (dolist (case '((remote "/r" nil) (remote "/ssh:box:/r" t)
                   (t "/r" t) (t "/ssh:box:/r" t)
                   (nil "/r" nil) (nil "/ssh:box:/r" nil)))
@@ -1827,10 +1828,19 @@ An explicit keyword outranks it."
   (let ((claude-code-detachable t)
         (seen '()))
     (cl-letf (((symbol-function 'claude-code--launch)
-               (lambda (_id _root detachable &rest _) (push detachable seen))))
-      (claude-code-spawn "/r")
-      (claude-code-spawn "/r" :detachable nil))
-    (should (equal seen '(nil t)))))
+               (lambda (_id _root detachable &rest _) (push detachable seen)))
+              ((symbol-function 'claude-code--refresh-views) #'ignore))
+      (claude-code-tests--with-config
+        (claude-code-tests--with-registry
+          (claude-code-spawn "/r")
+          (claude-code-spawn "/r" :detachable nil)
+          (claude-code-resume "/r" "d")
+          (claude-code-resume "/r" "d" :detachable nil)
+          (with-temp-buffer
+            (setq-local claude-code--project "/r")
+            (claude-code--visit-session (claude-code-session--create :id "d")
+                                        #'ignore)))))
+    (should (equal (nreverse seen) '(t nil t nil t)))))
 
 (ert-deftest claude-code-test-kill-signals-a-detachable-instance ()
   "Killing an alive detachable instance signals it, since its buffer would not.
