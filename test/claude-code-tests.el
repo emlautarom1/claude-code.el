@@ -2581,17 +2581,25 @@ alone."
 (ert-deftest claude-code-test-follow-directory ()
   "Ghostel is handed the instance's directory as the root record changes state.
 Driven through the hook as Ghostel runs it, so the mode's wiring is what is
-under test.  A subagent's record, or a report leaving the state as it was,
-reads nothing."
-  (let ((handed '()))
+under test.  A subagent's record, a report leaving the state as it was, or a
+buffer already in the directory hands nothing.  The stub skips the directory
+it last took, as Ghostel does."
+  (let ((handed '())
+        (wt "/home/test/proj/.claude/worktrees/feat"))
     (claude-code-tests--with-fixtures
       (claude-code-tests--with-registry
         (cl-letf (((symbol-function 'ghostel--update-directory)
-                   (lambda (dir) (push dir handed))))
+                   (lambda (dir)
+                     (unless (equal dir ghostel--last-directory)
+                       (push dir handed)
+                       (setq ghostel--last-directory dir
+                             default-directory (file-name-as-directory dir))))))
           (with-temp-buffer
             (claude-code-instance-mode)
             ;; sessions/1003.json runs in the fixture project's worktree.
             (setq-local claude-code--pid 1003)
+            (setq-local ghostel--last-directory nil)
+            (setq default-directory "/home/test/proj/")
             (claude-code--register "id" (current-buffer) "/home/test/proj" nil)
             (let ((report (lambda (id old new)
                             (run-hook-with-args 'ghostel-program-status-functions
@@ -2601,8 +2609,14 @@ reads nothing."
               (should-not handed)
               (funcall report "" nil '(:state idle))
               (funcall report "" '(:state idle) '(:state working))
-              (should (equal handed (make-list
-                                     2 "/home/test/proj/.claude/worktrees/feat")))
+              (should (equal handed (list wt)))
+              (should (equal default-directory (file-name-as-directory wt)))
+              ;; A `let' unwound over the update: Ghostel's record still names
+              ;; the worktree, the buffer is back on the root.
+              (setq handed nil default-directory "/home/test/proj/")
+              (funcall report "" '(:state working) '(:state idle))
+              (should (equal handed (list wt)))
+              (should (equal default-directory (file-name-as-directory wt)))
               ;; An instance whose sessions/ file was never read works where
               ;; it was launched.
               (setq handed nil claude-code--pid 999999)

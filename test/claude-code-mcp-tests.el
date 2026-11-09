@@ -137,12 +137,6 @@ isolated wraps this in `claude-code-mcp-tests--isolated' itself."
     (cons (alist-get 'isError result)
           (alist-get 'text (aref (alist-get 'content result) 0)))))
 
-(defun claude-code-mcp-tests--eval-buffers ()
-  "Return the buffers the `eval' tool evaluates in that are still alive."
-  (seq-filter (lambda (buffer)
-                (string-prefix-p " *claude-code-eval*" (buffer-name buffer)))
-              (buffer-list)))
-
 ;;;; Pure dispatch: initialize / notifications / errors
 
 (ert-deftest claude-code-mcp-test-initialize ()
@@ -456,23 +450,28 @@ anything else is a -32602 rather than a Lisp type error dressed up as -32603."
 
 (ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
   "A tool sees its caller's cwd for the call, and nil for a caller naming nothing.
-The nil is what a tool acting on the caller's project has to check, and it
-must not outlive the call: the next one may come from another instance."
-  (let ((seen 'unset))
+The cwd is also its `default-directory', which for no caller stays the current
+one.  The nil is what a tool acting on the caller's project has to check, and
+it must not outlive the call: the next one may come from another instance."
+  (let ((seen 'unset)
+        (here default-directory))
     (claude-code-mcp-tests--with-tools '("cc-mcp-test-cwd")
       (claude-code-mcp-make-tool
        :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
-       :handler (lambda () (setq seen claude-code--mcp-session-cwd) "ok"))
+       :handler (lambda ()
+                  (setq seen (cons claude-code--mcp-session-cwd default-directory))
+                  "ok"))
       (claude-code-mcp-tests--isolated
         (claude-code-tests--with-managed-buffer buf
           (claude-code-tests--with-managed-buffer stranger
             (claude-code--register "id" buf "/home/test/proj" nil)
-            (pcase-dolist (`(,caller . ,cwd) (list (cons buf "/home/test/proj")
-                                                   (cons stranger nil)
-                                                   (cons nil nil)))
+            (pcase-dolist (`(,caller ,cwd ,dir)
+                           (list (list buf "/home/test/proj" "/home/test/proj/")
+                                 (list stranger nil here)
+                                 (list nil nil here)))
               (setq seen 'unset)
               (claude-code-mcp-tests--call-tool caller "cc-mcp-test-cwd")
-              (should (equal seen cwd)))))))
+              (should (equal seen (cons cwd dir))))))))
     (should (null claude-code--mcp-session-cwd))))
 
 (ert-deftest claude-code-mcp-test-session-cwd-follows-the-instance ()
@@ -487,6 +486,26 @@ new session id while the PID stays."
                                 buf "eval" (cons 'code "default-directory")))))
         (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
                        "\"/home/test/proj/.claude/worktrees/feat/\""))))))
+
+(ert-deftest claude-code-mcp-test-call-leaves-the-current-buffer-alone ()
+  "A directory set during a call in the buffer it arrived in outlives the call.
+A request is dispatched in whatever buffer is current, the user's, which may be
+an instance buffer following its process into a worktree meanwhile."
+  (claude-code-mcp-tests--with-tools '("cc-mcp-test-cd")
+    (with-temp-buffer
+      (setq default-directory "/home/test/root/")
+      (let ((user (current-buffer)))
+        (claude-code-mcp-make-tool
+         :name "cc-mcp-test-cd" :description "Move the user's buffer."
+         :handler (lambda ()
+                    (with-current-buffer user
+                      (setq default-directory "/home/test/root/wt/"))
+                    "ok"))
+        (claude-code-mcp-tests--isolated
+          (claude-code-tests--with-managed-buffer buf
+            (claude-code--register "id" buf "/home/test/proj" nil)
+            (claude-code-mcp-tests--call-tool buf "cc-mcp-test-cd")))
+        (should (equal default-directory "/home/test/root/wt/"))))))
 
 ;;;; Pure dispatch: tools/call eval happy and error paths
 
@@ -601,13 +620,14 @@ Nothing of that buffer may be read as source, and its point must not move."
 
 (ert-deftest claude-code-mcp-test-eval-buffer-does-not-survive ()
   "The buffer evaluation ran in is gone afterwards, however the call ended."
-  (dolist (code '("(buffer-name)" "(kill-buffer)" "(error \"boom\")" "(+ 1"))
-    (claude-code-mcp-tests--call-eval code)
-    (should-not (claude-code-mcp-tests--eval-buffers)))
-  ;; The timeout leaves by a throw from a timer, not by returning or signalling.
-  (let ((claude-code-mcp-eval-timeout 0.1))
-    (should (eq (car (claude-code-mcp-tests--eval-answer "(sit-for 5)")) t))
-    (should-not (claude-code-mcp-tests--eval-buffers))))
+  (let ((before (buffer-list)))
+    (dolist (code '("(buffer-name)" "(kill-buffer)" "(error \"boom\")" "(+ 1"))
+      (claude-code-mcp-tests--call-eval code)
+      (should-not (seq-difference (buffer-list) before)))
+    ;; The timeout leaves by a throw from a timer, not by returning or signalling.
+    (let ((claude-code-mcp-eval-timeout 0.1))
+      (should (eq (car (claude-code-mcp-tests--eval-answer "(sit-for 5)")) t))
+      (should-not (seq-difference (buffer-list) before)))))
 
 (ert-deftest claude-code-mcp-test-eval-answers-in-full ()
   "A caller's own print limits never truncate what the tool answers with."

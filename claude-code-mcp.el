@@ -29,7 +29,8 @@
 ;;   * Registry/catalog -- the tool table and `claude-code-mcp-make-tool', plain
 ;;     data describing every advertised tool.
 ;;   * Session context -- what a tool call knows about the instance that made
-;;     it: `claude-code--mcp-with-session' binds its real working directory.
+;;     it: `claude-code--mcp-with-session' runs it in its real working
+;;     directory.
 ;;   * Request authorization -- `claude-code--mcp-caller', the instance a
 ;;     request comes from.
 ;;
@@ -112,17 +113,18 @@ that has to act on the caller's own project reaches it.")
 (defmacro claude-code--mcp-with-session (caller &rest body)
   "Evaluate BODY in the context of the instance whose buffer is CALLER.
 Its real cwd comes from `claude-code--instance-cwd', resolved once and bound
-to both `claude-code--mcp-session-cwd' and `default-directory'; a CALLER that
-is no instance leaves `default-directory' unchanged.  That directory is
-best-effort context for a tool, not a sandbox: it only affects
+to `claude-code--mcp-session-cwd'.  BODY runs in a temporary buffer whose
+`default-directory' is that cwd, or the current one for a CALLER that is no
+instance, so the buffer the request arrived in is left alone.  That directory
+is best-effort context for a tool, not a sandbox: it only affects
 `default-directory'-relative operations, not code using absolute paths."
-  (declare (indent 1))
-  `(let* ((claude-code--mcp-session-cwd (claude-code--instance-cwd ,caller))
-          (default-directory (if claude-code--mcp-session-cwd
-                                 (file-name-as-directory
-                                  claude-code--mcp-session-cwd)
-                               default-directory)))
-     ,@body))
+  (declare (indent 1) (debug (form body)))
+  `(let ((claude-code--mcp-session-cwd (claude-code--instance-cwd ,caller)))
+     (with-temp-buffer
+       (when claude-code--mcp-session-cwd
+         (setq default-directory
+               (file-name-as-directory claude-code--mcp-session-cwd)))
+       ,@body)))
 
 
 ;;;; Tool registry and catalog
@@ -204,27 +206,16 @@ follows it: text that reads as a second form asks the caller to wrap both in
 
 (defun claude-code--mcp-tool-eval (code)
   "Evaluate the single Elisp form in the string CODE; return its printed value.
-Evaluation uses lexical binding, is bounded by `claude-code-mcp-eval-timeout'
-seconds, and runs in a temporary buffer killed when the call ends, so a form
-that names no buffer touches none.  The value prints in full, whatever
-`print-length' and `print-level' the user runs with."
+Evaluation uses lexical binding and is bounded by `claude-code-mcp-eval-timeout'
+seconds.  The value prints in full, whatever `print-length' and `print-level'
+the user runs with."
   (with-timeout (claude-code-mcp-eval-timeout
                  (error "Evaluation timed out after %s seconds"
                         claude-code-mcp-eval-timeout))
-    ;; `let*' so a read error happens before there is a buffer to lose, and
-    ;; DIRECTORY carries the session's cwd across the buffer switch, since
-    ;; `default-directory' is permanently buffer-local.
-    (let* ((directory default-directory)
-           (form (claude-code--mcp-read-form code))
-           (buffer (generate-new-buffer " *claude-code-eval*" t)))
-      (unwind-protect
-          (with-current-buffer buffer
-            (setq default-directory directory)
-            (let ((value (eval form t)))
-              (let ((print-length nil)
-                    (print-level nil))
-                (prin1-to-string value))))
-        (kill-buffer buffer)))))
+    (let* ((value (eval (claude-code--mcp-read-form code) t))
+           (print-length nil)
+           (print-level nil))
+      (prin1-to-string value))))
 
 (claude-code-mcp-make-tool
  :name "eval"

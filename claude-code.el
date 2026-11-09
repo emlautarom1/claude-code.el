@@ -46,6 +46,7 @@
 (declare-function ghostel-send-C-c "ghostel" ())
 (declare-function ghostel--update-directory "ghostel" (dir))
 (defvar ghostel--process)
+(defvar ghostel--last-directory)
 (defvar ghostel-eval-cmds)
 (declare-function tramp-dissect-file-name "tramp" (name &optional nodefault))
 (declare-function tramp-file-name-equal-p "tramp" (vec1 vec2))
@@ -1061,7 +1062,10 @@ RECORD-ID is \"\", changes state from OLD to NEW.  The directory goes through
 Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report itself."
   (when-let* (((string-empty-p record-id))
               ((not (eq (plist-get old :state) (plist-get new :state))))
-              (cwd (claude-code--instance-cwd (current-buffer))))
+              (cwd (claude-code--instance-cwd (current-buffer)))
+              ((not (equal (file-name-as-directory cwd) default-directory))))
+    ;; Ghostel skips the directory it last took, even one a `let' undid.
+    (setq ghostel--last-directory nil)
     (ghostel--update-directory cwd)))
 
 (defconst claude-code--pid-report "claude-code-pid"
