@@ -523,9 +523,8 @@ Nil unless the master is one `claude-code--holding-command' started."
 (defun claude-code--holder (pid &optional host)
   "Return the dtach socket on HOST of the detachable instance PID, or nil.
 The instance's parent is its dtach master, which keeps the command line it was
-started with, socket included.  Read from HOST's process table as its last
-`list-system-processes' left it, which on a remote host is the one table TRAMP
-keeps."
+started with, socket included.  Read from HOST's process table, which on a
+remote host is TRAMP's copy as the last `list-system-processes' read it."
   (let ((default-directory (concat host "/")))
     (when-let* ((ppid (alist-get 'ppid (process-attributes pid))))
       (claude-code--holder-socket (alist-get 'args (process-attributes ppid))))))

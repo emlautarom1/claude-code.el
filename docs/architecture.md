@@ -57,7 +57,7 @@ Registering an instance is also what wires up its removal: `claude-code--registe
 
 A [detachable instance](glossary.md) runs under `dtach` on its host, which holds its terminal in place of Emacs, so closing its buffer, or losing its terminal to a dropped connection, leaves it running as an [external](glossary.md) session; `claude-code--on-buffer-kill` says so, and `claude-code-detach` (`x` in the view) closes one on purpose. `claude-code-kill` signals one instead, since closing it would only detach it.
 
-An external session a detachable instance runs is *attachable*, which the sessions query reads off the process table it already holds (`claude-code--holder`). `claude-code-attach`, which `RET` and `o` call on its row, hosts it in a new buffer running dtach's client; `claude-code-resume` goes on refusing every external session. Claude repeats nothing when a client attaches: the inline renderer redraws only its live area, leaving out the conversation above it, the fullscreen renderer its whole view, on the main screen, and the title, status and notifications return with the instance's next change of state.
+An external session a detachable instance runs is *attachable*, which the sessions query reads off the host's process table (`claude-code--holder`). `claude-code-attach`, which `RET` and `o` call on its row, hosts it in a new buffer running dtach's client; `claude-code-resume` goes on refusing every external session. Claude repeats nothing when a client attaches: the inline renderer redraws only its live area, leaving out the conversation above it, the fullscreen renderer its whole view, on the main screen, and the title, status and notifications return with the instance's next change of state.
 
 ### Resource usage
 
