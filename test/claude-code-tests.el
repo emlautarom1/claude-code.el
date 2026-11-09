@@ -1800,7 +1800,7 @@ the launch before anything starts, naming the option that made it detachable."
               (should (zerop mcp-calls))
               (should (plist-get (gethash buffer claude-code--managed)
                                  :detachable)))
-            ;; Not detachable: no dtach, and MCP is wired as ever.
+            ;; Not detachable: no dtach, and MCP is wired.
             (claude-code-spawn "/r" :detachable nil)
             (should (equal (car raw) "/bin/sh"))
             (should-not (member "dtach" raw))
