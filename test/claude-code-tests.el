@@ -1773,7 +1773,7 @@ running Claude."
 (ert-deftest claude-code-test-launch-holds-a-detachable-instance ()
   "A detachable launch runs the reporting command under dtach, wired to no MCP.
 The instance is registered as detachable, and a dtach the host lacks refuses
-the launch before anything starts."
+the launch before anything starts, naming the option that made it detachable."
   (claude-code-tests--with-registry
     (let ((execs '())
           (raw nil)
@@ -1811,8 +1811,10 @@ the launch before anything starts."
                          (if (equal program "dtach")
                              (user-error "Cannot find `dtach'")
                            program))))
-              (should-error (claude-code-spawn "/r" :detachable t)
-                            :type 'user-error))
+              (should (string-match-p
+                       "\\`Cannot find .dtach.*claude-code-detachable"
+                       (cadr (should-error (claude-code-spawn "/r" :detachable t)
+                                           :type 'user-error)))))
             (should-not execs)))))))
 
 (ert-deftest claude-code-test-detachable-default ()

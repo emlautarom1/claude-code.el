@@ -1306,7 +1306,12 @@ and, unless detachable, with the arguments and environment
          (default-directory (file-name-as-directory root))
          (program (claude-code--resolve-executable claude-code-cli))
          (dtach (and detachable
-                     (claude-code--resolve-executable claude-code-dtach)))
+                     (condition-case err
+                         (claude-code--resolve-executable claude-code-dtach)
+                       (user-error
+                        (user-error "%s, which a detachable instance needs (see `%s')"
+                                    (error-message-string err)
+                                    'claude-code-detachable)))))
          (config (claude-code--config-env (file-remote-p root)))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))

@@ -26,7 +26,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - [Ghostel](https://github.com/dakra/ghostel) — hosts each instance's terminal. Loaded lazily, so the package byte-compiles and tests without its native module.
 - [`web-server`](https://github.com/eschulte/emacs-web-server) — HTTP transport for the MCP server.
 - The `claude` CLI on your `PATH`
-- For detachable instances, the default on a remote host: [`dtach`](https://github.com/crigler/dtach) on the host they run on
+- For detachable instances, the default on a remote host: [`dtach`](https://github.com/crigler/dtach) on the host they run on, unless `claude-code-detachable` is set to nil
 - For desktop notifications: an Emacs built with D-Bus, and a notification daemon. Verified on GNOME, where a click raises Emacs and shows the instance but does not hand over the keyboard — you click once to start typing. Other daemons dispatch a click differently and are not covered yet.
 
 ## Install
