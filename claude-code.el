@@ -542,6 +542,13 @@ encoding."
                 " exec \"$0\" -a \"$1\" " claude-code--dtach-flags)
         dtach socket))
 
+(defun claude-code--held-instance-ended-p (event)
+  "Return non-nil when a terminal running dtach's client ended with its instance.
+EVENT is the terminal's process event.  The client exits 0 when its master
+hangs up, as the master does once the instance it holds has ended, and fails
+on a signal or a lost connection, which leave the instance running."
+  (equal event "finished\n"))
+
 
 ;;;; Model
 ;;
@@ -1123,11 +1130,11 @@ handlers behind it nor the `kill-buffer' this may be running inside.")
 (defun claude-code--runs-on-p (buffer)
   "Return non-nil when BUFFER's instance goes on running without BUFFER.
 That is a detachable instance that has started -- its terminal runs, or it
-reported its PID -- and whose terminal has not ended cleanly, as dtach's client
-does once the instance has ended."
+reported its PID -- and whose terminal has not ended with it
+\(`claude-code--held-instance-ended-p')."
   (and (plist-get (gethash buffer claude-code--managed) :detachable)
-       (not (equal (buffer-local-value 'claude-code--exit-event buffer)
-                   "finished\n"))
+       (not (claude-code--held-instance-ended-p
+             (buffer-local-value 'claude-code--exit-event buffer)))
        (or (claude-code--session-process buffer)
            (claude-code--instance-pid buffer))))
 
