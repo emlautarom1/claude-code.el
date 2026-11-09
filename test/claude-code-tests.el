@@ -2267,7 +2267,7 @@ is refused like one already gone."
       (should-error (claude-code--buffer session) :type 'user-error))))
 
 (ert-deftest claude-code-test-abnormal-exit-is-reported ()
-  "A terminal ending abnormally reports the last lines it showed.
+  "A terminal ending abnormally reports its last lines, with wrapped rows joined.
 Ghostel kills an instance's buffer once its exit hooks have run, taking along
 why a launch failed.  A clean exit says nothing."
   (let ((reported '()))
@@ -2276,8 +2276,16 @@ why a launch failed.  A clean exit says nothing."
       (claude-code-tests--with-managed-buffer buf
         (claude-code--register "x" buf "/r" nil)
         (with-current-buffer buf
+          ;; Ghostel's filter, down to joining the rows it wrapped.
+          (setq-local filter-buffer-substring-function
+                      (lambda (beg end _delete)
+                        (apply #'string
+                               (cl-loop for pos from beg below end
+                                        unless (get-text-property pos 'ghostel-wrap)
+                                        collect (char-after pos)))))
           (insert "starting\n\nmkdir: cannot create directory\n"
-                  "claude-code: cannot hold instances in /x  \n\n")
+                  "claude-code: cannot hold instances "
+                  (propertize "\n" 'ghostel-wrap t) "in /x  \n\n")
           (run-hook-with-args 'ghostel-exit-functions buf "finished\n")
           (should-not reported)
           (run-hook-with-args 'ghostel-exit-functions buf
@@ -5573,6 +5581,26 @@ model here -- carries no name into them."
                                    (plist-get (cdr spawn) :model)))
                            (reverse spawns))
                    '(("review" "opus") (nil "opus"))))))
+
+(ert-deftest claude-code-test-spawn-menu-pins-no-detached ()
+  "`transient-set' leaves `--detached' to `claude-code-detachable'.
+The switch is `:unsavable', so a session made detachable by hand pins no
+`--detached' onto later spawns, which it would otherwise force on every one."
+  (let ((claude-code-detachable nil))
+    (claude-code-tests--driving-spawn-menu spawns
+      (with-temp-buffer
+        (claude-code-spawn-menu)
+        (execute-kbd-macro (kbd "- d - m o p u s RET"))
+        (call-interactively #'transient-set)
+        (execute-kbd-macro (kbd "c")))
+      (with-temp-buffer
+        (claude-code-spawn-menu)
+        (execute-kbd-macro (kbd "c")))
+      (should (equal (mapcar (lambda (spawn)
+                               (list (plist-get (cdr spawn) :detachable)
+                                     (plist-get (cdr spawn) :model)))
+                             (reverse spawns))
+                     '((t "opus") (nil "opus")))))))
 
 (ert-deftest claude-code-test-mutations-refresh-every-view ()
   "Spawn, resume, kill and delete redraw every sessions view, displayed or not.
