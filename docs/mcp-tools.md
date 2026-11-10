@@ -1,18 +1,18 @@
 # MCP tools
 
-The reference for every tool the [MCP server](architecture.md#mcp-server) advertises to the sessions this package spawns. The server itself — transport, protocol, lifecycle — and the threat model that covers all of these tools are in [`architecture.md`](architecture.md#mcp-server); this file is the catalog.
+The reference for every tool the [MCP server](architecture.md#mcp-server) advertises to every local `claude`. The server itself — bridge, protocol, wiring — and the threat model that covers all of these tools are in [`architecture.md`](architecture.md#mcp-server); this file is the catalog.
 
 ## What every tool has in common
 
-A tool is registered with `claude-code-mcp-make-tool`, which takes its name, a description, an argument spec and the handler run with the validated argument values. It refuses an argument whose `type` is not one `claude-code--mcp-arg-types` can enforce, so the schema never advertises a type nothing checks; serving a new one is a line in that table. That registration is the single source of the `tools/list` schema and of the `--allowedTools` identifier `mcp__emacs__<tool>`, so neither can drift from the tool it describes. A new tool is that call, a section in this file, and its line in the catalog list in `claude-code-mcp.el`.
+A tool is registered with `claude-code-mcp-make-tool`, which takes its name, a description, an argument spec and the handler run with the validated argument values. It refuses an argument whose `type` is not one `claude-code--mcp-arg-types` can enforce, so the schema never advertises a type nothing checks; serving a new one is a line in that table. That registration is the single source of the `tools/list` schema, so it cannot drift from the tool it describes; Claude knows the tool as `mcp__emacs__<tool>`. A new tool is that call, a section in this file, and its line in the catalog list in `claude-code-mcp.el`.
 
-Each call runs in a temporary buffer, killed when the call ends, whose `default-directory` is the calling instance's real working directory — the worktree directory for a [worktree session](glossary.md), not the parent project root it was launched from. A handler that needs that directory as a *value* rather than as ambient context reads `claude-code--mcp-session-cwd`, bound for the duration of the call.
+Each call runs in a temporary buffer, killed when the call ends, whose `default-directory` is the working directory of the calling `claude` as its sessions/ file says — the worktree directory for a [worktree session](glossary.md), not the parent project root it was launched from — or, for a process with no such file, the directory its bridge started in. A handler that needs that directory as a *value* rather than as ambient context reads `claude-code--mcp-session-cwd`, bound for the duration of the call.
 
 Arguments arrive as JSON: an omitted optional argument and JSON `null` reach the handler as nil, and so does the JSON `false` a boolean accepts — which is what lets a boolean argument read as a plain Lisp truth value. An empty string is a value only a string carries, and given for an *optional* argument it counts as omitted, so a handler forwarding values to a process never emits an option with nothing after it; for a required argument it stays the value it is. Which spellings a type accepts is the type's own business, so `false` given for a string, or an empty string given for a boolean, is the wrong type rather than a quiet nil.
 
 An argument spec can also name the `enum` of values it accepts, which the schema advertises and `claude-code--mcp-validate-args` holds the call to: a required argument the call left out, a value of the wrong `type` and a value outside an `enum` are each a JSON-RPC `-32602` naming the argument, and the handler does not run. So is a `params`, or an `arguments`, that is not an object at all — `null` aside, which stands for the object a call did not send. A required boolean is the one argument nil does not condemn: `false` answers it, while `null` and silence leave it unanswered. An error the handler itself signals is a different thing — it becomes an `isError` result carrying the message, which Claude sees and can act on.
 
-With `claude-code-mcp-auto-approve` (the default) **every** tool below is pre-authorized for spawned instances, so Claude calls them without prompting.
+With `claude-code-mcp-auto-approve` (the default) **every** tool below is pre-authorized for the instances Emacs launches, so Claude calls them without prompting.
 
 ## `eval`
 
@@ -26,7 +26,7 @@ Reads and evaluates a single Emacs Lisp form in the user's live Emacs and return
 
 `(current-buffer)` is the call's temporary buffer, never one the user can see, so a form that names no buffer touches none. Name the buffer to act on with `(with-current-buffer BUFFER ...)`, or reach the one the user is looking at with `(window-buffer (selected-window))`. That fresh buffer is a default, not a boundary.
 
-Evaluation is aborted after `claude-code-mcp-eval-timeout` seconds. The timeout only interrupts code that yields (I/O, `sit-for`, process waits); a CPU-bound infinite loop runs on.
+Evaluation is aborted after `claude-code-mcp-eval-timeout` seconds. The timeout only interrupts code that yields (I/O, `sit-for`, process waits); a CPU-bound infinite loop runs on until the user quits it with `C-g`.
 
 ## `spawn`
 
@@ -48,4 +48,4 @@ The tool returns the id `claude-code-spawn` generates, which is the only durable
 
 The instance takes no window of its own. Displaying one is the view's business — `claude-code-spawn` shows nothing by itself, and the display a user sees comes from the create menu — so a tool-driven spawn leaves the window layout alone. The sessions views are deliberately not refreshed either: a spawn the user did not ask for should not reprint a view they may be working in, so new rows appear on their next refresh (`g`). Nothing after the launch can fail, so an error the caller sees never leaves a live instance behind it.
 
-The instance is detachable when `claude-code-detachable` makes one in the caller's directory so, and a detachable instance is wired to no MCP server. Otherwise the instance it starts is pre-authorized for the catalog like any other, this tool included — what that costs is the [threat model](architecture.md#decisions)'s subject.
+The instance is detachable when `claude-code-detachable` makes one in the caller's directory so. Either way it is pre-authorized for the catalog like any other instance Emacs launches, this tool included, whoever called — what that costs is the [threat model](architecture.md#decisions)'s subject.

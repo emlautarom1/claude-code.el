@@ -17,16 +17,16 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 - **Renderer override** — `claude-code-renderer` puts instances on the `inline` renderer, where the conversation lands in the Emacs buffer and the mouse stays Emacs's, or on `fullscreen`, whatever your `tui` setting says; it defaults to leaving that choice to Claude. See [the renderer](docs/architecture.md#the-renderer).
 - **Attention notifications** — an instance that finishes a turn, waits on you, or fails raises a desktop notification named after the session, saying how long the turn took, what it waits on, or what went wrong; clicking it brings Emacs forward, switching workspace if needed, and goes to that instance, in the tab or frame already showing it, or pops it into view. An instance already on screen in a focused frame stays quiet, and a notification closes once you see the instance, deal with what it announced, or the instance exits. Replaceable with your own handler, or turned off, via `claude-code-notify-function`.
 - **Detachable instances** — an instance in a remote directory runs under `dtach` on its host by default (`claude-code-detachable`), so it outlives its buffer and Emacs as an external session, marked `⇄`, that `RET` attaches again. See [detachable instances](docs/architecture.md#detachable-instances).
-- **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — spawned sessions can act on your live Emacs.
+- **Emacs as an [MCP server](#emacs-as-an-mcp-server)** — every local `claude`, spawned from Emacs or not, can act on your live Emacs.
 - **Programmatic API** — every action is a plain function; the view is optional.
 
 ## Requirements
 
 - Emacs 30.1+
 - [Ghostel](https://github.com/dakra/ghostel) — hosts each instance's terminal. Loaded lazily, so the package byte-compiles and tests without its native module.
-- [`web-server`](https://github.com/eschulte/emacs-web-server) — HTTP transport for the MCP server.
 - The `claude` CLI on your `PATH`
 - For detachable instances, the default on a remote host: [`dtach`](https://github.com/crigler/dtach) on the host they run on, unless `claude-code-detachable` is set to nil
+- For the MCP server: a running Emacs server (`M-x server-start`), and `sh`, `base64` and `emacsclient` on the `PATH` of the `claude` that reaches it
 - For desktop notifications: an Emacs built with D-Bus, and a notification daemon. Verified on GNOME, where a click raises Emacs and shows the instance but does not hand over the keyboard — you click once to start typing. Other daemons dispatch a click differently and are not covered yet.
 
 ## Install
@@ -119,13 +119,12 @@ Instances are hosted in `claude-code-instance-mode`, a major mode deriving from 
 
 ## Emacs as an MCP server
 
-Every session spawned in a local directory is pointed at one loopback [MCP](https://modelcontextprotocol.io) server inside Emacs, shared by all of them, so Claude can act on the editor it is running under; a detachable one, or one in a remote (TRAMP) directory, gets none. Every tool runs with `default-directory` set to the calling session's working directory, and the catalog is documented tool by tool in [`docs/mcp-tools.md`](docs/mcp-tools.md).
+`M-x claude-code-mcp-install` registers an `emacs` [MCP](https://modelcontextprotocol.io) server at Claude's user scope, in the config dir Emacs launches instances with, so every `claude` sharing it — one Emacs spawned, a detachable one, or one in a terminal of your own — can act on your editor through the Emacs server. Run it once; `claude mcp remove --scope user emacs`, run with that config dir, undoes it. An instance Emacs launches is pointed at that Emacs's own server; one in a remote (TRAMP) directory is not wired. Every tool runs with `default-directory` set to the calling session's working directory, and the catalog is documented tool by tool in [`docs/mcp-tools.md`](docs/mcp-tools.md).
 
-> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` puts every advertised tool on `--allowedTools`, so a spawned `claude` runs arbitrary Elisp in your Emacs without prompting. The server answers only requests carrying an instance's own token, which web pages and other users cannot read but every process running as you can — read the [threat model](docs/architecture.md#decisions) before relying on it.
+> ⚠️ **The default pre-authorizes it.** `claude-code-mcp-auto-approve` launches every instance with `--allowedTools mcp__emacs`, so it runs arbitrary Elisp in your Emacs without prompting, and so does any instance a `spawn` call starts, whoever made it. Read the [threat model](docs/architecture.md#decisions) before relying on it.
 
 | Variable                       | Default | Effect                                                 |
 | ------------------------------ | ------- | ------------------------------------------------------ |
-| `claude-code-mcp-enabled`      | `t`     | nil spawns instances with no `--mcp-config` at all     |
 | `claude-code-mcp-auto-approve` | `t`     | nil makes Claude prompt before each tool call          |
 | `claude-code-mcp-eval-timeout` | `10`    | seconds before `eval` aborts an evaluation that yields |
 
@@ -134,12 +133,11 @@ Every session spawned in a local directory is pointed at one loopback [MCP](http
 - [`docs/glossary.md`](docs/glossary.md) — terminology.
 - [`docs/storage-model.md`](docs/storage-model.md) — the `~/.claude` layout this package reads (Claude internals; version-volatile).
 - [`docs/architecture.md`](docs/architecture.md) — layers and design decisions.
-- [`docs/mcp-tools.md`](docs/mcp-tools.md) — the tools the MCP server advertises to spawned sessions.
+- [`docs/mcp-tools.md`](docs/mcp-tools.md) — the tools the MCP server advertises.
 
 ## Development
 
 ```sh
-make deps      # install web-server if missing
 make compile   # byte-compile with warnings as errors
 make test      # run the ERT suite
 make lint      # checkdoc

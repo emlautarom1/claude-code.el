@@ -50,7 +50,7 @@ for f in "${files[@]}"; do
   # function argument, landing in the middle of the line.  Each load is optional,
   # so a file that is mid-edit and unparsable still gets formatted.
   CC_FMT_FILE="$f" "$emacs_bin" -Q --batch \
-    --eval '(package-initialize)' -L . -L test \
+    -L . -L test \
     --eval '(dolist (feature (quote (claude-code claude-code-mcp
                                      claude-code-tests claude-code-mcp-tests)))
               (ignore-errors (require feature nil t)))' \

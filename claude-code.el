@@ -4,7 +4,7 @@
 
 ;; Author: Lautaro Emanuel
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "30.1") (ghostel "0.58.0") (web-server "0.1.2"))
+;; Package-Requires: ((emacs "30.1") (ghostel "0.58.0"))
 ;; Keywords: tools, processes
 ;; URL: https://github.com/emlautarom1/claude-code.el
 
@@ -63,8 +63,8 @@
 
 ;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
 ;; path (see `claude-code--launch').  Declaring its one entry point here keeps
-;; the byte-compiler happy without pulling the MCP file (and its `web-server'
-;; dependency) in eagerly, and avoids a load cycle.
+;; the byte-compiler happy without pulling the MCP file in eagerly, and avoids
+;; a load cycle.
 (declare-function claude-code--mcp-wiring "claude-code-mcp" (buffer))
 
 
@@ -86,10 +86,10 @@ instance."
 (defcustom claude-code-detachable 'remote
   "Which new instances are detachable.
 A detachable instance runs under `claude-code-dtach' on its host, so closing its
-buffer leaves it running as an external session, and it is never wired to the
-MCP server.  `remote' makes an instance in a remote directory detachable, t
-every instance, and nil none.  `claude-code-spawn', `claude-code-resume' and
-the create menu's `--detached' take their default from here."
+buffer leaves it running as an external session.  `remote' makes an instance
+in a remote directory detachable, t every instance, and nil none.
+`claude-code-spawn', `claude-code-resume' and the create menu's `--detached'
+take their default from here."
   :type '(choice (const :tag "Remote instances" remote)
                  (const :tag "Every instance" t)
                  (const :tag "None" nil)))
@@ -650,10 +650,6 @@ last read."
 (defun claude-code--entry-host (entry)
   "Return the host of the instance registry ENTRY describes."
   (file-remote-p (plist-get entry :origin)))
-
-(defun claude-code--managed-p (buffer)
-  "Return non-nil when BUFFER hosts an instance Emacs manages."
-  (gethash buffer claude-code--managed))
 
 (defun claude-code--instance-entry (buffer)
   "Return the registry entry of the managed instance BUFFER hosts, or nil.
@@ -1309,12 +1305,10 @@ is also recorded in the registry.
 The instance is launched through `claude-code--reporting-command', under
 `claude-code--holding-command' when detachable, with `CLAUDE_CONFIG_DIR' as
 `claude-code--config-env' has it, on `claude-code-renderer' when it names one,
-and, unless detachable, with the arguments and environment
-`claude-code--mcp-wiring' asks for."
+and with the arguments and environment `claude-code--mcp-wiring' asks for."
   (require 'ghostel)
   (require 'claude-code-mcp)
-  (let* (;; Resolved first so a bad value aborts before a buffer is created or
-         ;; the MCP server started.
+  (let* (;; Resolved first so a bad value aborts before a buffer is created.
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
          (default-directory (file-name-as-directory root))
@@ -1329,7 +1323,7 @@ and, unless detachable, with the arguments and environment
          (config (claude-code--config-env (file-remote-p root)))
          (buffer (generate-new-buffer
                   (funcall claude-code-buffer-name-function root)))
-         (mcp (unless detachable (claude-code--mcp-wiring buffer)))
+         (mcp (claude-code--mcp-wiring buffer))
          (command (claude-code--reporting-command
                    program
                    (append (car mcp)

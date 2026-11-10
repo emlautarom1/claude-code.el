@@ -115,16 +115,6 @@ CONTENT is a string, or a session id to name in an otherwise minimal file."
               (format "{\"pid\":%d,\"sessionId\":\"%s\",\"status\":\"idle\"}"
                       pid content)))))
 
-(defun claude-code-tests--listening-p (port)
-  "Return non-nil when something accepts a loopback connection on PORT.
-Asked of the OS rather than of Emacs, so a listener the package forgot about
-still counts."
-  (when-let* ((proc (ignore-errors
-                      (make-network-process :name "cc-port-probe"
-                                            :host "127.0.0.1" :service port))))
-    (delete-process proc)
-    t))
-
 (defmacro claude-code-tests--with-live-pids (pids &rest body)
   "Run BODY with exactly the pids in PIDS reading as live processes.
 Pinning the process table keeps a fixture pid that happens to be live on the
@@ -1638,11 +1628,11 @@ is on disk -- the one the Worktree column shows -- and the root otherwise."
           (claude-code-cli "claude"))
       (claude-code-tests--recording-launch execs
         (cl-letf (((symbol-function 'claude-code--mcp-wiring)
-                   (lambda (_buffer) '(("--mcp-config=x" "--allowedTools" "y")))))
+                   (lambda (_buffer) '(("--allowedTools" "mcp__emacs")))))
           (let ((id (car (claude-code-spawn "/r" :prompt "hi"))))
             (should (equal (nth 3 (car execs)) "claude"))
             (should (equal (nth 1 (car execs))
-                           (list "--mcp-config=x" "--allowedTools" "y"
+                           (list "--allowedTools" "mcp__emacs"
                                  "--session-id" id "--" "hi")))))))))
 
 (ert-deftest claude-code-test-launch-refuses-a-missing-cli ()
@@ -1779,7 +1769,7 @@ running Claude."
         (delete-directory elsewhere t)))))
 
 (ert-deftest claude-code-test-launch-holds-a-detachable-instance ()
-  "A detachable launch runs the reporting command under dtach, wired to no MCP.
+  "A detachable launch runs the reporting command under dtach, wired to MCP.
 The instance is registered as detachable, and a dtach the host lacks refuses
 the launch before anything starts, naming the option that made it detachable."
   (claude-code-tests--with-registry
@@ -1805,14 +1795,14 @@ the launch before anything starts, naming the option that made it detachable."
               (should (equal (nthcdr 5 raw)
                              (claude-code--reporting-command
                               "claude" (list "--session-id" id))))
-              (should (zerop mcp-calls))
+              (should (= mcp-calls 1))
               (should (plist-get (gethash buffer claude-code--managed)
                                  :detachable)))
-            ;; Not detachable: no dtach, and MCP is wired.
+            ;; Not detachable: no dtach, and MCP is wired all the same.
             (claude-code-spawn "/r" :detachable nil)
             (should (equal (car raw) "/bin/sh"))
             (should-not (member "dtach" raw))
-            (should (= mcp-calls 1))
+            (should (= mcp-calls 2))
             (setq execs nil)
             (cl-letf (((symbol-function 'claude-code--resolve-executable)
                        (lambda (program)
@@ -2658,8 +2648,8 @@ steady state once every instance has exited."
   "A signalling handler costs neither the kill nor the handlers behind it.
 `kill-buffer' propagates a signal out of `kill-buffer-hook' and abandons the
 kill, which would leave a live instance nothing holds a registration for.  The
-handler behind it must still run: `claude-code-mcp-stop' sits there, and
-skipping it leaves the MCP server listening with no instance left.  A `quit'
+handler behind it must still run: `claude-code--unwatch-focus' sits there, and
+skipping it leaves Emacs watching focus with no instance left.  A `quit'
 reaches both of those as readily as an `error' does, and clears more guards."
   (dolist (signaller (list (lambda () (error "boom"))
                            (lambda () (signal 'quit nil))))
@@ -2863,24 +2853,24 @@ Emacs's own environment never sees it."
       (cl-letf (((symbol-function 'claude-code--mcp-wiring)
                  (lambda (buffer)
                    (setq wired buffer)
-                   (cons nil (list (cons "CC_TEST_MCP_TOKEN" "t0k"))))))
+                   (cons nil (list (cons "CC_TEST_MCP_SOCKET" "sock"))))))
         (dolist (renderer '(nil inline))
           (let ((claude-code-renderer renderer))
-            ;; The token is minted for the buffer that hosts the instance, which
-            ;; is in the directory the instance runs in.
+            ;; The wiring is asked about the buffer that hosts the instance,
+            ;; which is in the directory the instance runs in: that is what
+            ;; tells it whether the instance is remote.
             (should (eq (cdr (claude-code-spawn "/r")) wired))
             (should (equal (buffer-local-value 'default-directory wired) "/r/"))
-            (should (equal (child-env "CC_TEST_MCP_TOKEN") "t0k"))
+            (should (equal (child-env "CC_TEST_MCP_SOCKET") "sock"))
             (should (equal (child-env claude-code-tests--alt-screen)
                            (if renderer "1" "0")))
-            (should-not (getenv "CC_TEST_MCP_TOKEN"))
+            (should-not (getenv "CC_TEST_MCP_SOCKET"))
             (should-not (default-value 'ghostel-pre-spawn-hook))))))))
 
 (ert-deftest claude-code-test-launch-rejects-an-unknown-renderer ()
   "A `claude-code-renderer' naming no renderer stops the launch building anything.
 Its `defcustom' type only guards `setopt' and Customize, so a `setq' still
-reaches here, and neither the MCP server nor the buffer would be registered for
-shutdown."
+reaches here, and the buffer would not be registered for shutdown."
   (claude-code-tests--with-registry
     (let ((execs '())
           (mcp-calls 0)
@@ -3106,13 +3096,13 @@ but invisible to every query and to `claude-code--on-buffer-kill'."
       (claude-code-tests--recording-ghostel calls
         (claude-code-rename
          (claude-code-session--create :id "s" :alive-p t :buffer buf)
-         "My Name"))
-      (should (equal (reverse calls)
-                     '((paste "/rename My Name") (key "return"))))
-      ;; Renaming a dead session is refused.
-      (should-error (claude-code-rename
-                     (claude-code-session--create :id "d" :alive-p nil) "x")
-                    :type 'user-error))))
+         "My Name")
+        (should (equal (reverse calls)
+                       '((paste "/rename My Name") (key "return"))))
+        ;; Renaming a dead session is refused.
+        (should-error (claude-code-rename
+                       (claude-code-session--create :id "d" :alive-p nil) "x")
+                      :type 'user-error)))))
 
 (ert-deftest claude-code-test-send-text ()
   "Text is pasted, never typed, whatever its length; RET only when submitting."
@@ -5832,7 +5822,7 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
         (entry-points (seq-filter #'fboundp '(claude-code-sessions
                                               claude-code-spawn-menu
                                               claude-code-sessions-mode
-                                              claude-code-mcp-stop))))
+                                              claude-code-mcp-install))))
     (mapatoms (lambda (sym)
                 (when (and (commandp sym)
                            (member (file-name-base (or (symbol-file sym 'defun) ""))
@@ -6284,7 +6274,9 @@ and a transcript as the CLI would, then sleeps under its PID."
                        (claude-code-project-sessions root) id)))
            pid)
       (write-region
-       (concat "#!/bin/sh\nid=$2; c=$CLAUDE_CONFIG_DIR\n"
+       (concat "#!/bin/sh\n"
+               "while [ $# -gt 0 ]; do [ \"$1\" = --session-id ] && id=$2; shift; done\n"
+               "c=$CLAUDE_CONFIG_DIR\n"
                "mkdir -p \"$c/sessions\" \"$c/projects/$CC_ENC\"\n"
                "printf '{\"type\":\"user\",\"entrypoint\":\"cli\",\"timestamp\":"
                "\"2026-11-08T00:00:00.000Z\"}\\n' > \"$c/projects/$CC_ENC/$id.jsonl\"\n"
@@ -6348,7 +6340,7 @@ The name is given as several words to show that it reaches the CLI whole."
   (let* ((root (directory-file-name (expand-file-name default-directory)))
          (name "emacs integration name")
          (after-focus-change-function after-focus-change-function)
-         buffer id pid mcp-port)
+         buffer id pid)
     (unwind-protect
         (claude-code-tests--with-top-level-env
           (let* ((claude-code-renderer 'inline)
@@ -6416,18 +6408,7 @@ The name is given as several words to show that it reaches the CLI whole."
                    15))
           (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (claude-code-session-alive-p s))
-            ;; The server dies with the *last* instance, so this has to be it.
-            (should (= (hash-table-count claude-code--managed) 1))
-            ;; The instance is talking to a live server; killing it is what has
-            ;; to take that server down.
-            (should claude-code--mcp-server)
-            (setq mcp-port (claude-code--mcp-port))
-            (should (integerp mcp-port))
             (claude-code-kill s))
-          ;; The socket has to be gone, not just the variable holding it:
-          ;; clearing the variable alone would hide a listener left running.
-          (should-not claude-code--mcp-server)
-          (should-not (claude-code-tests--listening-p mcp-port))
           ;; The model reports it dead immediately (it is no longer managed)...
           (let ((s (claude-code-tests--find-session (claude-code-project-sessions root) id)))
             (should (or (null s) (not (claude-code-session-alive-p s)))))

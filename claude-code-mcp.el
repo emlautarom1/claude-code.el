@@ -6,69 +6,56 @@
 
 ;;; Commentary:
 
-;; A Model Context Protocol (MCP) server that lets the `claude' CLI instances
-;; this package spawns act on the user's live Emacs.  One HTTP server runs per
-;; Emacs, shared by every instance; an instance presents a token of its own with
-;; every request.  The server advertises a growing catalog of tools, documented
+;; A Model Context Protocol (MCP) server that lets any local `claude' act on the
+;; user's live Emacs.  Claude runs `claude-code-mcp-bridge' as a stdio MCP
+;; server, registered once at its user scope by `claude-code-mcp-install'; the
+;; bridge hands each message to `claude-code-mcp-dispatch' through
+;; `emacsclient'.  The server advertises a growing catalog of tools, documented
 ;; one by one in docs/mcp-tools.md:
 ;;
 ;;   * `eval' -- read and evaluate Elisp, return the printed result.
-;;   * `spawn' -- start another instance in the calling instance's directory.
+;;   * `spawn' -- start another instance in the calling session's directory.
 ;;
 ;; The file is organized in the same model/view/adapter spirit as
 ;; `claude-code.el':
 ;;
-;;   * Transport -- quarantined `web-server' glue: it frames HTTP requests and
-;;     writes replies.  This is the ONLY layer that touches sockets, and it
-;;     builds no envelopes of its own.
-;;   * Protocol -- the pure, socket-free response authority:
-;;     `claude-code--mcp-response-for-body' maps a raw POST body to a response
-;;     envelope (or nil for a notification), guarding body integrity and JSON
-;;     parsing before `claude-code--mcp-handle-request' dispatches the parsed
-;;     request.  Both are directly unit-testable.
+;;   * Protocol -- the pure response authority:
+;;     `claude-code--mcp-response-for-body' maps a raw message to a response
+;;     envelope (or nil for a notification), guarding JSON parsing before
+;;     `claude-code--mcp-handle-request' dispatches the parsed request.  Both
+;;     are directly unit-testable.
 ;;   * Registry/catalog -- the tool table and `claude-code-mcp-make-tool', plain
 ;;     data describing every advertised tool.
-;;   * Session context -- what a tool call knows about the instance that made
-;;     it: `claude-code--mcp-with-session' runs it in its real working
-;;     directory.
-;;   * Request authorization -- `claude-code--mcp-caller', the instance a
-;;     request comes from.
+;;   * Session context -- what a tool call knows about the `claude' that made
+;;     it: `claude-code--mcp-with-session' runs it in its working directory.
+;;   * Bridge -- the stdio bridge, the entry point it calls, its registration,
+;;     and what a launch sets so an instance's bridge reaches this Emacs.
 ;;
 ;; Session state is reached ONLY through the `claude-code.el' model; this file
 ;; never re-parses `~/.claude'.  A tool that acts on sessions does so through
 ;; the public operations API.
 ;;
-;; SECURITY.  This server executes arbitrary Elisp for whoever presents an
-;; instance's token.  Read the threat model in docs/architecture.md before
-;; changing anything here.
+;; SECURITY.  This server executes arbitrary Elisp for every process that can
+;; reach the Emacs server.  Read the threat model in docs/architecture.md
+;; before changing anything here.
 
 ;;; Code:
 
 (require 'claude-code)
-(require 'web-server)
-(require 'eieio)
-(require 'hex-util)
+(require 'server)
 
 
 ;;;; Customization
 
 (defgroup claude-code-mcp nil
-  "MCP server exposing Emacs to spawned Claude Code sessions."
+  "MCP server exposing Emacs to Claude Code sessions."
   :group 'claude-code
   :prefix "claude-code-mcp-")
 
-(defcustom claude-code-mcp-enabled t
-  "When non-nil, spawned `claude' instances connect to the Emacs MCP server.
-One in a remote directory never does.  Set to nil to spawn instances with no
-`--mcp-config' at all."
-  :type 'boolean
-  :group 'claude-code-mcp)
-
 (defcustom claude-code-mcp-auto-approve t
-  "When non-nil, auto-approve every registered MCP tool for spawned instances.
-This adds an `--allowedTools' entry for each tool the server advertises, so
-Claude calls them without prompting.  Weigh it against the threat model in
-docs/architecture.md."
+  "When non-nil, launched instances call Emacs's MCP tools without prompting.
+A local launch then carries `--allowedTools mcp__emacs'.  Weigh it against the
+threat model in docs/architecture.md."
   :type 'boolean
   :group 'claude-code-mcp)
 
@@ -86,17 +73,9 @@ a CPU-bound infinite loop is not stopped by it."
   "The MCP protocol version this server implements and reports.")
 
 (defconst claude-code--mcp-server-name "emacs"
-  "The name spawned `claude' instances know this MCP server by.
-Used as the `mcpServers' key in the `--mcp-config' blob and as the
-`mcp__<name>__<tool>' prefix when auto-approving tools; the two must agree.")
-
-(defconst claude-code--mcp-token-header "X-Claude-Code-Token"
-  "The HTTP header an instance presents its token in.
-Not `Authorization': `web-server' answers any scheme there but Basic with a
-500 before a handler runs.")
-
-(defconst claude-code--mcp-token-variable "CLAUDE_CODE_EL_MCP_TOKEN"
-  "The environment variable an instance receives its token in.")
+  "The name `claude' knows this MCP server by.
+Used as the `mcpServers' key `claude-code-mcp-install' registers and as the
+`mcp__<name>' rule auto-approving its tools; the two must agree.")
 
 (define-error 'claude-code--mcp-rpc-error
               "MCP JSON-RPC error carrying (CODE MESSAGE)")
@@ -105,25 +84,28 @@ Not `Authorization': `web-server' answers any scheme there but Basic with a
 ;;;; Session context
 
 (defvar claude-code--mcp-session-cwd nil
-  "Real working directory of the instance whose tool call is running.
+  "Working directory of the `claude' whose tool call is running.
 Bound by `claude-code--mcp-with-session' for the duration of the call.  A
 handler is passed its validated arguments and nothing else, so this is how one
 that has to act on the caller's own project reaches it.")
 
 (defmacro claude-code--mcp-with-session (caller &rest body)
-  "Evaluate BODY in the context of the instance whose buffer is CALLER.
-Its real cwd comes from `claude-code--instance-cwd', resolved once and bound
-to `claude-code--mcp-session-cwd'.  BODY runs in a temporary buffer whose
-`default-directory' is that cwd, or the current one for a CALLER that is no
-instance, so the buffer the request arrived in is left alone.  That directory
-is best-effort context for a tool, not a sandbox: it only affects
-`default-directory'-relative operations, not code using absolute paths."
+  "Evaluate BODY in the context of the `claude' process whose PID is CALLER.
+Its cwd is what its sessions/ file says (`claude-code--pid-cwd'), or the
+current `default-directory' for a process with no such file -- through
+`emacsclient', the directory the bridge was started in.  It is resolved once
+and bound to `claude-code--mcp-session-cwd'.  BODY runs in a temporary buffer
+whose `default-directory' is that cwd, so the buffer the request arrived in is
+left alone.  That directory is best-effort context for a tool, not a sandbox:
+it only affects `default-directory'-relative operations, not code using
+absolute paths."
   (declare (indent 1) (debug (form body)))
-  `(let ((claude-code--mcp-session-cwd (claude-code--instance-cwd ,caller)))
+  `(let ((claude-code--mcp-session-cwd
+          (or (claude-code--pid-cwd ,caller)
+              (directory-file-name (expand-file-name default-directory)))))
      (with-temp-buffer
-       (when claude-code--mcp-session-cwd
-         (setq default-directory
-               (file-name-as-directory claude-code--mcp-session-cwd)))
+       (setq default-directory
+             (file-name-as-directory claude-code--mcp-session-cwd))
        ,@body)))
 
 
@@ -234,7 +216,7 @@ with (window-buffer (selected-window))."
   "Handle the `spawn' tool; return the new session's id.
 PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
 WORKTREE the name of the checkout to run in.  The root is not among them: an
-instance is launched from the directory of the instance that asked for it."
+instance is launched from the directory of the session that asked for it."
   (car (claude-code-spawn claude-code--mcp-session-cwd
                           :prompt prompt :name name
                           :model model :effort effort
@@ -389,7 +371,7 @@ a handler passing values on to a process emits no option with an empty value."
 
 (defun claude-code--mcp-tools-call (caller params)
   "Run the tool named in PARAMS for CALLER and return its result payload.
-CALLER is the calling instance's buffer.
+CALLER is the PID of the calling `claude'.
 PARAMS is the `tools/call' params alist carrying `name' and `arguments', and
 must be an object -- JSON null standing for the one a call did not send.
 Signals a `claude-code--mcp-rpc-error' for a PARAMS of any other shape, for an
@@ -424,12 +406,11 @@ that itself errors yields an `isError' result rather than crashing the server."
 
 (defun claude-code--mcp-handle-request (caller request)
   "Return the JSON-RPC response alist for REQUEST, or nil for a notification.
-CALLER is the calling instance's buffer.  REQUEST is the parsed JSON-RPC
+CALLER is the PID of the calling `claude'.  REQUEST is the parsed JSON-RPC
 request object (an alist).  A request with no `id' is a notification and
-yields nil (the transport still acknowledges it).  A non-object REQUEST -- a
-JSON array or bare scalar -- is answered with a -32600 Invalid Request; any
-`claude-code--mcp-rpc-error' or other error becomes a JSON-RPC error envelope
-echoing the request `id'."
+yields nil.  A non-object REQUEST -- a JSON array or bare scalar -- is answered
+with a -32600 Invalid Request; any `claude-code--mcp-rpc-error', other error or
+quit becomes a JSON-RPC error envelope echoing the request `id'."
   (if (not (listp request))
       (claude-code--mcp-error :null -32600 "Invalid Request")
     (let ((id (alist-get 'id request))
@@ -448,184 +429,128 @@ echoing the request `id'."
                           (list -32601 (format "Method not found: %s" method))))))
           (claude-code--mcp-rpc-error
            (claude-code--mcp-error id (nth 1 err) (nth 2 err)))
-          (error
+          ((error quit)
            (claude-code--mcp-error
             id -32603
             (format "Internal error: %s" (error-message-string err)))))))))
 
-(defun claude-code--mcp-response-for-body (caller body declared-length)
+(defun claude-code--mcp-response-for-body (caller body)
   "Return the JSON-RPC response alist for BODY, or nil for a notification.
-CALLER is the calling instance's buffer.  BODY is the raw POST body;
-DECLARED-LENGTH is the request's Content-Length value as a string, or nil when
-the header is absent.  A BODY whose byte count disagrees with DECLARED-LENGTH
-is answered with a -32700 error rather than parsed: web-server frames the body
-by the header blank line, not Content-Length, so a body split across packets
-arrives truncated.  A body that is not valid JSON is likewise a -32700.
-Dispatch errors never escape `claude-code--mcp-handle-request', so the
-`json-error' handler here fires only for the parse."
-  (if (and declared-length
-           (/= (string-bytes body) (string-to-number declared-length)))
-      (claude-code--mcp-error :null -32700 "Truncated request body")
-    (condition-case nil
-        (claude-code--mcp-handle-request
-         caller (json-parse-string body :object-type 'alist))
-      (json-error (claude-code--mcp-error :null -32700 "Parse error")))))
+CALLER is the PID of the calling `claude'.  BODY is one raw JSON-RPC message;
+one that is not valid JSON is answered with a -32700 error.  Dispatch errors
+never escape `claude-code--mcp-handle-request', so the `json-error' handler
+here fires only for the parse."
+  (condition-case nil
+      (claude-code--mcp-handle-request
+       caller (json-parse-string body :object-type 'alist))
+    (json-error (claude-code--mcp-error :null -32700 "Parse error"))))
 
 
-;;;; Request authorization
+;;;; Bridge
 
-(defvar claude-code--mcp-tokens (make-hash-table :test 'equal :weakness 'value)
-  "Hash of the SHA-256 digest of each minted token to its instance's buffer.
-Keyed by digest, so a lookup's timing says nothing about a guessed token.")
-
-(defconst claude-code--mcp-token-key
-  (intern (concat ":" (upcase claude-code--mcp-token-header)))
-  "The key `web-server' files `claude-code--mcp-token-header' under.")
-
-(defun claude-code--mcp-new-token ()
-  "Return a fresh token: 32 bytes from the system's CSPRNG, in hex."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (insert-file-contents-literally "/dev/urandom" nil nil 32)
-    (encode-hex-string (buffer-string))))
-
-(defun claude-code--mcp-caller (headers)
-  "Return the buffer of the instance a request with HEADERS comes from, or nil.
-HEADERS is the alist `web-server' parses the request into.  It must carry no
-`Origin', which only a browser sends, and must present a live managed
-instance's token in `claude-code--mcp-token-header'."
-  (let ((buffer (when-let* ((token (cdr (assq claude-code--mcp-token-key
-                                              headers)))
-                            ((stringp token))
-                            ((not (assq :ORIGIN headers))))
-                  (gethash (secure-hash 'sha256 token) claude-code--mcp-tokens))))
-    (and (buffer-live-p buffer) (claude-code--managed-p buffer) buffer)))
-
-
-;;;; Transport (web-server glue)
-
-(defvar claude-code--mcp-server nil
-  "The live `ws-server' object for the MCP server, or nil when stopped.")
-
-(defun claude-code--mcp-port ()
-  "Return the TCP port the MCP server listens on, or nil when stopped."
-  (and claude-code--mcp-server
-       (process-contact (ws-process claude-code--mcp-server) :service)))
+(defconst claude-code-mcp-bridge
+  "while IFS= read -r line; do
+  req=$(printf %s \"$line\" | base64 | tr -d '\\n')
+  out=$(emacsclient -a false --eval \"(progn (require 'claude-code-mcp) (claude-code-mcp-dispatch \\\"$req\\\" $PPID))\") || exit 1
+  [ \"$out\" = nil ] || { printf %s \"$out\" | tr -d '\"' | base64 --decode; echo; }
+done"
+  "The stdio MCP server Claude runs to reach Emacs, an sh script.
+It hands each JSON-RPC line to `claude-code-mcp-dispatch' through `emacsclient',
+naming its parent, the `claude' that started it, as the caller.  It exits once
+Emacs cannot be reached; Claude starts it again for its next call.")
 
 (defun claude-code--mcp-serialize (envelope)
   "Serialize response ENVELOPE alist to a JSON string for the wire."
   (json-serialize envelope))
 
-(defun claude-code--mcp-send (process response)
-  "Write RESPONSE alist to PROCESS as an HTTP 200 JSON reply and close it."
-  (ws-response-header process 200 '("Content-Type" . "application/json"))
-  (ws-send process (claude-code--mcp-serialize response))
-  (throw 'close-connection nil))
+(defun claude-code-mcp-dispatch (request pid)
+  "Answer REQUEST, a base64 JSON-RPC message from the `claude' whose PID is PID.
+Return the response as base64 JSON, or nil for a notification.  This is what
+`claude-code-mcp-bridge' calls, and it never signals or quits: an error
+reaching `server.el' would end the bridge, and a quit would read as no reply."
+  (when-let* ((response
+               (claude-code--mcp-response-for-body
+                pid (condition-case nil
+                        (decode-coding-string (base64-decode-string request)
+                                              'utf-8)
+                      ((error quit) "")))))
+    (base64-encode-string
+     (condition-case nil
+         (claude-code--mcp-serialize response)
+       ((error quit)
+        (claude-code--mcp-serialize
+         (claude-code--mcp-error (alist-get 'id response) -32603
+                                 "Internal error: unserializable response"))))
+     t)))
 
-(defun claude-code--mcp-send-status (process code)
-  "Answer on PROCESS with an empty HTTP CODE reply and close it."
-  (ws-response-header process code '("Content-Length" . "0"))
-  (throw 'close-connection nil))
-
-(defun claude-code--mcp-forbidden-p (request)
-  "Return non-nil when REQUEST comes from no `claude-code--mcp-caller'.
-The `ws-start' matcher tried ahead of every handler."
-  (not (claude-code--mcp-caller (ws-headers request))))
-
-(defun claude-code--mcp-forbid (request)
-  "Refuse REQUEST with an empty HTTP 403.
-Not 401, which sends the CLI looking for an OAuth server to log in to."
-  (with-slots (process) request
-    (claude-code--mcp-send-status process 403)))
-
-(defun claude-code--mcp-handle (request)
-  "Handle one MCP HTTP POST REQUEST from the `web-server' transport.
-Reads the caller, body and declared Content-Length off REQUEST, maps them to a
-response through `claude-code--mcp-response-for-body', and writes it back --
-an empty 202 when there is none (a notification)."
-  (with-slots (process headers body) request
-    (let ((response (claude-code--mcp-response-for-body
-                     (claude-code--mcp-caller headers) body
-                     (cdr (assoc :CONTENT-LENGTH headers)))))
-      (if response
-          (claude-code--mcp-send process response)
-        (claude-code--mcp-send-status process 202)))))
-
-(defun claude-code--mcp-handle-get (request)
-  "Answer a Streamable-HTTP GET REQUEST on the MCP endpoint with HTTP 405.
-A client MAY open a server-to-client SSE stream with GET; we push no
-server-initiated messages, so the spec requires 405 Method Not Allowed here to
-signal that no stream is offered.  Every JSON-RPC message travels over POST."
-  (with-slots (process) request
-    (claude-code--mcp-send-status process 405)))
-
-(defun claude-code--mcp-ensure-server ()
-  "Ensure the MCP server is running and return its port, or nil.
-Returns nil when `claude-code-mcp-enabled' is nil.  Starting is idempotent: a
-live server's port is returned without opening a second listener."
-  (when claude-code-mcp-enabled
-    (unless (and claude-code--mcp-server
-                 (process-live-p (ws-process claude-code--mcp-server)))
-      (setq claude-code--mcp-server
-            (ws-start
-             (list (cons #'claude-code--mcp-forbidden-p #'claude-code--mcp-forbid)
-                   (cons (cons :GET "\\`/mcp\\'") #'claude-code--mcp-handle-get)
-                   (cons (cons :POST "\\`/mcp\\'") #'claude-code--mcp-handle))
-             0 nil :host "127.0.0.1")))
-    (claude-code--mcp-port)))
-
-
-;;;; Lifecycle and CLI wiring
-
-(defun claude-code--mcp-allowed-tools ()
-  "Return every registered tool as an `mcp__<server>__<tool>' identifier list.
-These are the identifiers `claude' recognizes on `--allowedTools'; the server
-prefix is `claude-code--mcp-server-name'."
-  (cl-loop for name being the hash-keys of claude-code--mcp-tools
-           collect (format "mcp__%s__%s" claude-code--mcp-server-name name)))
-
-(defun claude-code--mcp-wiring (buffer)
-  "Return what connects the instance BUFFER hosts to the MCP server, or nil.
-Starts the server if needed and mints BUFFER a fresh token.  Returns nil when
-MCP is disabled or BUFFER's directory, where Ghostel runs the instance, is
-remote, and otherwise (ARGS . ENV).  ARGS is `--mcp-config=' with an
-inline JSON blob pointing at the server, followed by an `--allowedTools' entry
-for every registered tool when `claude-code-mcp-auto-approve' is non-nil.  ENV
-holds the (NAME . VALUE) cell carrying the token, which the blob names only as
-`${NAME}', keeping the token off the command line."
-  (when-let* (((not (file-remote-p
-                     (buffer-local-value 'default-directory buffer))))
-              (port (claude-code--mcp-ensure-server)))
-    (let* ((token (claude-code--mcp-new-token))
-           (server
-            (list (cons 'type "http")
-                  (cons 'url (format "http://127.0.0.1:%d/mcp" port))
-                  (cons 'headers
-                        (list (cons (intern claude-code--mcp-token-header)
-                                    (format "${%s}"
-                                            claude-code--mcp-token-variable)))))))
-      (puthash (secure-hash 'sha256 token) buffer claude-code--mcp-tokens)
-      (cons (cons (concat "--mcp-config="
-                          (json-serialize
-                           (list (cons 'mcpServers
-                                       (list (cons (intern claude-code--mcp-server-name)
-                                                   server))))))
-                  (when-let* ((allowed (and claude-code-mcp-auto-approve
-                                            (claude-code--mcp-allowed-tools))))
-                    (list "--allowedTools" (string-join allowed ","))))
-            (list (cons claude-code--mcp-token-variable token))))))
+(defun claude-code--mcp-server-config ()
+  "Return the `mcpServers' entry that runs `claude-code-mcp-bridge'."
+  (list (cons 'type "stdio")
+        (cons 'command "sh")
+        (cons 'args (vector "-c" claude-code-mcp-bridge))))
 
 ;;;###autoload
-(defun claude-code-mcp-stop ()
-  "Stop the Emacs MCP server if it is running, revoking every token.
-A no-op when no server is live, so it is safe to call unconditionally."
+(defun claude-code-mcp-install ()
+  "Register the Emacs MCP server at Claude's user scope.
+It lands in the config dir instances launch with, replacing any user-scope
+server of the same name there, and every `claude' sharing that dir reaches
+Emacs from then on."
   (interactive)
-  (clrhash claude-code--mcp-tokens)
-  (when claude-code--mcp-server
-    (ignore-errors (ws-stop claude-code--mcp-server))
-    (setq claude-code--mcp-server nil)))
+  (with-environment-variables (("CLAUDE_CONFIG_DIR" (claude-code--config-env)))
+    (let* ((default-directory (expand-file-name "~/"))
+           (program (claude-code--resolve-executable claude-code-cli)))
+      ;; Its status is ignored: there may be nothing to remove.
+      (call-process program nil nil nil "mcp" "remove" "--scope" "user"
+                    claude-code--mcp-server-name)
+      (with-temp-buffer
+        (unless (eql 0 (call-process program nil t nil "mcp" "add-json"
+                                     "--scope" "user" claude-code--mcp-server-name
+                                     (claude-code--mcp-serialize
+                                      (claude-code--mcp-server-config))))
+          (error "Cannot register the MCP server: %s"
+                 (string-trim (buffer-string)))))))
+  (message "Registered the `%s' MCP server with Claude"
+           claude-code--mcp-server-name))
 
-(add-hook 'claude-code-last-instance-exit-hook #'claude-code-mcp-stop)
+(defvar claude-code--mcp-warned nil
+  "Non-nil once a launch has warned that this Emacs runs no server.")
+
+(defun claude-code--mcp-server-env ()
+  "Return the environment pointing `emacsclient' at this Emacs's server.
+A list of cells as `claude-code--apply-env' takes them: the file the server
+listens on, whether it runs yet or not, in the variable for its kind, with the
+other variable unset.  The first call to find this Emacs running no server
+warns, once per session: instances then reach it only once its server starts,
+and reach the other Emacs while one holds the server's name."
+  (unless (or (process-live-p server-process) claude-code--mcp-warned)
+    (setq claude-code--mcp-warned t)
+    (display-warning
+     'claude-code-mcp
+     (if (server-running-p)
+         (format-message "Another Emacs's server holds the name `%s', so \
+instances launched here reach that Emacs's MCP tools; give this Emacs a \
+`server-name' of its own and start its server" server-name)
+       (substitute-command-keys
+        "No Emacs server is running, so instances cannot reach Emacs's MCP \
+tools until one starts; start it with \\[server-start]"))))
+  (let ((file (expand-file-name server-name (if server-use-tcp
+                                                server-auth-dir
+                                              server-socket-dir))))
+    (if server-use-tcp
+        (list (cons "EMACS_SERVER_FILE" file) (list "EMACS_SOCKET_NAME"))
+      (list (cons "EMACS_SOCKET_NAME" file) (list "EMACS_SERVER_FILE")))))
+
+(defun claude-code--mcp-wiring (buffer)
+  "Return what points the instance BUFFER hosts at this Emacs, or nil.
+Nil when BUFFER's directory, where Ghostel runs the instance, is remote: its
+bridge runs on that host.  Otherwise (ARGS . ENV): ARGS auto-approves the
+server's tools when `claude-code-mcp-auto-approve' is non-nil, and ENV is
+`claude-code--mcp-server-env'."
+  (unless (file-remote-p (buffer-local-value 'default-directory buffer))
+    (cons (and claude-code-mcp-auto-approve
+               (list "--allowedTools"
+                     (concat "mcp__" claude-code--mcp-server-name)))
+          (claude-code--mcp-server-env))))
 
 (provide 'claude-code-mcp)
 ;;; claude-code-mcp.el ends here

@@ -153,15 +153,15 @@ The name must also **round-trip**. `--worktree=NAME` always resolves to `<root>/
 
 ## MCP configuration
 
-The [MCP server](architecture.md#mcp-server) adds **nothing** to the on-disk layout under the config dir. An instance is wired to the server entirely through its command line and environment: `claude` is passed `--mcp-config` with an inline JSON blob
+The [MCP server](architecture.md#mcp-server) is one entry in the user-scope MCP configuration of the config dir instances launch with, which `claude-code-mcp-install` writes through the CLI's own `claude mcp add-json --scope user`, so this package never edits Claude's config files itself:
 
 ```json
-{"mcpServers":{"emacs":{"type":"http","url":"http://127.0.0.1:<port>/mcp","headers":{"X-Claude-Code-Token":"${CLAUDE_CODE_EL_MCP_TOKEN}"}}}}
+{"type":"stdio","command":"sh","args":["-c","<claude-code-mcp-bridge>"]}
 ```
 
-(plus `--allowedTools` listing every registered tool when auto-approve is on), and its environment carries `CLAUDE_CODE_EL_MCP_TOKEN`. No `.mcp.json` is written and no user/project MCP config is touched — our server is *added alongside* whatever the user already has.
+It is filed under `emacs` in `.claude.json` — `~/.claude.json` while `CLAUDE_CONFIG_DIR` is unset, and that dir's own `.claude.json` otherwise — beside whatever servers the user already has.
 
-The one piece of on-disk state the server *reads* is the calling instance's real cwd: `claude-code--instance-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session), falling back to the launch-time registry root before that file has been read.
+The one piece of on-disk state the server *reads* is the calling process's cwd: `claude-code--pid-cwd` takes it from the `sessions/<pid>.json` `cwd` field (the worktree directory for a worktree session).
 
 ## Mapping an Emacs buffer to a session
 

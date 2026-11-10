@@ -9,13 +9,7 @@ model: `docs/glossary.md`, `docs/storage-model.md`, `docs/architecture.md`.
   shims, no feature-detection fallbacks, no obsolete aliases.
 - **No "history" comments.** Never describe how code "used to" work or that
   something "replaces" a prior approach — Git holds the history.
-- **Two hard dependencies: `ghostel` and `web-server`.** Everything else must be
-  built into Emacs (`cl-lib`, `project`, `tabulated-list`, `transient`, `json`,
-  `eieio`). `ghostel` is loaded lazily and referenced via `declare-function`, so
-  the package byte-compiles and tests without its native module present.
-  `web-server` (the MCP transport) is a real compile-time dependency: it is
-  required at the top level of `claude-code-mcp.el`, installed by `make deps`,
-  and put on `load-path` via `package-initialize` in `make compile`/`test`.
+- **As few dependencies as possible.** Everything the package loads is built into Emacs (`cl-lib`, `project`, `tabulated-list`, `transient`, `json`, `server`) except the one hard dependency, `ghostel`, which is loaded lazily and referenced via `declare-function`, so the package byte-compiles and tests without its native module present. `dtach` is an optional dependency: only detachable instances need it on their host. A new dependency needs a reason no built-in can answer.
 - **Source split:** the core orchestration lives in `claude-code.el`; the MCP
   server lives in `claude-code-mcp.el` (loaded lazily by the spawn path, so
   `claude-code.el` `declare-function`s its one entry point). Tests mirror the

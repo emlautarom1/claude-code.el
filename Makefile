@@ -4,23 +4,16 @@ TESTS := test/claude-code-tests.el test/claude-code-mcp-tests.el
 
 ## Everything needed to load the package and the suite into a batch Emacs.
 ## A source edited since `make compile' outranks its stale .elc.
-ERT_LOAD := --eval '(package-initialize)' --eval '(setq load-prefer-newer t)' \
+ERT_LOAD := --eval '(setq load-prefer-newer t)' \
 	    -L . -L test -l ert $(foreach t,$(TESTS),-l $(t))
 
-.PHONY: all deps compile test integration lint clean
+.PHONY: all compile test integration lint clean
 
 all: compile test
-
-## Install the external package dependencies (web-server) if missing.
-## A true no-op (no network) once installed; MELPA is added as a fallback
-## archive since web-server may come from GNU/nongnu or MELPA per environment.
-deps:
-	$(EMACS) -Q --batch --eval '(progn (require (quote package)) (add-to-list (quote package-archives) (quote ("melpa" . "https://melpa.org/packages/")) t) (package-initialize) (unless (package-installed-p (quote web-server)) (package-refresh-contents) (package-install (quote web-server))))'
 
 ## Byte-compile with warnings promoted to errors.
 compile:
 	$(EMACS) -Q --batch \
-	  --eval '(package-initialize)' \
 	  --eval '(setq byte-compile-error-on-warn t)' \
 	  -L . -f batch-byte-compile $(SRC)
 
@@ -33,7 +26,7 @@ test:
 ## The test strips Claude's nesting env vars itself, so this works even when
 ## invoked from inside a Claude Code session.
 integration:
-	CLAUDE_CODE_INTEGRATION=1 $(EMACS) --batch $(ERT_LOAD) \
+	CLAUDE_CODE_INTEGRATION=1 $(EMACS) --batch --eval '(package-initialize)' $(ERT_LOAD) \
 	  --eval '(ert-run-tests-batch-and-exit "integration")'
 
 ## Run checkdoc over the sources, failing the build on any diagnostic.
