@@ -637,6 +637,13 @@ have the flag build a fresh checkout beside the work rather than return to it."
           (should (equal (claude-code--resume-worktree
                           root (list :name "feat" :path inside :bound nil))
                          "feat"))
+          ;; Claude records a `/' in the name as written, and builds the
+          ;; checkout with it flattened to `+'.
+          (let ((flat (expand-file-name ".claude/worktrees/team+feat" root)))
+            (make-directory flat t)
+            (should (equal (claude-code--resume-worktree
+                            root (list :name "team/feat" :path flat :bound nil))
+                           "team/feat")))
           ;; Same name, same repository, a directory that exists -- and still
           ;; no flag, because the flag would not land there.
           (should-not (claude-code--resume-worktree
@@ -706,7 +713,7 @@ to nothing."
                  '("/home/me/proj" . "my.feat")))
   (should (equal (claude-code--worktree-parent
                   "/home/me/proj/.claude/worktrees/team+feat")
-                 '("/home/me/proj" . "team+feat")))
+                 '("/home/me/proj" . "team/feat")))
   (should-not (claude-code--worktree-parent "/home/me/proj/.claude/worktrees"))
   (should-not (claude-code--worktree-parent
                "/home/me/proj/.claude/worktrees/feat/nested"))
@@ -727,10 +734,11 @@ to nothing."
           (should-not (claude-code--worktree-names root))
           (make-directory (claude-code--worktree-path root "feat") t)
           (make-directory (claude-code--worktree-path root "my.feat") t)
+          (make-directory (expand-file-name ".claude/worktrees/team+feat" root) t)
           ;; A file among them is not a checkout.
           (with-temp-file (claude-code--worktree-path root "stray") (insert "x"))
           (should (equal (sort (claude-code--worktree-names root) #'string<)
-                         '("feat" "my.feat"))))
+                         '("feat" "my.feat" "team/feat"))))
       (delete-directory root t))))
 
 (defmacro claude-code-tests--with-transcript (var lines mtime &rest body)
@@ -1510,9 +1518,13 @@ Only an instance Emacs manages has one."
           (claude-code--register "a" buf "/home/test/proj" nil)
           (should (equal (claude-code--instance-cwd buf)
                          "/home/test/proj/.claude/worktrees/feat"))
-          ;; Before that file exists, the launch root stands in.
+          ;; Before that file exists, the launch root stands in, or the
+          ;; worktree it was asked to run in.
           (claude-code--register "b" new "/home/x/proj" nil)
           (should (equal (claude-code--instance-cwd new) "/home/x/proj"))
+          (claude-code--register "b" new "/home/x/proj" "team/feat")
+          (should (equal (claude-code--instance-cwd new)
+                         "/home/x/proj/.claude/worktrees/team+feat"))
           ;; A buffer Emacs does not manage gets nothing, sessions/ file or not.
           (should (null (claude-code--instance-cwd stranger)))
           (should (null (claude-code--instance-cwd nil))))))))
@@ -2723,6 +2735,32 @@ that left it until afterwards could not switch at all."
                        (apply recorded buffer args))))
             (claude-code-spawn "/r")
             (should (eq at-exec 'claude-code-instance-mode))))))))
+
+(ert-deftest claude-code-test-launch-in-a-worktree-names-it ()
+  "A launch rooted in a Claude worktree starts from its parent, naming it.
+A worktree the caller asks for outranks it."
+  (claude-code-tests--with-fixtures
+    (claude-code-tests--with-registry
+      (let ((execs '()))
+        (claude-code-tests--recording-launch execs
+          (pcase-dolist (`(,root ,requested ,flag ,recorded)
+                         '(("/r/.claude/worktrees/feat" nil
+                            "--worktree=feat" "feat")
+                           ("/r/.claude/worktrees/feat" "other"
+                            "--worktree=other" "other")
+                           ("/r/.claude/worktrees/feat" t "--worktree" nil)
+                           ("/r/.claude/worktrees/team+feat" nil
+                            "--worktree=team/feat" "team/feat")))
+            (let* ((id (car (claude-code-spawn root :worktree requested)))
+                   (entry (claude-code-tests--entry id)))
+              (should (equal (nth 1 (car execs)) (list "--session-id" id flag)))
+              (should (equal (plist-get entry :origin) "/r"))
+              (should (equal (plist-get entry :worktree) recorded))))
+          (claude-code-resume "/r/.claude/worktrees/feat" "given-id")
+          (should (equal (nth 1 (car execs))
+                         '("--worktree=feat" "--resume=given-id")))
+          (should (equal (plist-get (claude-code-tests--entry "given-id") :origin)
+                         "/r")))))))
 
 (ert-deftest claude-code-test-launch-shared-by-spawn-and-resume ()
   "Spawn and resume host their instance through one launch path.

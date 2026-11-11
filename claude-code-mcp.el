@@ -215,8 +215,8 @@ with (window-buffer (selected-window))."
 (defun claude-code--mcp-tool-spawn (prompt name model effort worktree)
   "Handle the `spawn' tool; return the new session's id.
 PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
-WORKTREE the name of the checkout to run in.  The root is not among them: an
-instance is launched from the directory of the session that asked for it."
+WORKTREE the name of the checkout to run in.  The root is not among them: it
+is the directory of the session that asked."
   (car (claude-code-spawn claude-code--mcp-session-cwd
                           :prompt prompt :name name
                           :model model :effort effort

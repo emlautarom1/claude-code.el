@@ -588,7 +588,7 @@ reached the CLI without a `claude' ever running."
   (alist-get 'text (aref (alist-get 'content (alist-get 'result response)) 0)))
 
 (ert-deftest claude-code-mcp-test-spawn-in-the-callers-directory ()
-  "`spawn' launches in the calling session's own directory and returns the id.
+  "`spawn' runs in the calling session's own directory and returns the id.
 The directory is the server's to resolve -- the tool takes no path argument --
 and the id is what the caller has to find the session by afterwards."
   (let ((execs '()))
@@ -604,7 +604,16 @@ and the id is what the caller has to find the session by afterwards."
         (should (equal (plist-get (claude-code-tests--entry id) :origin)
                        (claude-code--normalize-root "/home/test/proj")))
         (should (equal (nth 1 (car execs))
-                       (list "--session-id" id)))))))
+                       (list "--session-id" id)))))
+    ;; A caller in a Claude worktree has the instance join that worktree.
+    (claude-code-mcp-tests--with-caller caller
+        "/home/test/proj/.claude/worktrees/feat" execs
+      (let ((id (claude-code-mcp-tests--result-text
+                 (claude-code-mcp-tests--call-tool caller "spawn"))))
+        (should (equal (plist-get (claude-code-tests--entry id) :origin)
+                       (claude-code--normalize-root "/home/test/proj")))
+        (should (equal (nth 1 (car execs))
+                       (list "--session-id" id "--worktree=feat")))))))
 
 (ert-deftest claude-code-mcp-test-spawn-options ()
   "Every option reaches the CLI, and a worktree is asked for by name."

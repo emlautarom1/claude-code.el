@@ -223,17 +223,26 @@ data instead.  See docs/storage-model.md for the rule."
 Claude puts one nowhere else, which is what lets a name round-trip.")
 
 (defun claude-code--worktree-path (root name)
-  "Return the checkout `--worktree=NAME' builds under ROOT."
-  (expand-file-name (concat claude-code--worktrees-dir "/" name) root))
+  "Return the checkout `--worktree=NAME' builds under ROOT.
+The CLI flattens a `/' in NAME to `+'."
+  (expand-file-name (concat claude-code--worktrees-dir "/"
+                            (string-replace "/" "+" name))
+                    root))
+
+(defun claude-code--worktree-name (dir)
+  "Return the name of the worktree whose checkout is directory DIR.
+A `+', which no name may contain, is a `/' the CLI flattened."
+  (string-replace "+" "/" (file-name-nondirectory dir)))
 
 (defun claude-code--worktree-names (root)
   "Return the names of the worktrees Claude keeps under ROOT.
 Naming one of these runs a session in it rather than building another."
   (let ((dir (expand-file-name claude-code--worktrees-dir root)))
     (when (file-directory-p dir)
-      (seq-filter (lambda (name)
-                    (file-directory-p (expand-file-name name dir)))
-                  (directory-files dir nil directory-files-no-dot-files-regexp t)))))
+      (mapcar #'claude-code--worktree-name
+              (seq-filter #'file-directory-p
+                          (directory-files
+                           dir t directory-files-no-dot-files-regexp t))))))
 
 (defun claude-code--worktree-parent (root)
   "Return (PARENT . NAME) when ROOT is a worktree Claude built, else nil.
@@ -243,7 +252,7 @@ what is left: a path `--worktree=NAME' could not have built fails to rebuild.
 Three is the whole depth, and the components are real, so NAME comes back as
 the user wrote it (see docs/storage-model.md).  A checkout kept anywhere else
 files its transcripts under itself, making it a project in its own right."
-  (and-let* ((name (file-name-nondirectory root))
+  (and-let* ((name (claude-code--worktree-name root))
              ((not (string-empty-p name)))
              (up1 (file-name-parent-directory root))
              (up2 (file-name-parent-directory up1))
@@ -932,9 +941,13 @@ RSS is in kibibytes."
   "Return the directory the managed instance BUFFER hosts works in, or nil.
 That is what its sessions/ file says (`claude-code--instance-entry') -- the
 worktree directory for one working in a worktree -- and, before that file has
-been read, the root it was launched from."
+been read, the worktree it was asked to run in or the root it was launched
+from."
   (when-let* ((entry (claude-code--instance-entry buffer)))
-    (or (plist-get (plist-get entry :info) :cwd) (plist-get entry :origin))))
+    (let ((origin (plist-get entry :origin))
+          (worktree (plist-get entry :worktree)))
+      (or (plist-get (plist-get entry :info) :cwd)
+          (if worktree (claude-code--worktree-path origin worktree) origin)))))
 
 (defun claude-code--session-directory (session root)
   "Return the directory SESSION, listed under project ROOT, works in now.
@@ -1297,11 +1310,12 @@ instance's when it is already known, and then no report of it is awaited."
 (defun claude-code--launch (id project-root detachable &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
 PROJECT-ROOT is the directory it is launched from and recorded as the instance's
-origin, and a non-nil DETACHABLE makes the instance detachable.  OPTS are
-`:prompt', `:name', `:worktree', `:model' and `:effort' as
-`claude-code--build-args' takes them, or `:resume' ID to resume that session
-rather than start it, which `:worktree' may accompany; the `:worktree' request
-is also recorded in the registry.
+origin, except that a worktree Claude built is swapped for its parent, with
+`:worktree' defaulting to its name.  A non-nil DETACHABLE makes the instance
+detachable.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort'
+as `claude-code--build-args' takes them, or `:resume' ID to resume that
+session rather than start it, which `:worktree' may accompany; the
+`:worktree' request is also recorded in the registry.
 The instance is launched through `claude-code--reporting-command', under
 `claude-code--holding-command' when detachable, with `CLAUDE_CONFIG_DIR' as
 `claude-code--config-env' has it, on `claude-code-renderer' when it names one,
@@ -1311,6 +1325,9 @@ and with the arguments and environment `claude-code--mcp-wiring' asks for."
   (let* (;; Resolved first so a bad value aborts before a buffer is created.
          (renderer-env (claude-code--renderer-env))
          (root (claude-code--normalize-root project-root))
+         (tree (claude-code--worktree-parent root))
+         (root (or (car tree) root))
+         (worktree (or (plist-get opts :worktree) (cdr tree)))
          (default-directory (file-name-as-directory root))
          (program (claude-code--resolve-executable claude-code-cli))
          (dtach (and detachable
@@ -1327,7 +1344,9 @@ and with the arguments and environment `claude-code--mcp-wiring' asks for."
          (command (claude-code--reporting-command
                    program
                    (append (car mcp)
-                           (apply #'claude-code--build-args :session-id id opts)))))
+                           ;; The leading `:worktree' outranks the one in OPTS.
+                           (apply #'claude-code--build-args
+                                  :session-id id :worktree worktree opts)))))
     (claude-code--start-terminal
      buffer
      (if dtach
@@ -1336,8 +1355,7 @@ and with the arguments and environment `claude-code--mcp-wiring' asks for."
      (append renderer-env
              (list (cons "CLAUDE_CONFIG_DIR" config))
              (cdr mcp)))
-    (claude-code--register id buffer root (plist-get opts :worktree)
-                           (and detachable t))
+    (claude-code--register id buffer root worktree (and detachable t))
     buffer))
 
 (defun claude-code--detachable-default (root)
