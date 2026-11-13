@@ -4802,6 +4802,53 @@ A session without a time has no transcript yet, so it is the newest."
     (should (claude-code--time-less-p '("new" []) '("none" [])))
     (should-not (claude-code--time-less-p '("none" []) '("new" [])))))
 
+(ert-deftest claude-code-test-status-less-p ()
+  "The Status-column sorter orders sessions most urgent first.
+Status ranks first, as status groups do, so an alive session with no status yet
+or an unknown one ranks after every known status and before external and dead
+sessions; then the glyph the Status cell shows; then the last activity, newest
+first, a session with none yet the newest."
+  (let ((claude-code--session-table (make-hash-table :test 'equal))
+        (sessions
+         (list (claude-code-session--create :id "dead" :last-active 300)
+               (claude-code-session--create :id "external" :external-p t
+                                            :last-active 300)
+               (claude-code-session--create :id "attachable" :external-p t
+                                            :holder "/s" :last-active 100)
+               (claude-code-session--create :id "unknown" :alive-p t
+                                            :status "compacting"
+                                            :last-active 300)
+               (claude-code-session--create :id "no-status" :alive-p t)
+               (claude-code-session--create :id "idle-old" :alive-p t
+                                            :status "idle" :last-active 100)
+               (claude-code-session--create :id "idle-new" :alive-p t
+                                            :status "idle" :last-active 200)
+               (claude-code-session--create :id "idle-fresh" :alive-p t
+                                            :status "idle")
+               (claude-code-session--create :id "idle-done" :alive-p t
+                                            :status "idle" :turn-end 'done
+                                            :last-active 100)
+               (claude-code-session--create :id "idle-error" :alive-p t
+                                            :status "idle" :turn-end 'error
+                                            :last-active 100)
+               (claude-code-session--create :id "shell" :alive-p t
+                                            :status "shell" :last-active 100)
+               (claude-code-session--create :id "busy" :alive-p t
+                                            :status "busy" :last-active 100)
+               (claude-code-session--create :id "waiting" :alive-p t
+                                            :status "waiting"
+                                            :last-active 100))))
+    (dolist (s sessions)
+      (puthash (claude-code-session-id s) s claude-code--session-table))
+    (should (equal (mapcar #'car
+                           (sort (mapcar (lambda (s)
+                                           (list (claude-code-session-id s) []))
+                                         sessions)
+                                 #'claude-code--status-less-p))
+                   '("waiting" "busy" "shell" "idle-error" "idle-done"
+                     "idle-fresh" "idle-new" "idle-old" "no-status" "unknown"
+                     "attachable" "external" "dead")))))
+
 (ert-deftest claude-code-test-session-display-name ()
   "The display name draws on one ordered set of transcript sources."
   ;; The transcript title wins over the prompt and the id.
@@ -6650,27 +6697,45 @@ They follow its marks, and an expanded group shows the glyphs themselves."
                         (car (car (claude-code--tabulated-groups))))
                        "▾ Alive (5)"))))))
 
-(ert-deftest claude-code-test-view-sorts-by-turn-end ()
-  "`S' on the Status column sorts each group by turn end."
+(ert-deftest claude-code-test-view-sorts-by-status ()
+  "A view lists each group's rows most urgent first, under either grouping.
+Grouped by liveness, a waiting session heads the alive group however long it
+has waited; grouped by status, a group's finished turn heads a newer one.  `S'
+on the Status column reverses the rows within each group."
   (claude-code-tests--in-view
-    (let ((sessions (mapcar (lambda (spec)
-                              (claude-code-session--create
-                               :id (car spec) :alive-p t :status "idle"
-                               :turn-end (cdr spec)))
-                            '(("a" . done) ("b") ("c" . error)))))
+    (let ((sessions
+           (list (claude-code-session--create :id "i" :alive-p t :status "idle"
+                                              :last-active 300)
+                 (claude-code-session--create :id "d" :alive-p t :status "idle"
+                                              :turn-end 'done :last-active 100)
+                 (claude-code-session--create :id "w" :alive-p t
+                                              :status "waiting" :last-active 200)))
+          (row-ids (lambda ()
+                     (let ((ids '()))
+                       (goto-char (point-min))
+                       (while (not (eobp))
+                         (when-let* ((id (tabulated-list-get-id))) (push id ids))
+                         (forward-line 1))
+                       (nreverse ids)))))
       (cl-letf (((symbol-function 'claude-code-project-sessions)
                  (lambda (_) sessions)))
         (setq claude-code--project "/r")
         (claude-code-sessions-refresh)
-        (claude-code-tests--goto-session "a")
+        (should (equal (funcall row-ids) '("w" "d" "i")))
+        (claude-code-sessions-cycle-grouping)
+        (should (equal (funcall row-ids) '("w" "d" "i")))
+        (claude-code-tests--goto-session "d")
         (forward-char tabulated-list-padding)
         (tabulated-list-sort)
-        (let ((ids '()))
-          (goto-char (point-min))
-          (while (not (eobp))
-            (when-let* ((id (tabulated-list-get-id))) (push id ids))
-            (forward-line 1))
-          (should (equal (nreverse ids) '("b" "a" "c"))))))))
+        (should (equal (funcall row-ids) '("w" "i" "d")))))))
+
+(ert-deftest claude-code-test-view-sort-is-its-own ()
+  "Reversing one view's sort leaves the next view's sort alone."
+  (claude-code-tests--in-view
+    (tabulated-list-sort 0)
+    (should (equal tabulated-list-sort-key '("Status" . t)))
+    (claude-code-tests--in-view
+      (should (equal tabulated-list-sort-key '("Status"))))))
 
 (ert-deftest claude-code-test-view-samples-a-remote-host-whole ()
   "A remote project's view reads its host's process table once, for every row.

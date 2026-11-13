@@ -2308,15 +2308,18 @@ USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
 
 ;;;;; Grouping
 
-(defun claude-code--group-key (session)
-  "Return the group key of SESSION under the current grouping.
-The key is the name of SESSION's liveness state, so external and dead sessions
-form their own groups regardless of the grouping mode; only an alive session
-splits out by status, and only when grouping by status."
+(defun claude-code--status-key (session)
+  "Return the name of SESSION's status, or of its liveness when it has none."
   (let ((liveness (claude-code--session-liveness session)))
-    (if (and (eq liveness 'alive) (eq claude-code--group-by 'status))
+    (if (eq liveness 'alive)
         (or (claude-code-session-status session) "alive")
       (symbol-name liveness))))
+
+(defun claude-code--group-key (session)
+  "Return the group key of SESSION under the current grouping."
+  (if (eq claude-code--group-by 'status)
+      (claude-code--status-key session)
+    (symbol-name (claude-code--session-liveness session))))
 
 (defun claude-code--group-rank (key)
   "Return the display rank of group KEY; lower ranks come first."
@@ -2374,6 +2377,21 @@ ENTRY is a tabulated-list entry whose car is the row key, looked up in
   "Order tabulated-list entries A and B by their session's last-active time.
 A session without a known time has no transcript yet, and sorts as newest."
   (< (claude-code--entry-time a) (claude-code--entry-time b)))
+
+(defun claude-code--status-order (entry)
+  "Return ENTRY's position in the Status column's order, lowest most urgent."
+  (let* ((session (gethash (car entry) claude-code--session-table))
+         (turn-end (claude-code-session-turn-end session)))
+    (list (claude-code--group-rank (claude-code--status-key session))
+          (cond ((claude-code-session-holder session) 2)
+                ((eq turn-end 'error) 0)
+                ((eq turn-end 'done) 1)
+                (t 3))
+          (- (claude-code--entry-time entry)))))
+
+(defun claude-code--status-less-p (a b)
+  "Order tabulated-list entries A and B most urgent first."
+  (value< (claude-code--status-order a) (claude-code--status-order b)))
 
 (defun claude-code--read-view ()
   "Read the current view's sessions and their usage into its tables.
@@ -2879,7 +2897,7 @@ See `claude-code-detach'."
     (claude-code-send-text session (read-string "Send: ") t)))
 
 (defun claude-code-sessions-cycle-grouping ()
-  "Toggle grouping between status and alive/dead state."
+  "Toggle grouping between liveness and status."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (setq claude-code--group-by
@@ -3059,7 +3077,7 @@ rather than wrapping them a second time.
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-printer #'claude-code--print-entry)
   (setq-local tabulated-list-format
-              (vector '("Status" 10 t)
+              (vector (list "Status" 10 #'claude-code--status-less-p)
                       (list "Active" 8 #'claude-code--time-less-p :right-align t)
                       '("Id" 9 t)
                       '("Worktree" 14 t)
@@ -3070,8 +3088,8 @@ rather than wrapping them a second time.
                       ;; Name is last so it is never truncated and fills the
                       ;; remaining window width.
                       '("Name" 26 t)))
-  ;; Reverse (`t') so the most recently active session heads each group.
-  (setq-local tabulated-list-sort-key '("Active" . t))
+  ;; A fresh list: `tabulated-list' reverses a sort by mutating its key.
+  (setq-local tabulated-list-sort-key (list "Status"))
   ;; Not a function: `C-u -1 S' sorts this value directly.
   (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
