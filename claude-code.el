@@ -2372,37 +2372,46 @@ ENTRY is a tabulated-list entry whose car is the row key, looked up in
 A session without a known time has no transcript yet, and sorts as newest."
   (< (claude-code--entry-time a) (claude-code--entry-time b)))
 
-(defun claude-code--tabulated-groups ()
-  "Return the grouped rows for the current view, honouring collapse state.
-Also prunes `claude-code--marks' to the sessions this listing holds, so a mark
-cannot outlive its row and come back armed."
+(defun claude-code--read-view ()
+  "Read the current view's sessions and their usage into its tables.
+`claude-code--session-table' and `claude-code--usage-table' are what every
+reprint draws, so this is the one place a view reads its project.  Also prunes
+`claude-code--marks' to the rows read, so a mark cannot outlive its row and
+come back armed."
   (let* ((sessions (claude-code-project-sessions claude-code--project))
          (host (file-remote-p claude-code--project))
          ;; One table shared by every row, and built only where a subtree
          ;; cannot be sampled on its own.
          (snapshot (when (and (or host (not claude-code--proc-children-p))
                               (seq-some #'claude-code-session-pid sessions))
-                     (claude-code--process-snapshot host)))
-         (now (current-time))
-         (buckets (make-hash-table :test 'equal))
-         (order '()))
+                     (claude-code--process-snapshot host))))
     (clrhash claude-code--session-table)
     (clrhash claude-code--usage-table)
     (dolist (session sessions)
-      (let ((row (claude-code--row-key session))
-            (key (claude-code--group-key session)))
+      (let ((row (claude-code--row-key session)))
         (puthash row session claude-code--session-table)
         (when (and (claude-code-session-alive-p session)
                    (claude-code-session-pid session))
           (puthash row (claude-code--process-usage
                         (claude-code-session-pid session) snapshot)
-                   claude-code--usage-table))
-        (push key order)
-        (push session (gethash key buckets))))
-    (setq order (sort (delete-dups order) #'claude-code--group-less-p))
+                   claude-code--usage-table))))
     (setq claude-code--marks
           (seq-filter (lambda (row) (gethash row claude-code--session-table))
-                      claude-code--marks))
+                      claude-code--marks))))
+
+(defun claude-code--tabulated-groups ()
+  "Return the grouped rows of the view's last read, honouring collapse state.
+The view's variable `tabulated-list-groups', so every reprint draws what
+`claude-code--read-view' last read, with no read of its own."
+  (let ((now (current-time))
+        (buckets (make-hash-table :test 'equal))
+        (order '()))
+    (maphash (lambda (_row session)
+               (let ((key (claude-code--group-key session)))
+                 (push key order)
+                 (push session (gethash key buckets))))
+             claude-code--session-table)
+    (setq order (sort (delete-dups order) #'claude-code--group-less-p))
     (mapcar
      (lambda (key)
        (let ((rows (nreverse (gethash key buckets)))
@@ -2505,6 +2514,50 @@ the redraw happens however the batch ends."
       (message "%s %d, refused %d: %s" done (length acted) (length refused)
                (string-join (nreverse refused) "; ")))))
 
+(defun claude-code--view-outdated-p ()
+  "Return non-nil when Emacs knows a remote view no longer shows its instances.
+A view of a remote project is read only on `g' and by the commands that change
+its sessions.  Emacs knows without asking the host when an instance of the
+project starts or closes, and when a drawn one reports another PID or status
+modifier.  A view of a local project is read again on each of these, so it
+never is."
+  (when (file-remote-p claude-code--project)
+    (or (seq-some
+         (lambda (session)
+           (let ((buffer (claude-code-session-buffer session)))
+             (or (not (claude-code--session-process buffer))
+                 (not (eql (claude-code-session-pid session)
+                           (claude-code--instance-pid buffer)))
+                 (not (equal (and (claude-code-session-modifier session)
+                                  (cons (claude-code-session-modifier session)
+                                        (claude-code-session-modifier-message
+                                         session)))
+                             (claude-code--record-modifier
+                              (claude-code--root-record buffer)))))))
+         (seq-filter #'claude-code-session-alive-p
+                     (hash-table-values claude-code--session-table)))
+        (cl-loop for buffer being the hash-keys of claude-code--managed
+                 using (hash-values entry)
+                 thereis (and (claude-code--session-process buffer)
+                              (claude-code--under-root-p (plist-get entry :origin)
+                                                         claude-code--project)
+                              (not (gethash buffer
+                                            claude-code--session-table)))))))
+
+(defun claude-code--offer-refresh ()
+  "Offer to read an outdated view again instead of acting on it.
+Accepting reads it and signals a `user-error', so the command acting on the
+view stops; declining leaves the command to act on the view as drawn.  Asked
+by the commands that change sessions, as `kmacro-menu' asks before acting on
+a table that no longer matches."
+  (when (and (claude-code--view-outdated-p)
+             (yes-or-no-p
+              (format "Sessions on %s changed since this view was read.  \
+Refresh instead? "
+                      (file-remote-p claude-code--project 'host))))
+    (claude-code--refresh-view)
+    (user-error "Refreshed the view; nothing was done")))
+
 (defun claude-code--instance-at-point ()
   "Return the alive session on the current line, or signal a `user-error'.
 Aliveness is tested through the live process, not the row's `alive-p': a view
@@ -2573,7 +2626,7 @@ carries the key any more."
       (point))))
 
 (defun claude-code--redraw (&optional group)
-  "Reprint the view, keeping every window showing it on the row it was on.
+  "Reprint the view's last read, keeping every window showing it on its row.
 The view's own point and each window's point and start are found again by the
 row or group header they were on, and by their line when it is no longer
 printed.  GROUP, when given, puts point on that group's header instead."
@@ -2591,11 +2644,21 @@ printed.  GROUP, when given, puts point on that group's header instead."
       (set-window-start window (claude-code--row-pos start) t)))
   (claude-code--goto-group group))
 
+(defun claude-code--refresh-view ()
+  "Read the current view's project again and redraw the view."
+  (claude-code--read-view)
+  (claude-code--redraw))
+
+(defun claude-code--revert-view (&rest _)
+  "Read the current view's project again and redraw the view.
+The view's `revert-buffer-function'."
+  (claude-code--refresh-view))
+
 (defun claude-code-sessions-refresh ()
-  "Recompute and redraw the sessions view."
+  "Read the sessions again and redraw the view."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
-  (claude-code--redraw))
+  (claude-code--refresh-view))
 
 (defun claude-code--views ()
   "Return every sessions-view buffer that names a project, displayed or not.
@@ -2608,17 +2671,17 @@ has nothing to list, so it is not a view for these purposes."
               (buffer-list)))
 
 (defun claude-code--update-view ()
-  "Redraw the current view while a window shows it, else once one does."
+  "Refresh the current view while a window shows it, else once one does."
   (if (get-buffer-window-list nil nil t)
-      (claude-code--redraw)
+      (claude-code--refresh-view)
     (setq claude-code--stale t)))
 
 (defun claude-code--redraw-if-stale (window)
-  "Redraw the view WINDOW shows if a change reached it out of sight.
+  "Refresh the view WINDOW shows if a change reached it out of sight.
 A buffer-local `window-buffer-change-functions' entry."
   (with-current-buffer (window-buffer window)
     (when claude-code--stale
-      (claude-code--redraw))))
+      (claude-code--refresh-view))))
 
 (defun claude-code--refresh-views ()
   "Update every sessions view (`claude-code--update-view').
@@ -2631,8 +2694,8 @@ Which sessions a view lists is not exclusive to it (see
 (defun claude-code--on-sessions-changed (host)
   "Update every view of a local project when HOST, this machine, has changed.
 A `claude-code--sessions-changed-functions' entry.  A view of a remote project
-reads over the network to redraw, so it is left to `g' and to the commands that
-change its sessions."
+reads over the network, so it is read on `g' and by the commands that change
+its sessions; `claude-code--view-outdated-p' is what it knows in between."
   (unless host
     (dolist (buffer (claude-code--views))
       (with-current-buffer buffer
@@ -2645,8 +2708,7 @@ change its sessions."
 (defun claude-code--drop-marks (rows)
   "Unmark the rows whose keys are ROWS in every sessions view.
 A killed external session stays listed under its key, so the pruning
-`claude-code--tabulated-groups' does on redraw would otherwise keep its mark
-armed."
+`claude-code--read-view' does would otherwise keep its mark armed."
   (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
       (setq claude-code--marks
@@ -2757,6 +2819,7 @@ Called with the directory of the session at point by
 A running session is an alive or an external one; see `claude-code-kill'."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
+  (claude-code--offer-refresh)
   (let ((targets (claude-code--target-sessions 'alive 'external)))
     (if (null targets)
         (user-error "No running session selected")
@@ -2768,6 +2831,7 @@ A running session is an alive or an external one; see `claude-code-kill'."
 See `claude-code-detach'."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
+  (claude-code--offer-refresh)
   (let ((targets (claude-code--target-sessions 'alive)))
     (if (null targets)
         (user-error "No alive session selected")
@@ -2777,6 +2841,7 @@ See `claude-code-detach'."
   "Delete the marked dead sessions, or the one at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
+  (claude-code--offer-refresh)
   (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
         (user-error "No dead session selected")
@@ -2809,7 +2874,7 @@ See `claude-code-detach'."
   (claude-code--ensure-sessions-mode)
   (setq claude-code--group-by
         (if (eq claude-code--group-by 'status) 'state 'status))
-  (claude-code-sessions-refresh))
+  (claude-code--redraw))
 
 (defun claude-code-sessions-transcript ()
   "Show the transcript of the session at point beside the view.
@@ -3000,6 +3065,7 @@ rather than wrapping them a second time.
   ;; Not a function: `C-u -1 S' sorts this value directly.
   (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
+  (setq-local revert-buffer-function #'claude-code--revert-view)
   (add-hook 'eldoc-documentation-functions #'claude-code--eldoc-session nil t)
   (add-hook 'window-buffer-change-functions #'claude-code--redraw-if-stale nil t)
   (tabulated-list-init-header))

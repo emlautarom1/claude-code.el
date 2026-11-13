@@ -5884,6 +5884,7 @@ window shows is left to redraw once one does."
                    (lambda (&rest _)
                      (push (buffer-name) redrawn)
                      (push (buffer-name) ever-redrawn)))
+                  ((symbol-function 'claude-code--read-view) #'ignore)
                   ((symbol-function 'claude-code-spawn)
                    (lambda (&rest _) (cons "spawned-id" instance)))
                   ((symbol-function 'claude-code--resume) (lambda (&rest _) instance))
@@ -5951,7 +5952,8 @@ A view of a remote project would read over the network to redraw."
           (set-window-buffer (selected-window) local)
           (set-window-buffer (split-window) remote)
           (cl-letf (((symbol-function 'claude-code--redraw)
-                     (lambda (&rest _) (push (current-buffer) redrawn))))
+                     (lambda (&rest _) (push (current-buffer) redrawn)))
+                    ((symbol-function 'claude-code--read-view) #'ignore))
             (with-current-buffer local
               (claude-code-sessions-mode)
               (setq claude-code--project "/home/test/proj"))
@@ -6164,6 +6166,124 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
         (funcall reprint)
         (should (equal marked (claude-code-tests--tagged-ids)))))))
 
+(ert-deftest claude-code-test-view-reprints-without-reading ()
+  "Only `g', `revert-buffer' and opening the view read the sessions.
+Folding, regrouping, sorting and column widths reprint what the last read
+found, which costs a remote view no round trip."
+  (let ((reads 0))
+    (cl-letf (((symbol-function 'claude-code-project-sessions)
+               (lambda (_)
+                 (cl-incf reads)
+                 (list (claude-code-session--create :id "a" :alive-p t
+                                                    :status "idle")
+                       (claude-code-session--create :id "d")))))
+      (claude-code-tests--in-view
+        (setq claude-code--project "/r"
+              claude-code--collapsed nil)
+        (claude-code-sessions-refresh)
+        (should (= reads 1))
+        (claude-code--goto-group "dead")
+        (claude-code-sessions-toggle-group)
+        (claude-code-sessions-toggle-group)
+        (claude-code-sessions-cycle-grouping)
+        (tabulated-list-sort 6)
+        (claude-code-tests--goto-session "a")
+        (tabulated-list-widen-current-column 1)
+        (should (= reads 1))
+        (should (string-match-p "Dead (1)" (buffer-string)))
+        (revert-buffer)
+        (should (= reads 2))
+        (claude-code-sessions-refresh)
+        (should (= reads 3))))))
+
+(ert-deftest claude-code-test-remote-view-outdated-by-what-emacs-knows ()
+  "A remote view is outdated once Emacs knows its instances changed since the read.
+An instance of the project starting or closing, or a drawn one's PID or status
+modifier changing, is known without asking the host.  A view of a local
+project, read again on every such change, never is."
+  (let* ((root "/ssh:cc-test-host:/r")
+         (old (generate-new-buffer " *cc-old*"))
+         (new (generate-new-buffer " *cc-new*"))
+         (live (list old)))
+    (unwind-protect
+        (claude-code-tests--with-registry
+          (cl-letf (((symbol-function 'claude-code--session-process)
+                     (lambda (buffer) (car (memq buffer live))))
+                    ((symbol-function 'claude-code--process-snapshot) #'ignore)
+                    ((symbol-function 'claude-code--process-usage) #'ignore)
+                    ((symbol-function 'claude-code-project-sessions)
+                     (lambda (_)
+                       (mapcar #'claude-code--alive-session
+                               (seq-filter (lambda (b) (memq b live))
+                                           (hash-table-keys claude-code--managed))))))
+            (dolist (spec (list (list old 100 "a") (list new 200 "b")))
+              (with-current-buffer (car spec)
+                (setq-local claude-code--pid (nth 1 spec)
+                            ghostel-program-status nil)))
+            (puthash old (list :origin root :session "a") claude-code--managed)
+            (claude-code-tests--in-view
+              (setq claude-code--project root)
+              (claude-code-sessions-refresh)
+              (should-not (claude-code--view-outdated-p))
+              (with-current-buffer old
+                (setq-local ghostel-program-status '(("" :state done))))
+              (should (claude-code--view-outdated-p))
+              (claude-code-sessions-refresh)
+              (should-not (claude-code--view-outdated-p))
+              (with-current-buffer old (setq-local claude-code--pid 101))
+              (should (claude-code--view-outdated-p))
+              (claude-code-sessions-refresh)
+              (push new live)
+              (puthash new (list :origin root :session "b") claude-code--managed)
+              (should (claude-code--view-outdated-p))
+              (claude-code-sessions-refresh)
+              (should-not (claude-code--view-outdated-p))
+              (setq live (list new))
+              (should (claude-code--view-outdated-p))
+              (setq claude-code--project "/r")
+              (should-not (claude-code--view-outdated-p)))))
+      (kill-buffer old)
+      (kill-buffer new))))
+
+(ert-deftest claude-code-test-outdated-remote-view-offers-a-refresh ()
+  "`k', `x' and `d' on an outdated remote view offer to refresh it instead.
+Accepting reads the view again and does nothing else; declining acts on the
+view as drawn."
+  (let ((acted '()) (refreshed 0) (answer nil) (offered '()))
+    (cl-letf (((symbol-function 'claude-code--view-outdated-p) (lambda () t))
+              ((symbol-function 'claude-code--refresh-view)
+               (lambda () (cl-incf refreshed)))
+              ((symbol-function 'claude-code--refresh-views) #'ignore)
+              ((symbol-function 'yes-or-no-p)
+               (lambda (prompt)
+                 (if (string-prefix-p "Sessions on " prompt)
+                     (progn (push prompt offered) answer)
+                   t)))
+              ((symbol-function 'claude-code-kill)
+               (lambda (s) (push (list 'kill (claude-code-session-id s)) acted)))
+              ((symbol-function 'claude-code-detach)
+               (lambda (s) (push (list 'detach (claude-code-session-id s)) acted)))
+              ((symbol-function 'claude-code-delete)
+               (lambda (s) (push (list 'delete (claude-code-session-id s)) acted))))
+      (claude-code-tests--in-view
+        (setq-local claude-code--project "/ssh:cc-test-host:/r")
+        (dolist (s (list (claude-code-session--create :id "a" :alive-p t)
+                         (claude-code-session--create :id "d")))
+          (puthash (claude-code-session-id s) s claude-code--session-table))
+        (pcase-dolist (`(,command ,mark) '((claude-code-sessions-kill "a")
+                                           (claude-code-sessions-detach "a")
+                                           (claude-code-sessions-delete "d")))
+          (setq-local claude-code--marks (list mark))
+          (setq answer t)
+          (should-error (funcall command) :type 'user-error)
+          (setq answer nil)
+          (funcall command))
+        (should (= refreshed 3))
+        (should (equal (reverse acted) '((kill "a") (detach "a") (delete "d"))))
+        (should (equal (car offered)
+                       (concat "Sessions on cc-test-host changed since this"
+                               " view was read.  Refresh instead? ")))))))
+
 (ert-deftest claude-code-test-view-instance-row-survives-a-session-switch ()
   "An instance's row is keyed by its buffer, so `/clear' keeps point and mark on it.
 The session the instance left becomes a dead row of its own, unmarked."
@@ -6269,6 +6389,7 @@ They follow its marks, and an expanded group shows the glyphs themselves."
         (setq claude-code--project "/r")
         (setq claude-code--marks '("d" "e"))
         (setq claude-code--collapsed (list "idle"))
+        (claude-code--read-view)
         (should (equal (substring-no-properties
                         (car (car (claude-code--tabulated-groups))))
                        "▸ Idle (5, 2 marked, 2 done, 1 error)"))
@@ -6318,7 +6439,7 @@ it is not read at all."
         (let ((claude-code--proc-children-p t))
           (claude-code-tests--in-view
             (setq claude-code--project "/ssh:cc-test-host:/r")
-            (claude-code--tabulated-groups)
+            (claude-code--read-view)
             (should (equal hosts '("/ssh:cc-test-host:")))
             (should (equal (gethash "a" claude-code--usage-table)
                            '(10.0 . 10000)))
@@ -6327,7 +6448,7 @@ it is not read at all."
             (setq hosts '()
                   sessions (list (claude-code-session--create :id "c" :alive-p t)
                                  (claude-code-session--create :id "d")))
-            (claude-code--tabulated-groups)
+            (claude-code--read-view)
             (should-not hosts)))))))
 
 (ert-deftest claude-code-test-view-drops-marks-for-unlisted-sessions ()
