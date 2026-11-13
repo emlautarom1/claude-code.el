@@ -598,20 +598,18 @@ on a signal or a lost connection, which leave the instance running."
 ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live instance,
 in which case BUFFER holds the Ghostel buffer and PID its `claude' process, on
 the project's host and nil until reported (`claude-code--report-pid').  STATUS
-is Claude's native `busy'/`shell'/`idle'/`waiting' string (alive sessions only), with
-WAITING-FOR set while waiting.  TURN-END is how the instance's last turn ended,
-`done' or `error', read off its root program status record, with
+is Claude's native `busy'/`shell'/`idle'/`waiting' string (alive sessions
+only), with WAITING-FOR set while waiting.  TURN-END is how the instance's last
+turn ended, `done' or `error', read off its root program status record, with
 TURN-END-MESSAGE Claude's message for it, if any.  EXTERNAL-P flags a session
-whose process is
-running outside Emacs, so it must not be resumed or deleted.  TITLE and
-LAST-PROMPT come from the transcript and, via
+whose process is running outside Emacs, so it must not be resumed or deleted.
+TITLE and LAST-PROMPT come from the transcript and, via
 `claude-code--session-display-name', are the session's only display-name
 sources; WORKTREE names the session's worktree, nil for a main-tree one, and
 WORKTREE-BINDING is the storage adapter's record behind it, which the resume
 path reads (see `claude-code--resume-worktree').  RECAP is Claude's own
 one-paragraph account of where the session stood, nil for a session that has
-none.
-TRANSCRIPT is the absolute `.jsonl' path, nil before Claude writes one.
+none.  TRANSCRIPT is the absolute `.jsonl' path, nil before Claude writes one.
 LAST-ACTIVE is the session's last genuine activity, taken from the newest
 timestamped transcript line.  HOLDER is the dtach socket, as a file name on the
 session's host, of the detachable instance running an external session, which
