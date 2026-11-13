@@ -2648,9 +2648,13 @@ Also the view's `revert-buffer-function', whose arguments it ignores."
   (claude-code--redraw))
 
 (defun claude-code-sessions-refresh ()
-  "Read the sessions again and redraw the view."
+  "Read the sessions again and redraw the view.
+A local project's view also has this machine's sessions/ watched
+\(`claude-code--watch-sessions'), which exists only once Claude has run here."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
+  (unless (file-remote-p claude-code--project)
+    (claude-code--watch-sessions))
   (claude-code--refresh-view))
 
 (defun claude-code--views ()
@@ -3253,8 +3257,6 @@ The project's existing view is reused when it has one."
       ;; The view visits no file: `ibuffer' and completion annotators read the
       ;; root off here.  Unabbreviated, or ibuffer's filename filters miss it.
       (setq list-buffers-directory default-directory)
-      (unless (file-remote-p root)
-        (claude-code--watch-sessions))
       (claude-code-sessions-refresh))
     (pop-to-buffer buffer)))
 

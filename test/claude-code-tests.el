@@ -134,11 +134,13 @@ children, so no pid is its own ancestor and a subtree walk always terminates."
          ,@body))))
 
 (defmacro claude-code-tests--in-view (&rest body)
-  "Run BODY in a temp buffer with the sessions view enabled."
+  "Run BODY in a temp buffer with the sessions view enabled.
+A refresh there watches no sessions/ directory."
   (declare (indent 0))
   `(with-temp-buffer
-     (claude-code-sessions-mode)
-     ,@body))
+     (cl-letf (((symbol-function 'claude-code--watch-sessions) #'ignore))
+       (claude-code-sessions-mode)
+       ,@body)))
 
 (defmacro claude-code-tests--in-fixture-view (pids &rest body)
   "Run BODY in a printed sessions view over the fixtures, PIDS reading as live.
@@ -6208,6 +6210,22 @@ found, which costs a remote view no round trip."
         (should (= reads 2))
         (claude-code-sessions-refresh)
         (should (= reads 3))))))
+
+(ert-deftest claude-code-test-refresh-watches-local-sessions ()
+  "`g' in a local project's view watches this machine's sessions/.
+A sessions/ that appeared since the view opened is followed from then on.  A
+remote project's view watches nothing here."
+  (let ((watched 0))
+    (cl-letf (((symbol-function 'claude-code-project-sessions) (lambda (_) nil)))
+      (claude-code-tests--in-view
+        (cl-letf (((symbol-function 'claude-code--watch-sessions)
+                   (lambda () (cl-incf watched))))
+          (setq claude-code--project "/r")
+          (claude-code-sessions-refresh)
+          (should (= watched 1))
+          (setq claude-code--project "/ssh:cc-test-host:/r")
+          (claude-code-sessions-refresh)
+          (should (= watched 1)))))))
 
 (ert-deftest claude-code-test-view-stays-stale-until-read ()
   "A view a change reached out of sight is read when shown, whatever reprinted it.
