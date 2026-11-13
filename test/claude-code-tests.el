@@ -5344,7 +5344,8 @@ is no longer printed keeps its line."
                 (with-current-buffer view (line-number-at-pos pos))))
       (unwind-protect
           (cl-letf (((symbol-function 'claude-code-project-sessions)
-                     (lambda (_) sessions)))
+                     (lambda (_) sessions))
+                    ((symbol-function 'claude-code--watch-sessions) #'ignore))
             (save-window-excursion
               (delete-other-windows)
               (set-window-buffer (selected-window) other)
