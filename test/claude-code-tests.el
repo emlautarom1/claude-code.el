@@ -6579,6 +6579,19 @@ gains one.  Either way the row moves, and point stays on its session."
                        '("Kill \"Fix the parser\", \"why is CI red\"? "
                          "Delete \"Old work\"? ")))))))
 
+(ert-deftest claude-code-test-confirmation-shortens-long-names ()
+  "A name past 40 columns is cut to 40, ending in an ellipsis.
+A confirmation naming several sessions by their last prompts would otherwise
+fill the minibuffer."
+  (let ((asked nil))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (setq asked prompt) t)))
+      (should (claude-code--confirm
+               "Kill" (list (claude-code-session--create
+                             :id "a" :last-prompt
+                             "Investigate why the export drops tool calls on resume"))))
+      (should (equal asked "Kill \"Investigate why the export drops tool c…\"? ")))))
+
 (ert-deftest claude-code-test-view-restore-original-order-is-harmless ()
   "`C-u -1 S' does not signal: it sorts `tabulated-list-entries' directly."
   (claude-code-tests--in-fixture-view '(1002)
