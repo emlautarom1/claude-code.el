@@ -2665,7 +2665,7 @@ it last took, as Ghostel does."
   "A sessions/ file changing follows the directory of the instance with its PID.
 The change is reported for this machine whichever process the file belongs to,
 and an instance on another host is not followed: its PID names a process there."
-  (let ((handed '()) (changed '())
+  (let ((handed '()) (changed 0)
         (local (generate-new-buffer " *cc-local*"))
         (remote (generate-new-buffer " *cc-remote*")))
     (unwind-protect
@@ -2673,8 +2673,8 @@ and an instance on another host is not followed: its PID names a process there."
           (claude-code-tests--with-registry
             (cl-letf (((symbol-function 'ghostel--update-directory)
                        (lambda (dir) (push (cons (current-buffer) dir) handed))))
-              (let ((claude-code--sessions-changed-functions
-                     (list (lambda (host) (push host changed)))))
+              (let ((claude-code--sessions-changed-hook
+                     (list (lambda () (cl-incf changed)))))
                 (pcase-dolist (`(,buffer . ,origin)
                                (list (cons remote "/ssh:cc-test-host:/home/test/proj")
                                      (cons local "/home/test/proj")))
@@ -2689,56 +2689,66 @@ and an instance on another host is not followed: its PID names a process there."
                 (should (equal handed
                                (list (cons local
                                            "/home/test/proj/.claude/worktrees/feat"))))
-                (should (equal changed '(nil)))
-                (setq handed nil changed nil)
+                (should (= changed 1))
+                (setq handed nil)
                 (claude-code--on-session-file 999999)
                 (should-not handed)
-                (should (equal changed '(nil)))))))
+                (should (= changed 2))))))
       (kill-buffer local)
       (kill-buffer remote))))
 
 (ert-deftest claude-code-test-instance-changes-are-reported ()
-  "Registering, reporting a PID, a modifier change and closing report the host.
+  "Registering, reporting a PID, a modifier change and closing are reported.
 The modifier is the root record's `done' or `error' state and its message, so a
 root record changing without changing those reports nothing, and neither does a
 subagent's record or a terminal Emacs does not manage.  Nor does a modifier
 appearing: the turn it ends rewrites sessions/, which reports it along with the
-status that goes with it."
-  (let ((changed '())
-        (buffer (generate-new-buffer " *cc-instance*")))
+status that goes with it.  An instance on another host reports nothing."
+  (let ((changed 0)
+        (local (generate-new-buffer " *cc-instance*"))
+        (remote (generate-new-buffer " *cc-remote*")))
     (unwind-protect
         (claude-code-tests--with-registry
           (cl-letf (((symbol-function 'ghostel--update-directory) #'ignore))
-            (let ((claude-code--sessions-changed-functions
-                   (list (lambda (host) (push host changed))))
-                  (host "/ssh:cc-test-host:"))
-              (with-current-buffer buffer
+            (let ((claude-code--sessions-changed-hook
+                   (list (lambda () (cl-incf changed))))
+                  (report (lambda (id old new)
+                            (run-hook-with-args 'ghostel-program-status-functions
+                                                id old new))))
+              (with-current-buffer local
                 (claude-code-instance-mode)
-                (let ((report (lambda (id old new)
-                                (run-hook-with-args 'ghostel-program-status-functions
-                                                    id old new))))
-                  (claude-code--report-pid "4242")
-                  (funcall report "" nil '(:state done))
-                  (should-not changed)
-                  (claude-code--register "id" buffer (concat host "/r") nil)
-                  (should (equal changed (list host)))
-                  (setq-local ghostel-eval-cmds
-                              (list (list claude-code--pid-report
-                                          #'claude-code--report-pid)))
-                  (claude-code--report-pid "4243")
-                  (should (= (length changed) 2))
-                  (funcall report "" nil '(:state working))
-                  (funcall report "" '(:state working) '(:state blocked))
-                  (funcall report "a93609d08ab42add7" nil '(:state error))
-                  (should (= (length changed) 2))
-                  (funcall report "" '(:state blocked) '(:state done))
-                  (should (= (length changed) 2))
-                  (funcall report "" '(:state done) '(:state done :msg "m"))
-                  (funcall report "" '(:state done :msg "m") nil)
-                  (should (= (length changed) 4))
-                  (kill-buffer buffer)
-                  (should (equal changed (make-list 5 host))))))))
-      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+                (claude-code--report-pid "4242")
+                (funcall report "" nil '(:state done))
+                (should (= changed 0))
+                (claude-code--register "id" local "/r" nil)
+                (should (= changed 1))
+                (setq-local ghostel-eval-cmds
+                            (list (list claude-code--pid-report
+                                        #'claude-code--report-pid)))
+                (claude-code--report-pid "4243")
+                (should (= changed 2))
+                (funcall report "" nil '(:state working))
+                (funcall report "" '(:state working) '(:state blocked))
+                (funcall report "a93609d08ab42add7" nil '(:state error))
+                (funcall report "" '(:state blocked) '(:state done))
+                (should (= changed 2))
+                (funcall report "" '(:state done) '(:state done :msg "m"))
+                (funcall report "" '(:state done :msg "m") nil)
+                (should (= changed 4))
+                (kill-buffer local)
+                (should (= changed 5)))
+              (with-current-buffer remote
+                (claude-code-instance-mode)
+                (claude-code--register "id" remote "/ssh:cc-test-host:/r" nil)
+                (setq-local ghostel-eval-cmds
+                            (list (list claude-code--pid-report
+                                        #'claude-code--report-pid)))
+                (claude-code--report-pid "4244")
+                (funcall report "" '(:state done) nil)
+                (kill-buffer remote)
+                (should (= changed 5))))))
+      (dolist (buffer (list local remote))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest claude-code-test-watch-sessions-once ()
   "This machine's sessions/ is watched once, and again once that watch stopped.
@@ -5989,10 +5999,7 @@ A view of a remote project would read over the network to redraw."
             (with-current-buffer remote
               (claude-code-sessions-mode)
               (setq claude-code--project "/ssh:cc-test-host:/home/test/proj"))
-            (claude-code--sessions-changed "/ssh:cc-test-host:")
-            (should-not (memq local redrawn))
-            (should-not (memq remote redrawn))
-            (claude-code--sessions-changed nil)
+            (claude-code--sessions-changed)
             (should (memq local redrawn))
             (should-not (memq remote redrawn))))
       (kill-buffer local)

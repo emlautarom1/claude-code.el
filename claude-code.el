@@ -1094,18 +1094,17 @@ A parent of your own may replace the empty one.")
 (defvar-local claude-code--instance-keys nil
   "Non-nil in buffers where `claude-code-instance-mode-map' is active.")
 
-(defvar claude-code--sessions-changed-functions nil
-  "Abnormal hook run with a HOST whose sessions may have changed.
-HOST is nil for this machine.  It runs when an instance there registers,
-reports its PID, gains or loses its status modifier, or closes, and when a
-sessions/ file on this machine changes.")
+(defvar claude-code--sessions-changed-hook nil
+  "Hook run when this machine's sessions may have changed.
+That is when an instance here registers, reports its PID, changes its status
+modifier or closes, and when a file in this machine's sessions/ changes.")
 
-(defun claude-code--sessions-changed (host)
-  "Run `claude-code--sessions-changed-functions' for HOST.
+(defun claude-code--sessions-changed ()
+  "Run `claude-code--sessions-changed-hook'.
 It runs from process filters, file notifications and `kill-buffer-hook', so a
 handler's error is reported rather than raised."
   (with-demoted-errors "claude-code: reporting a change: %S"
-    (run-hook-with-args 'claude-code--sessions-changed-functions host)))
+    (run-hooks 'claude-code--sessions-changed-hook)))
 
 (defun claude-code--follow-cwd ()
   "Hand Ghostel the directory this buffer's `claude' process works in.
@@ -1129,14 +1128,16 @@ RECORD-ID is \"\", changes state from OLD to NEW."
   "Report a change of this buffer's status modifier, from OLD to NEW.
 A `ghostel-program-status-functions' entry: the modifier is read off the root
 record, whose RECORD-ID is \"\", so a change of it runs
-`claude-code--sessions-changed' for a managed instance's host.  A modifier
-appearing is left to the sessions/ rewrite of the turn it ends, which follows
-the report, so a view never pairs it with the status of the turn before."
+`claude-code--sessions-changed' for a managed instance on this machine.  A
+modifier appearing is left to the sessions/ rewrite of the turn it ends, which
+follows the report, so a view never pairs it with the status of the turn
+before."
   (when-let* (((string-empty-p record-id))
               (was (claude-code--record-modifier old))
               ((not (equal was (claude-code--record-modifier new))))
-              (entry (gethash (current-buffer) claude-code--managed)))
-    (claude-code--sessions-changed (claude-code--entry-host entry))))
+              (entry (gethash (current-buffer) claude-code--managed))
+              ((not (claude-code--entry-host entry))))
+    (claude-code--sessions-changed)))
 
 (defconst claude-code--pid-report "claude-code-pid"
   "The `ghostel-eval-cmds' name an instance's launch wrapper reports under.")
@@ -1148,8 +1149,9 @@ taken a PID: the wrapper reports ahead of anything else the terminal shows."
   (when (string-match-p "\\`[0-9]+\\'" pid)
     (setq claude-code--pid (string-to-number pid))
     (setq ghostel-eval-cmds nil)
-    (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
-      (claude-code--sessions-changed (claude-code--entry-host entry)))))
+    (when-let* ((entry (gethash (current-buffer) claude-code--managed))
+                ((not (claude-code--entry-host entry))))
+      (claude-code--sessions-changed))))
 
 (defun claude-code--refuse-bookmark ()
   "Refuse to bookmark an instance buffer.
@@ -1239,7 +1241,8 @@ only for the kill that removed the last entry."
                              (message "claude-code: last-instance hook %S signalled: %S"
                                       handler err)))
                           nil)))
-    (claude-code--sessions-changed (claude-code--entry-host entry))))
+    (unless (claude-code--entry-host entry)
+      (claude-code--sessions-changed))))
 
 (defun claude-code--report-exit (buffer event)
   "Record the EVENT BUFFER's terminal ended on, reporting an abnormal end.
@@ -1279,8 +1282,8 @@ that retires the entry.  An instance on this machine has its sessions/ watched
                  :detachable detachable)
            claude-code--managed)
   (unless (file-remote-p origin)
-    (claude-code--watch-sessions))
-  (claude-code--sessions-changed (file-remote-p origin)))
+    (claude-code--watch-sessions)
+    (claude-code--sessions-changed)))
 
 (defvar claude-code--sessions-watch nil
   "(DIR . DESCRIPTOR) of the watch on this machine's sessions/, or nil.")
@@ -1314,7 +1317,7 @@ the change runs `claude-code--sessions-changed'."
                        (hash-table-keys claude-code--managed))))
     (with-demoted-errors "claude-code: following a directory: %S"
       (with-current-buffer buffer (claude-code--follow-cwd))))
-  (claude-code--sessions-changed nil))
+  (claude-code--sessions-changed))
 
 (defun claude-code--buffer (session)
   "Return the buffer of SESSION's instance, or signal a `user-error'.
@@ -2692,18 +2695,17 @@ Which sessions a view lists is not exclusive to it (see
     (with-current-buffer buffer
       (claude-code--update-view))))
 
-(defun claude-code--on-sessions-changed (host)
-  "Update every view of a local project when HOST, this machine, has changed.
-A `claude-code--sessions-changed-functions' entry.  A view of a remote project
+(defun claude-code--on-sessions-changed ()
+  "Update every view of a project on this machine.
+A `claude-code--sessions-changed-hook' entry.  A view of a remote project
 reads over the network, so it is read on `g' and by the commands that change
 its sessions; `claude-code--view-outdated-p' is what it knows in between."
-  (unless host
-    (dolist (buffer (claude-code--views))
-      (with-current-buffer buffer
-        (unless (file-remote-p claude-code--project)
-          (claude-code--update-view))))))
+  (dolist (buffer (claude-code--views))
+    (with-current-buffer buffer
+      (unless (file-remote-p claude-code--project)
+        (claude-code--update-view)))))
 
-(add-hook 'claude-code--sessions-changed-functions
+(add-hook 'claude-code--sessions-changed-hook
           #'claude-code--on-sessions-changed)
 
 (defun claude-code--drop-marks (rows)
