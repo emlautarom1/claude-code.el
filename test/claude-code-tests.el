@@ -2765,6 +2765,19 @@ watched before the directory exists."
                                      (expand-file-name "cc-none" temporary-file-directory))))
         (claude-code--watch-sessions)
         (should (= added 3))
+        (should (equal removed '(3 2 1)))
+        (should-not claude-code--sessions-watch)))))
+
+(ert-deftest claude-code-test-watch-sessions-that-cannot-be-watched ()
+  "A sessions/ the system refuses to watch leaves the views to `g', and no error.
+The watch starts after an instance's terminal is running, so an error escaping
+it would report a launch as failed while its instance runs on."
+  (let ((claude-code--sessions-watch nil))
+    (cl-letf (((symbol-function 'file-notify-add-watch)
+               (lambda (&rest _)
+                 (signal 'file-notify-error '("No space left on device")))))
+      (claude-code-tests--with-config
+        (claude-code--watch-sessions)
         (should-not claude-code--sessions-watch)))))
 
 (ert-deftest claude-code-test-buffer-kill-unregisters ()

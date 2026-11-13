@@ -1287,15 +1287,17 @@ that retires the entry.  An instance on this machine has its sessions/ watched
   "Watch this machine's sessions/ unless it is watched already.
 The first local instance or view starts the watch, which stays until Emacs
 exits.  It is added again once it has stopped, or when `claude-code-config-dir'
-names another directory, and not before the directory exists."
+names another directory, and not before the directory exists.  A directory the
+system refuses to watch leaves the views to `g'."
   (let ((dir (claude-code--sessions-dir)))
     (unless (and (equal (car claude-code--sessions-watch) dir)
                  (file-notify-valid-p (cdr claude-code--sessions-watch)))
       (when claude-code--sessions-watch
         (file-notify-rm-watch (cdr claude-code--sessions-watch)))
       (setq claude-code--sessions-watch
-            (when-let* ((watch (claude-code--watch-sessions-dir
-                                #'claude-code--on-session-file)))
+            (when-let* ((watch (ignore-error file-notify-error
+                                 (claude-code--watch-sessions-dir
+                                  #'claude-code--on-session-file))))
               (cons dir watch))))))
 
 (defun claude-code--on-session-file (pid)
