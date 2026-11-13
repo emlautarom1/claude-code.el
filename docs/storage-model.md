@@ -25,7 +25,7 @@ Claude writes one JSON file per running process, named by OS PID. The fields thi
 
 The PID names the process, not the session. `/clear` (and its aliases `/reset` and `/new`), `/resume` and `/branch` move the running process onto another session: the file is rewritten **in place** under the new `sessionId`, so a read can catch it partial, and it is removed when the process exits. Nothing else records the switch — no transcript line links the two sessions, bar `/branch`'s `forkedFrom`. Verified against CLI v2.1.304.
 
-Since every status change and session switch rewrites this file, watching the directory is what tells Emacs of them as they happen: `claude-code--watch-sessions-dir` reports the PID of each `<pid>.json` created, rewritten or deleted on this machine, and none of the `.key` companions. A rewrite can be read before it is complete — the CLI's own reader expects this, retrying a record it finds torn — and that read fails to parse; the event of the write completing it follows. The process exiting removes its file, but one killed with SIGKILL leaves it behind, so only the process table says the process is gone.
+Every status change and session switch rewrites this file, which is what watching the directory follows on this machine. SIGKILL leaves the file behind.
 
 `cwd` follows the process: `--worktree` starts it in the worktree, `EnterWorktree` and `ExitWorktree` move it within the turn that calls them, and a Bash `cd` does not.
 

@@ -1142,8 +1142,7 @@ record, whose RECORD-ID is \"\", so a change of it runs
 (defun claude-code--report-pid (pid)
   "Record PID, a decimal string, as this instance buffer's `claude' process.
 The `ghostel-eval-cmds' entry the launch wrapper calls, dropped once it has
-taken a PID: the wrapper reports ahead of anything else the terminal shows.
-A managed instance's report runs `claude-code--sessions-changed'."
+taken a PID: the wrapper reports ahead of anything else the terminal shows."
   (when (string-match-p "\\`[0-9]+\\'" pid)
     (setq claude-code--pid (string-to-number pid))
     (setq ghostel-eval-cmds nil)
@@ -1224,8 +1223,7 @@ This buffer-local `kill-buffer-hook' is the one report of a buffer closing: a
 non-detachable instance ends with it, and a detachable one that runs on, which
 is announced, goes on as an external session.  A terminal this package does
 not manage retires nothing, and `claude-code-last-instance-exit-hook' runs
-only for the kill that removed the last entry.  The retirement runs
-`claude-code--sessions-changed'."
+only for the kill that removed the last entry."
   (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
     (when (claude-code--runs-on-p (current-buffer))
       (message "Detached %s: its instance runs on as an external session"
@@ -1266,8 +1264,7 @@ Stored under :worktree is the name of a named WORKTREE request, nil otherwise
 that carries it -- and under :detachable whether the instance is DETACHABLE.
 Registering a live BUFFER also wires up the entry's removal: BUFFER is made to
 die with its process, reporting an abnormal exit, so its kill is the one event
-that retires the entry.  The registration runs `claude-code--sessions-changed',
-and an instance on this machine has its sessions/ watched
+that retires the entry.  An instance on this machine has its sessions/ watched
 \(`claude-code--watch-sessions')."
   (with-current-buffer buffer
     (setq-local ghostel-kill-buffer-on-exit t)
@@ -1288,9 +1285,9 @@ and an instance on this machine has its sessions/ watched
 
 (defun claude-code--watch-sessions ()
   "Watch this machine's sessions/ unless it is watched already.
-The first local instance or view starts the watch, which lasts the session.
-It is added again once it has stopped, or when `claude-code-config-dir' names
-another directory, and not before the directory exists."
+The first local instance or view starts the watch, which stays until Emacs
+exits.  It is added again once it has stopped, or when `claude-code-config-dir'
+names another directory, and not before the directory exists."
   (let ((dir (claude-code--sessions-dir)))
     (unless (and (equal (car claude-code--sessions-watch) dir)
                  (file-notify-valid-p (cdr claude-code--sessions-watch)))
@@ -2235,9 +2232,9 @@ folded.")
 (defvar-local claude-code--marks nil
   "List of the keys (`claude-code--row-key') of the marked rows in a view.")
 (defvar-local claude-code--session-table nil
-  "Hash of row key -> struct for the rows currently displayed.")
+  "Hash of row key -> struct for every row `claude-code--read-view' read.")
 (defvar-local claude-code--usage-table nil
-  "Hash of row key -> (CPU . RSS) for the rows currently displayed.")
+  "Hash of row key -> (CPU . RSS) for every row `claude-code--read-view' read.")
 (defvar-local claude-code--stale nil
   "Non-nil when a change reached a sessions view while no window showed it.")
 
@@ -2493,7 +2490,7 @@ so a command's targets are exactly the ones its model operation accepts."
       targets)))
 
 (defun claude-code--act-on (targets operation done)
-  "Call OPERATION on each session in TARGETS, then redraw every view.
+  "Call OPERATION on each session in TARGETS, then update every view.
 A refusal from OPERATION does not end the batch: the other targets are still
 acted on and the refusals reported, DONE naming what OPERATION did.  Only the
 rows acted on lose their marks, leaving a refused one armed for a retry, and
@@ -2547,9 +2544,7 @@ never is."
 (defun claude-code--offer-refresh ()
   "Offer to read an outdated view again instead of acting on it.
 Accepting reads it and signals a `user-error', so the command acting on the
-view stops; declining leaves the command to act on the view as drawn.  Asked
-by the commands that change sessions, as `kmacro-menu' asks before acting on
-a table that no longer matches."
+view stops; declining leaves the command to act on the view as drawn."
   (when (and (claude-code--view-outdated-p)
              (yes-or-no-p
               (format "Sessions on %s changed since this view was read.  \
@@ -2644,15 +2639,11 @@ printed.  GROUP, when given, puts point on that group's header instead."
       (set-window-start window (claude-code--row-pos start) t)))
   (claude-code--goto-group group))
 
-(defun claude-code--refresh-view ()
-  "Read the current view's project again and redraw the view."
+(defun claude-code--refresh-view (&rest _)
+  "Read the current view's project again and redraw the view.
+Also the view's `revert-buffer-function', whose arguments it ignores."
   (claude-code--read-view)
   (claude-code--redraw))
-
-(defun claude-code--revert-view (&rest _)
-  "Read the current view's project again and redraw the view.
-The view's `revert-buffer-function'."
-  (claude-code--refresh-view))
 
 (defun claude-code-sessions-refresh ()
   "Read the sessions again and redraw the view."
@@ -3065,7 +3056,7 @@ rather than wrapping them a second time.
   ;; Not a function: `C-u -1 S' sorts this value directly.
   (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
-  (setq-local revert-buffer-function #'claude-code--revert-view)
+  (setq-local revert-buffer-function #'claude-code--refresh-view)
   (add-hook 'eldoc-documentation-functions #'claude-code--eldoc-session nil t)
   (add-hook 'window-buffer-change-functions #'claude-code--redraw-if-stale nil t)
   (tabulated-list-init-header))
