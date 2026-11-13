@@ -1,8 +1,8 @@
 ;;; claude-code-mcp-tests.el --- Tests for claude-code-mcp -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; ERT suite for claude-code-mcp.el: the pure protocol layer, the tool
-;; registry and its tools, the dispatch entry point, the launch wiring, and the
+;; ERT suite for claude-code-mcp.el: the protocol as `claude-code-mcp-dispatch'
+;; answers it, the tools and the calls they take, the launch wiring, and the
 ;; bridge driven end to end through a real Emacs server.  A live handshake test
 ;; is gated behind CLAUDE_CODE_INTEGRATION.  Run with `make test' (unit) or
 ;; `make integration' (live).
@@ -55,524 +55,321 @@ The registry is global, so a tool left behind would leak into every later
           (list (cons 'method method))
           (when params (list (cons 'params params)))))
 
-(defun claude-code-mcp-tests--tools ()
-  "Return the tool descriptors `tools/list' advertises."
-  (alist-get 'tools
-             (alist-get 'result
-                        (claude-code--mcp-handle-request
-                         4242
-                         (claude-code-mcp-tests--request "tools/list" 1)))))
+(defun claude-code-mcp-tests--encode (request)
+  "Return REQUEST, an alist, as the base64 JSON line the bridge passes on."
+  (base64-encode-string (json-serialize request) t))
 
-(defun claude-code-mcp-tests--tool (name)
-  "Return the `tools/list' descriptor advertised for the tool called NAME."
-  (seq-find (lambda (tool) (equal (alist-get 'name tool) name))
-            (claude-code-mcp-tests--tools)))
+(defun claude-code-mcp-tests--decode (reply)
+  "Return REPLY, base64 JSON from `claude-code-mcp-dispatch', parsed."
+  (json-parse-string (decode-coding-string (base64-decode-string reply) 'utf-8)
+                     :object-type 'alist))
 
-(defun claude-code-mcp-tests--tool-schema (name)
-  "Return the `inputSchema' advertised for the tool called NAME."
-  (alist-get 'inputSchema (claude-code-mcp-tests--tool name)))
+(defun claude-code-mcp-tests--send (pid request)
+  "Dispatch REQUEST from the `claude' process PID; return the parsed reply.
+REQUEST is an alist, or a string holding the raw message.  Nil means no reply."
+  (when-let* ((reply (claude-code-mcp-dispatch
+                      (if (stringp request)
+                          (base64-encode-string request t)
+                        (claude-code-mcp-tests--encode request))
+                      pid)))
+    (claude-code-mcp-tests--decode reply)))
+
+(defun claude-code-mcp-tests--call (pid params)
+  "Dispatch a `tools/call' carrying PARAMS from PID; return the parsed reply."
+  (claude-code-mcp-tests--send
+   pid (claude-code-mcp-tests--request "tools/call" 7 params)))
 
 (defun claude-code-mcp-tests--call-tool (pid name &rest arguments)
-  "Dispatch a `tools/call' of the tool NAME for instance PID; return the response.
-ARGUMENTS are the (NAME . VALUE) pairs of the call's `arguments' object.  The
-caller owns the session state the call runs against, so a test that needs one
-isolated wraps this in `claude-code-mcp-tests--isolated' itself."
-  (claude-code--mcp-handle-request
-   pid
-   (claude-code-mcp-tests--request
-    "tools/call" 7 (list (cons 'name name) (cons 'arguments arguments)))))
+  "Dispatch a `tools/call' of the tool NAME from PID; return the parsed reply.
+ARGUMENTS are the (NAME . VALUE) pairs of the call's `arguments' object."
+  (claude-code-mcp-tests--call
+   pid (list (cons 'name name) (cons 'arguments arguments))))
 
-(defun claude-code-mcp-tests--call-eval (code)
-  "Dispatch a `tools/call' of the `eval' tool for CODE and return the response."
-  (claude-code-mcp-tests--isolated
-    (claude-code--mcp-handle-request
-     4242
-     (claude-code-mcp-tests--request
-      "tools/call" 9
-      (list (cons 'name "eval")
-            (cons 'arguments (list (cons 'code code))))))))
+(defun claude-code-mcp-tests--result-text (response)
+  "Return the text payload of RESPONSE's tool result."
+  (alist-get 'text (aref (alist-get 'content (alist-get 'result response)) 0)))
+
+(defun claude-code-mcp-tests--answer (reply)
+  "Return REPLY's tool result as (ERROR-P . TEXT)."
+  (let ((is-error (alist-get 'isError (alist-get 'result reply))))
+    (should (memq is-error '(t :false)))
+    (cons (eq is-error t) (claude-code-mcp-tests--result-text reply))))
+
+(defun claude-code-mcp-tests--error (reply)
+  "Return REPLY's JSON-RPC error as (CODE . MESSAGE)."
+  (let ((error-object (alist-get 'error reply)))
+    (cons (alist-get 'code error-object) (alist-get 'message error-object))))
 
 (defun claude-code-mcp-tests--eval-answer (code)
-  "Return `eval' of CODE as a cons of its `isError' flag and result text."
-  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval code))))
-    (cons (alist-get 'isError result)
-          (alist-get 'text (aref (alist-get 'content result) 0)))))
+  "Return `eval' of CODE, from a caller with no session, as (ERROR-P . TEXT)."
+  (claude-code-mcp-tests--isolated
+    (claude-code-mcp-tests--answer
+     (claude-code-mcp-tests--call-tool 4242 "eval" (cons 'code code)))))
 
-;;;; Pure dispatch: initialize / notifications / errors
+(defun claude-code-mcp-tests--tool-schema (name)
+  "Return the `inputSchema' `tools/list' advertises for the tool NAME, or nil."
+  (alist-get 'inputSchema
+             (seq-find (lambda (tool) (equal (alist-get 'name tool) name))
+                       (alist-get 'tools
+                                  (alist-get 'result
+                                             (claude-code-mcp-tests--send
+                                              4242
+                                              (claude-code-mcp-tests--request
+                                               "tools/list" 1)))))))
 
-(ert-deftest claude-code-mcp-test-initialize ()
-  "`initialize' reports the server's own protocol version and capabilities."
-  ;; Ignores the client's request for a specific version.
-  (let* ((resp (claude-code--mcp-handle-request
-                4242
-                (claude-code-mcp-tests--request
-                 "initialize" 1 (list (cons 'protocolVersion "2024-11-05")))))
-         (result (alist-get 'result resp)))
-    (should (equal (alist-get 'jsonrpc resp) "2.0"))
-    (should (equal (alist-get 'id resp) 1))
-    (should (equal (alist-get 'protocolVersion result) "2025-06-18"))
-    (should (equal (alist-get 'name (alist-get 'serverInfo result))
-                   "claude-code.el"))
-    ;; `listChanged' is JSON false, not nil (wire-shape check).
-    (should (eq (alist-get 'listChanged
-                           (alist-get 'tools (alist-get 'capabilities result)))
-                :false)))
-  ;; A request carrying no version gets the same server version.
-  (let ((result (alist-get 'result
-                           (claude-code--mcp-handle-request
-                            4242
-                            (claude-code-mcp-tests--request "initialize" 2)))))
-    (should (equal (alist-get 'protocolVersion result) "2025-06-18"))))
+(defvar claude-code-mcp-tests--x nil
+  "Scratch special variable for the `eval' tool tests.")
 
-(ert-deftest claude-code-mcp-test-notification-returns-nil ()
-  "A request without an `id' is a notification and yields nil (no response)."
-  (should (null (claude-code--mcp-handle-request
-                 4242
-                 (claude-code-mcp-tests--request "notifications/initialized")))))
+;;;; Protocol
 
-(ert-deftest claude-code-mcp-test-error-codes-echo-id ()
-  "Protocol errors carry the right code and echo the request id."
-  ;; Unknown method -> -32601.
-  (let ((resp (claude-code--mcp-handle-request
-               4242 (claude-code-mcp-tests--request "no/such/method" 7))))
-    (should (equal (alist-get 'id resp) 7))
-    (should (= (alist-get 'code (alist-get 'error resp)) -32601)))
-  ;; Unknown tool -> -32602.
-  (let ((resp (claude-code-mcp-tests--isolated
-                (claude-code--mcp-handle-request
-                 4242
-                 (claude-code-mcp-tests--request
-                  "tools/call" 8 (list (cons 'name "nope")
-                                       (cons 'arguments nil)))))))
-    (should (equal (alist-get 'id resp) 8))
-    (should (= (alist-get 'code (alist-get 'error resp)) -32602)))
-  ;; Missing required argument -> -32602.
-  (let ((resp (claude-code-mcp-tests--isolated
-                (claude-code--mcp-handle-request
-                 4242
-                 (claude-code-mcp-tests--request
-                  "tools/call" 10 (list (cons 'name "eval")
-                                        (cons 'arguments nil)))))))
-    (should (equal (alist-get 'id resp) 10))
-    (should (= (alist-get 'code (alist-get 'error resp)) -32602))))
-
-(ert-deftest claude-code-mcp-test-invalid-request-shape ()
-  "A non-object request (array or bare scalar) yields -32600 with a null id."
-  (dolist (bad (list [1 2] 5 "x" :null))
-    (let ((resp (claude-code--mcp-handle-request 4242 bad)))
-      (should (eq (alist-get 'id resp) :null))
-      (should (= (alist-get 'code (alist-get 'error resp)) -32600)))))
-
-;;;; Pure body handling: JSON parsing
-
-(ert-deftest claude-code-mcp-test-body-dispatch ()
-  "A well-formed body dispatches; a notification body yields nil."
-  (let ((resp (claude-code--mcp-response-for-body
-               4242
-               (claude-code--mcp-serialize
-                (claude-code-mcp-tests--request "tools/list" 1)))))
-    (should (equal (alist-get 'id resp) 1))
-    (should (alist-get 'tools (alist-get 'result resp))))
-  (should (null (claude-code--mcp-response-for-body
-                 4242
-                 (claude-code--mcp-serialize
-                  (claude-code-mcp-tests--request "notifications/initialized"))))))
-
-(ert-deftest claude-code-mcp-test-parse-error ()
-  "A malformed JSON body is answered with a -32700 error and a null id."
-  (let ((resp (claude-code--mcp-response-for-body 4242 "{not json")))
-    (should (eq (alist-get 'id resp) :null))
-    (should (= (alist-get 'code (alist-get 'error resp)) -32700))))
-
-;;;; Pure dispatch: tools/list and the catalog
-
-(ert-deftest claude-code-mcp-test-tools-list ()
-  "`tools/list' advertises the catalog with vector-shaped arrays."
-  ;; The tools array is a JSON array (vector), not a list.
-  (should (vectorp (claude-code-mcp-tests--tools)))
-  (should (claude-code-mcp-tests--tool "eval"))
-  (let ((schema (claude-code-mcp-tests--tool-schema "eval")))
-    (should (equal (alist-get 'type schema) "object"))
-    ;; `required' is the vector ["code"].
-    (should (equal (alist-get 'required schema) (vector "code")))
-    ;; `properties' carries the typed `code' argument.
-    (should (equal (alist-get 'type (alist-get 'code
-                                               (alist-get 'properties schema)))
-                   "string"))))
-
-(ert-deftest claude-code-mcp-test-spawn-schema ()
-  "`spawn' advertises every option as optional and holds none to a set of values."
-  (let* ((schema (claude-code-mcp-tests--tool-schema "spawn"))
-         (properties (alist-get 'properties schema)))
-    (should (equal (alist-get 'required schema) []))
-    (should (equal (alist-get 'type (alist-get 'worktree properties)) "string"))
-    (should (equal (alist-get 'type (alist-get 'name properties)) "string"))
-    (should-not (assq 'enum (alist-get 'model properties)))
-    (should-not (assq 'enum (alist-get 'effort properties)))
-    (should-not (assq 'enum (alist-get 'name properties)))))
-
-(ert-deftest claude-code-mcp-test-tool-schema-shapes ()
-  "A no-arg tool advertises `properties':{}, and an optional arg is omittable."
-  (claude-code-mcp-tests--with-tools '("cc-mcp-test-noargs" "cc-mcp-test-opt")
-    (claude-code-mcp-make-tool
-     :name "cc-mcp-test-noargs" :description "No args." :handler #'ignore)
-    (claude-code-mcp-make-tool
-     :name "cc-mcp-test-opt" :description "One optional arg."
-     :args (list (list :name "flag" :type 'string
-                       :description "Optional." :optional t))
-     :handler (lambda (&optional flag) (format "%s" flag)))
-    ;; A no-arg tool serializes `properties' to an empty JSON object.
-    (should (equal (json-serialize
-                    (alist-get 'properties
-                               (claude-code-mcp-tests--tool-schema
-                                "cc-mcp-test-noargs")))
-                   "{}"))
-    ;; An optional arg is excluded from `required'.
-    (should (equal (alist-get 'required (claude-code-mcp-tests--tool-schema
-                                         "cc-mcp-test-opt"))
-                   []))
-    ;; Omitting the optional argument runs the tool -- no -32602.
-    (let ((result (alist-get 'result
-                             (claude-code-mcp-tests--isolated
-                               (claude-code--mcp-handle-request
-                                4242
-                                (claude-code-mcp-tests--request
-                                 "tools/call" 2
-                                 (list (cons 'name "cc-mcp-test-opt")
-                                       (cons 'arguments nil))))))))
+(ert-deftest claude-code-mcp-test-dispatch-round-trip ()
+  "A session's handshake and calls round-trip through `claude-code-mcp-dispatch'."
+  (claude-code-mcp-tests--isolated
+    ;; The server answers with its own protocol version, whatever is asked for.
+    (dolist (params (list (list (cons 'protocolVersion "2024-11-05")) nil))
+      (let ((reply (claude-code-mcp-tests--send
+                    4242 (claude-code-mcp-tests--request "initialize" 1 params))))
+        (should (equal (alist-get 'jsonrpc reply) "2.0"))
+        (should (equal (alist-get 'id reply) 1))
+        (should (equal (alist-get 'protocolVersion (alist-get 'result reply))
+                       claude-code--mcp-protocol-version))))
+    (dolist (id '("seven" :false))
+      (should (equal (alist-get 'id (claude-code-mcp-tests--send
+                                     4242 (claude-code-mcp-tests--request
+                                           "tools/list" id)))
+                     id)))
+    ;; A notification is answered with nothing.
+    (should-not (claude-code-mcp-tests--send
+                 4242 (claude-code-mcp-tests--request "notifications/initialized")))
+    (should (claude-code-mcp-tests--tool-schema "spawn"))
+    (let ((schema (claude-code-mcp-tests--tool-schema "eval")))
+      (should (equal (alist-get 'type schema) "object"))
+      (should (equal (alist-get 'required schema) ["code"]))
+      (should (equal (alist-get 'type (alist-get 'code (alist-get 'properties schema)))
+                     "string")))
+    (let* ((result (alist-get 'result (claude-code-mcp-tests--call-tool
+                                       4242 "eval"
+                                       (cons 'code "(concat \"ñ\" \"✓\")"))))
+           (item (aref (alist-get 'content result) 0)))
+      (should (equal (alist-get 'type item) "text"))
+      (should (equal (alist-get 'text item) "\"ñ✓\""))
       (should (eq (alist-get 'isError result) :false)))))
 
-(ert-deftest claude-code-mcp-test-args-hold-to-the-schema ()
-  "A value contradicting the advertised schema is a -32602; the handler is not run.
-The schema is what a caller builds its call from, so a wrong type or a value
-outside an `:enum' is a protocol error rather than something to pass on.  An
-empty string is a value only a string carries: that value for a required
-argument, an omission for an optional one -- a handler forwarding it to a
-process would otherwise emit an option with nothing after it -- and for any
-other type the contradiction it looks like."
+(ert-deftest claude-code-mcp-test-dispatch-answers-malformed-input ()
+  "Malformed input or an unserializable reply gets a JSON-RPC error, not a signal."
+  (claude-code-mcp-tests--isolated
+    (let ((reply (claude-code-mcp-tests--send
+                  4242 (claude-code-mcp-tests--request "no/such/method" 7))))
+      (should (equal (alist-get 'jsonrpc reply) "2.0"))
+      (should (equal (alist-get 'id reply) 7))
+      (should (= (car (claude-code-mcp-tests--error reply)) -32601)))
+    ;; An answer carrying a raw byte, which JSON cannot hold.
+    (let ((reply (claude-code-mcp-tests--call-tool
+                  4242 "eval"
+                  (cons 'code "(error \"%s\" (string-to-unibyte \"\\377\"))"))))
+      (should (equal (alist-get 'id reply) 7))
+      (should (= (car (claude-code-mcp-tests--error reply)) -32603)))
+    ;; Neither a message that is no request nor one that is no JSON has an id.
+    (pcase-dolist (`(,body . ,code) '(("[1,2]" . -32600)
+                                      ("5" . -32600)
+                                      ("\"x\"" . -32600)
+                                      ("null" . -32600)
+                                      ("{not json" . -32700)))
+      (let ((reply (claude-code-mcp-tests--send 4242 body)))
+        (should (eq (alist-get 'id reply) :null))
+        (should (= (car (claude-code-mcp-tests--error reply)) code))))
+    (should (= (car (claude-code-mcp-tests--error
+                     (claude-code-mcp-tests--decode
+                      (claude-code-mcp-dispatch "%%%" 4242))))
+               -32700))))
+
+;;;; Tools
+
+(ert-deftest claude-code-mcp-test-calls-hold-to-the-schema ()
+  "A handler runs only on arguments its tool's advertised schema allows."
   (let ((seen 'unset))
     (claude-code-mcp-tests--isolated
-      (claude-code-mcp-tests--with-tools '("cc-mcp-test-schema")
+      (claude-code-mcp-tests--with-tools '("cc-mcp-test-schema" "cc-mcp-test-confirm"
+                                           "cc-mcp-test-noargs" "cc-mcp-test-bad")
+        ;; A spec the schema cannot carry registers nothing.
+        (should-error (claude-code-mcp-make-tool
+                       :name "cc-mcp-test-bad" :description "No handler."))
+        (dolist (arg '((:name "count" :type integer)
+                       (:type string)
+                       (:name "level" :type string :enum (low high))))
+          (should-error (claude-code-mcp-make-tool
+                         :name "cc-mcp-test-bad" :description "Malformed."
+                         :args (list arg) :handler #'ignore)))
+        (should-not (claude-code-mcp-tests--tool-schema "cc-mcp-test-bad"))
         (claude-code-mcp-make-tool
          :name "cc-mcp-test-schema" :description "Typed arguments."
-         :args (list (list :name "text" :type 'string :description "Required.")
+         :args (list (list :name "text" :type 'string)
                      (list :name "level" :type 'string :optional t
-                           :enum '("low" "high") :description "From a set.")
-                     (list :name "flag" :type 'boolean :optional t
-                           :description "A flag."))
+                           :enum '("low" "high"))
+                     (list :name "flag" :type 'boolean :optional t))
          :handler (lambda (text &optional level flag)
                     (setq seen (list text level flag))
                     "ok"))
-        ;; The advertised schema carries the enum as a JSON array of its values.
-        (should (string-match-p
-                 "\"enum\":\\[\"low\",\"high\"\\]"
-                 (claude-code--mcp-serialize
-                  (alist-get 'level
-                             (alist-get 'properties
-                                        (claude-code-mcp-tests--tool-schema
-                                         "cc-mcp-test-schema"))))))
-        (pcase-dolist (`(,arguments . ,message)
-                       '((((text . 42)) . "type")
-                         (((text . "t") (flag . "yes")) . "type")
-                         ;; Only a boolean takes false, and no type takes an
-                         ;; empty string but a string: the caller named the
-                         ;; argument, so what it sent is the wrong type rather
-                         ;; than nothing at all.
-                         (((text . :false)) . "type")
-                         (((text . "t") (flag . "")) . "type")
-                         (((text . "t") (level . "turbo")) . "one of")
-                         ;; A required argument sent as JSON null is as absent
-                         ;; as one never sent: null is not a string.
-                         (((text . :null)) . "Missing required")
-                         (nil . "Missing required")))
-          (setq seen 'unset)
-          (let ((error-object
-                 (alist-get 'error (apply #'claude-code-mcp-tests--call-tool
-                                          4242 "cc-mcp-test-schema" arguments))))
-            (should (equal (alist-get 'code error-object) -32602))
-            (should (string-match-p message (alist-get 'message error-object)))
-            (should (eq seen 'unset))))
-        ;; Both empty strings reach the handler as what they mean there.
-        (claude-code-mcp-tests--call-tool 4242 "cc-mcp-test-schema"
-                                          '(text . "") '(level . ""))
-        (should (equal seen '("" nil nil)))))))
-
-(ert-deftest claude-code-mcp-test-a-required-boolean-can-be-false ()
-  "`false' answers a required boolean; leaving it out is what is missing.
-A boolean reaches its handler as nil either way, so the call is the only thing
-that says which happened -- and a tool asking to be told before it acts must be
-able to hear no."
-  (let ((seen 'unset))
-    (claude-code-mcp-tests--isolated
-      (claude-code-mcp-tests--with-tools '("cc-mcp-test-confirm")
         (claude-code-mcp-make-tool
          :name "cc-mcp-test-confirm" :description "One required boolean."
-         :args (list (list :name "confirm" :type 'boolean
-                           :description "Required."))
-         :handler (lambda (confirm) (setq seen confirm) "ok"))
-        (let ((result (alist-get 'result
-                                 (claude-code-mcp-tests--call-tool
-                                  4242 "cc-mcp-test-confirm"
-                                  '(confirm . :false)))))
-          (should (eq (alist-get 'isError result) :false))
-          (should (null seen)))
-        ;; Omitted it is missing, and so is null: only false is an answer, so
-        ;; a caller that sent nothing in particular is not read as a no.
-        (dolist (arguments '(nil ((confirm . :null))))
-          (setq seen 'unset)
-          (should (string-match-p
-                   "Missing required"
-                   (alist-get 'message
-                              (alist-get 'error
-                                         (apply #'claude-code-mcp-tests--call-tool
-                                                4242 "cc-mcp-test-confirm"
-                                                arguments)))))
-          (should (eq seen 'unset)))))))
+         :args (list (list :name "confirm" :type 'boolean))
+         :handler (lambda (confirm) (setq seen (list confirm)) "ok"))
+        (claude-code-mcp-make-tool
+         :name "cc-mcp-test-noargs" :description "No arguments."
+         :handler (lambda () (setq seen 'ran) "ok"))
+        (let* ((schema (claude-code-mcp-tests--tool-schema "cc-mcp-test-schema"))
+               (properties (alist-get 'properties schema)))
+          (should (equal (alist-get 'required schema) ["text"]))
+          (should (equal (alist-get 'enum (alist-get 'level properties))
+                         ["low" "high"]))
+          (should (equal (alist-get 'type (alist-get 'flag properties)) "boolean")))
+        (cl-flet ((call (tool arguments)
+                    (setq seen 'unset)
+                    (claude-code-mcp-tests--call
+                     4242 (list (cons 'name tool) (cons 'arguments arguments)))))
+          (pcase-dolist (`(,tool ,arguments ,received)
+                         '(("cc-mcp-test-schema" ((text . "t")) ("t" nil nil))
+                           ("cc-mcp-test-schema" ((text . "t") (level . "high")
+                                                  (flag . t))
+                            ("t" "high" t))
+                           ("cc-mcp-test-schema" ((text . "t") (flag . :false))
+                            ("t" nil nil))
+                           ("cc-mcp-test-schema" ((text . "t") (flag . :null))
+                            ("t" nil nil))
+                           ;; A value for a required string, nothing for an
+                           ;; optional one.
+                           ("cc-mcp-test-schema" ((text . "") (level . ""))
+                            ("" nil nil))
+                           ;; False is an answer to a required boolean.
+                           ("cc-mcp-test-confirm" ((confirm . :false)) (nil))
+                           ;; Null is the absent arguments object.
+                           ("cc-mcp-test-noargs" :null ran)))
+            (should-not (car (claude-code-mcp-tests--answer (call tool arguments))))
+            (should (equal seen received)))
+          ;; Each refusal names what the caller got wrong.
+          (pcase-dolist (`(,tool ,arguments ,named)
+                         '(("cc-mcp-test-schema" ((text . 42)) "text")
+                           ("cc-mcp-test-schema" ((text . :false)) "text")
+                           ("cc-mcp-test-schema" ((text . :null)) "text")
+                           ("cc-mcp-test-schema" nil "text")
+                           ("cc-mcp-test-schema" ((text . "t") (flag . "yes")) "flag")
+                           ("cc-mcp-test-schema" ((text . "t") (flag . "")) "flag")
+                           ("cc-mcp-test-schema" ((text . "t") (level . "turbo"))
+                            "level")
+                           ("cc-mcp-test-confirm" nil "confirm")
+                           ("cc-mcp-test-confirm" ((confirm . :null)) "confirm")
+                           ("cc-mcp-test-noargs" "code" "object")
+                           ("cc-mcp-test-noargs" 42 "object")
+                           ("cc-mcp-test-noargs" [1 2] "object")
+                           ("nope" nil "nope")))
+            (let ((refusal (claude-code-mcp-tests--error (call tool arguments))))
+              (should (equal (car refusal) -32602))
+              (should (string-match-p named (cdr refusal)))
+              (should (eq seen 'unset)))))
+        (pcase-dolist (`(,params . ,named) '(("code" . "object")
+                                             (42 . "object")
+                                             ([1 2] . "object")
+                                             (:null . "Unknown tool")))
+          (let ((refusal (claude-code-mcp-tests--error
+                          (claude-code-mcp-tests--call 4242 params))))
+            (should (equal (car refusal) -32602))
+            (should (string-match-p named (cdr refusal)))))))))
 
-(ert-deftest claude-code-mcp-test-params-and-arguments-must-be-objects ()
-  "A `params' or `arguments' that is not an object is the caller's error.
-JSON null stands for the object a call did not send, since both are optional;
-anything else is a -32602 rather than a Lisp type error dressed up as -32603."
-  (claude-code-mcp-tests--with-tools '("cc-mcp-test-noargs")
-    (claude-code-mcp-make-tool
-     :name "cc-mcp-test-noargs" :description "No args."
-     :handler (lambda () "ok"))
-    (claude-code-mcp-tests--isolated
-      ;; Null is the absent object: a tool needing nothing still runs.
-      (let ((response (claude-code--mcp-handle-request
-                       4242
-                       (claude-code-mcp-tests--request
-                        "tools/call" 1
-                        (list (cons 'name "cc-mcp-test-noargs")
-                              (cons 'arguments :null))))))
-        (should (eq (alist-get 'isError (alist-get 'result response))
-                    :false)))
-      ;; A scalar or an array is not an arguments object.
-      (dolist (arguments (list "code" 42 (vector 1 2)))
-        (let ((error-object
-               (alist-get 'error (claude-code--mcp-handle-request
-                                  4242
-                                  (claude-code-mcp-tests--request
-                                   "tools/call" 2
-                                   (list (cons 'name "cc-mcp-test-noargs")
-                                         (cons 'arguments arguments)))))))
-          (should (equal (alist-get 'code error-object) -32602))
-          (should (string-match-p "must be an object"
-                                  (alist-get 'message error-object)))))
-      ;; `params' is what a tool name is read from, so it answers for its own
-      ;; shape rather than letting `alist-get' answer for it.
-      (dolist (params (list "code" 42 (vector 1 2)))
-        (let ((error-object
-               (alist-get 'error (claude-code--mcp-handle-request
-                                  4242
-                                  (claude-code-mcp-tests--request
-                                   "tools/call" 3 params)))))
-          (should (equal (alist-get 'code error-object) -32602))
-          (should (string-match-p "must be an object"
-                                  (alist-get 'message error-object)))))
-      ;; Null is the absent object here too, leaving the absent name to answer.
-      (should (string-match-p
-               "Unknown tool"
-               (alist-get 'message
-                          (alist-get 'error
-                                     (claude-code--mcp-handle-request
-                                      4242
-                                      (claude-code-mcp-tests--request
-                                       "tools/call" 4 :null)))))))))
+(ert-deftest claude-code-mcp-test-eval-reads-one-form ()
+  "`eval' evaluates the one form its code holds and answers with its value."
+  (let ((claude-code-mcp-tests--x nil))
+    (pcase-dolist (`(,code . ,value)
+                   '(("(+ 40 2)" . "42")
+                     ("\"a;b\"" . "\"a;b\"")
+                     ("?;" . "59")
+                     ("(progn (setq claude-code-mcp-tests--x 5)
+                              (* claude-code-mcp-tests--x claude-code-mcp-tests--x))"
+                      . "25")
+                     (";; lead\n(+ 1 2) ; )" . "3")
+                     ("" . "nil")
+                     (";; just a comment" . "nil")))
+      (should (equal (claude-code-mcp-tests--eval-answer code) (cons nil value))))
+    (pcase-dolist (`(,code . ,complaint)
+                   '(("(setq claude-code-mcp-tests--x 'ran) 42" . "progn")
+                     ("(+ 1 2))" . "Invalid read syntax")
+                     ("(+ 1 2) (+ 3" . "End of file")
+                     ("(/ 1 0)" . "\\`Error:")))
+      (let ((answer (claude-code-mcp-tests--eval-answer code)))
+        (should (car answer))
+        (should (string-match-p complaint (cdr answer)))
+        ;; Wrapping text that reads as no form leaves it unreadable.
+        (unless (equal complaint "progn")
+          (should-not (string-match-p "progn" (cdr answer))))))
+    ;; A refused submission does not run in part.
+    (should (equal claude-code-mcp-tests--x 5))))
 
-(ert-deftest claude-code-mcp-test-session-cwd-is-bound-for-the-call ()
-  "A tool sees its caller's cwd for the call, as both value and directory.
-A caller with no sessions/ file works in the current directory, which
-`server.el' binds to the bridge's own.  The binding must not outlive the call:
-the next one may come from another `claude'."
-  (let ((seen 'unset)
-        (here (directory-file-name (expand-file-name default-directory))))
+(ert-deftest claude-code-mcp-test-eval-runs-in-a-throwaway-buffer ()
+  "`eval' runs in a buffer of its own that no call outlives, and answers in full."
+  (let* ((claude-code-mcp-tests--x nil)
+         (source "(setq claude-code-mcp-tests--x 'read-from-the-user)")
+         (user (generate-new-buffer " *cc-mcp-test-user*"))
+         (before (buffer-list)))
+    (unwind-protect
+        (progn
+          (with-current-buffer user
+            (insert source)
+            (goto-char (point-min))
+            (should (equal (claude-code-mcp-tests--eval-answer "(buffer-string)")
+                           '(nil . "\"\"")))
+            (claude-code-mcp-tests--eval-answer "(insert \"x\")")
+            (should (equal (buffer-string) source)))
+          ;; A form that leaves the user's buffer current still answers for itself.
+          (should (equal (claude-code-mcp-tests--eval-answer
+                          (format "(progn (set-buffer %S) :submitted)"
+                                  (buffer-name user)))
+                         '(nil . ":submitted")))
+          (should-not claude-code-mcp-tests--x)
+          (should (= (with-current-buffer user (point)) 1))
+          (dolist (code '("(kill-buffer)" "(error \"boom\")" "(+ 1"))
+            (claude-code-mcp-tests--eval-answer code))
+          (let ((claude-code-mcp-eval-timeout 0.1))
+            (should (car (claude-code-mcp-tests--eval-answer "(sit-for 5)"))))
+          (should-not (seq-difference (buffer-list) before))
+          (let ((print-length 2)
+                (print-level 1))
+            (should (equal (claude-code-mcp-tests--eval-answer "(list 1 2 3 4)")
+                           '(nil . "(1 2 3 4)")))
+            (should (equal (claude-code-mcp-tests--eval-answer "'(1 (2 (3 (4))))")
+                           '(nil . "(1 (2 (3 (4))))")))))
+      (kill-buffer user))))
+
+(ert-deftest claude-code-mcp-test-call-runs-where-the-caller-works ()
+  "A tool call runs in its caller's working directory, for the call alone."
+  (let ((seen 'unset))
     (claude-code-mcp-tests--with-tools '("cc-mcp-test-cwd")
       (claude-code-mcp-make-tool
        :name "cc-mcp-test-cwd" :description "Report the caller's cwd."
        :handler (lambda ()
                   (setq seen (cons claude-code--mcp-session-cwd default-directory))
                   "ok"))
-      (claude-code-mcp-tests--with-session-at 4242 "/home/test/proj"
-        (pcase-dolist (`(,caller ,cwd)
-                       (list (list 4242 "/home/test/proj")
-                             (list 4343 here)
-                             (list nil here)))
-          (setq seen 'unset)
-          (claude-code-mcp-tests--call-tool caller "cc-mcp-test-cwd")
-          (should (equal seen (cons cwd (file-name-as-directory cwd)))))))
-    (should (null claude-code--mcp-session-cwd))))
-
-(ert-deftest claude-code-mcp-test-session-cwd-follows-the-process ()
-  "A call is answered for the process it comes from, whatever it runs.
-Its cwd is read off its own sessions/ file, which a `/clear' rewrites under a
-new session id while the PID stays."
-  (claude-code-tests--with-fixtures
-    (should (equal (claude-code-mcp-tests--result-text
-                    (claude-code-mcp-tests--call-tool
-                     1003 "eval" (cons 'code "default-directory")))
-                   "\"/home/test/proj/.claude/worktrees/feat/\""))))
-
-(ert-deftest claude-code-mcp-test-call-leaves-the-current-buffer-alone ()
-  "A directory set during a call in the buffer it arrived in outlives the call.
-A request is dispatched in whatever buffer is current, the user's, which may be
-an instance buffer following its process into a worktree meanwhile."
-  (claude-code-mcp-tests--with-tools '("cc-mcp-test-cd")
-    (with-temp-buffer
-      (setq default-directory "/home/test/root/")
-      (let ((user (current-buffer)))
-        (claude-code-mcp-make-tool
-         :name "cc-mcp-test-cd" :description "Move the user's buffer."
-         :handler (lambda ()
-                    (with-current-buffer user
-                      (setq default-directory "/home/test/root/wt/"))
-                    "ok"))
+      (with-temp-buffer
+        (setq default-directory "/home/test/root/")
         (claude-code-mcp-tests--with-session-at 4242 "/home/test/proj"
-          (claude-code-mcp-tests--call-tool 4242 "cc-mcp-test-cd"))
-        (should (equal default-directory "/home/test/root/wt/"))))))
-
-;;;; Pure dispatch: tools/call eval happy and error paths
-
-(ert-deftest claude-code-mcp-test-eval-happy ()
-  "`eval' returns the form's printed value and `isError' JSON false.
-This one spells the extraction out: it is the wire-shape check the rest of
-the `eval' tests reach through `claude-code-mcp-tests--eval-answer'."
-  (let* ((resp (claude-code-mcp-tests--call-eval "(+ 40 2)"))
-         (result (alist-get 'result resp))
-         (content (alist-get 'content result)))
-    (should (vectorp content))
-    (should (equal (alist-get 'type (aref content 0)) "text"))
-    (should (equal (alist-get 'text (aref content 0)) "42"))
-    ;; Success is JSON false, not nil (wire-shape check).
-    (should (eq (alist-get 'isError result) :false)))
-  ;; Empty code is nil, not a read error.
-  (let ((result (alist-get 'result (claude-code-mcp-tests--call-eval ""))))
-    (should (equal (alist-get 'text (aref (alist-get 'content result) 0)) "nil"))
-    (should (eq (alist-get 'isError result) :false))))
-
-(defvar claude-code-mcp-tests--x nil
-  "Scratch special variable for the `eval' tool tests.")
-
-(ert-deftest claude-code-mcp-test-eval-progn ()
-  "A `progn' sequences several forms and answers with the last value."
-  (let* ((claude-code-mcp-tests--x nil)
-         (answer (claude-code-mcp-tests--eval-answer
-                  "(progn (setq claude-code-mcp-tests--x 5)
-                          (* claude-code-mcp-tests--x
-                             claude-code-mcp-tests--x))")))
-    (should (eq (car answer) :false))
-    (should (equal (cdr answer) "25"))))
-
-(ert-deftest claude-code-mcp-test-eval-refuses-several-forms ()
-  "Several top-level forms are refused, with advice to wrap them in `progn'."
-  (let ((answer (claude-code-mcp-tests--eval-answer "(+ 1 2) (* 3 4)")))
-    (should (eq (car answer) t))
-    (should (string-match-p "progn" (cdr answer))))
-  ;; The refusal precedes evaluation: no part of the submission runs.
-  (let ((claude-code-mcp-tests--x nil))
-    (claude-code-mcp-tests--call-eval "(setq claude-code-mcp-tests--x 'ran) 42")
-    (should (null claude-code-mcp-tests--x))))
-
-(ert-deftest claude-code-mcp-test-eval-trailing-text-is-not-a-form ()
-  "Trailing text that reads as nothing surfaces the reader's own complaint.
-Advising `progn' there would be a trap: wrapping an unbalanced form leaves it
-unbalanced, so the caller needs the syntax error instead."
-  (let ((answer (claude-code-mcp-tests--eval-answer "(+ 1 2))")))
-    (should (eq (car answer) t))
-    (should (string-match-p "Invalid read syntax" (cdr answer)))
-    (should-not (string-match-p "progn" (cdr answer))))
-  (let ((answer (claude-code-mcp-tests--eval-answer "(+ 1 2) (+ 3")))
-    (should (eq (car answer) t))
-    (should (string-match-p "End of file" (cdr answer)))
-    (should-not (string-match-p "progn" (cdr answer)))))
-
-(ert-deftest claude-code-mcp-test-eval-errors ()
-  "Evaluation and read errors become an `isError' result, never a crash."
-  ;; A runtime error (division by zero) is caught and reported.
-  (let ((answer (claude-code-mcp-tests--eval-answer "(/ 1 0)")))
-    (should (eq (car answer) t))
-    (should (string-match-p "Error:" (cdr answer))))
-  ;; A malformed form (unbalanced paren) is caught and reported.
-  (should (eq (car (claude-code-mcp-tests--eval-answer "(+ 1")) t)))
-
-(ert-deftest claude-code-mcp-test-eval-semicolons-in-code ()
-  "A `;' is code in a character literal or string, and a comment elsewhere."
-  (dolist (case '(("?;" . "59")
-                  ("(list ?; 5)" . "(59 5)")
-                  ("\"a;b\"" . "\"a;b\"")
-                  ;; A leading comment, and a comment inside the form.
-                  (";; lead\n(progn (+ 1 2) ; mid\n (* 2 3))" . "6")
-                  ;; A comment after the form, skipped before the trailing check.
-                  ("(+ 40 2) ; the answer" . "42")
-                  ;; A comment holding an unbalanced delimiter is skipped by
-                  ;; syntax, so it never reaches the reader.
-                  ("(+ 1 2) ; )" . "3")
-                  ;; Nothing but comments evaluates to nil, not a read error.
-                  (";; just a comment" . "nil")))
-    (let ((answer (claude-code-mcp-tests--eval-answer (car case))))
-      (should (eq (car answer) :false))
-      (should (equal (cdr answer) (cdr case))))))
-
-(ert-deftest claude-code-mcp-test-eval-survives-a-buffer-switch ()
-  "A form leaving another buffer current still answers with its own value.
-Nothing of that buffer may be read as source, and its point must not move."
-  (let ((buffer (generate-new-buffer "*claude-code-mcp-test-source*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer buffer
-            (insert "(setq claude-code-mcp-tests--x 'read-from-the-wrong-buffer)")
-            (goto-char (point-min)))
-          (let* ((claude-code-mcp-tests--x nil)
-                 (answer (claude-code-mcp-tests--eval-answer
-                          (format "(progn (set-buffer %S) :submitted)"
-                                  (buffer-name buffer)))))
-            (should (eq (car answer) :false))
-            (should (equal (cdr answer) ":submitted"))
-            (should (null claude-code-mcp-tests--x))
-            (should (= (with-current-buffer buffer (point)) 1))))
-      (kill-buffer buffer))))
-
-(ert-deftest claude-code-mcp-test-eval-runs-in-a-buffer-of-its-own ()
-  "Evaluation runs in an empty buffer, never one the caller did not name."
-  (should (equal (cdr (claude-code-mcp-tests--eval-answer "(buffer-string)")) "\"\""))
-  (let ((buffer (generate-new-buffer "*claude-code-mcp-test-bystander*")))
-    (unwind-protect
-        (with-current-buffer buffer
-          (claude-code-mcp-tests--call-eval "(insert \"x\")")
-          (should (equal (buffer-string) "")))
-      (kill-buffer buffer))))
-
-(ert-deftest claude-code-mcp-test-eval-buffer-does-not-survive ()
-  "The buffer evaluation ran in is gone afterwards, however the call ended."
-  (let ((before (buffer-list)))
-    (dolist (code '("(buffer-name)" "(kill-buffer)" "(error \"boom\")" "(+ 1"))
-      (claude-code-mcp-tests--call-eval code)
-      (should-not (seq-difference (buffer-list) before)))
-    ;; The timeout leaves by a throw from a timer, not by returning or signalling.
-    (let ((claude-code-mcp-eval-timeout 0.1))
-      (should (eq (car (claude-code-mcp-tests--eval-answer "(sit-for 5)")) t))
-      (should-not (seq-difference (buffer-list) before)))))
-
-(ert-deftest claude-code-mcp-test-eval-answers-in-full ()
-  "A caller's own print limits never truncate what the tool answers with."
-  (let ((print-length 2)
-        (print-level 1))
-    (should (equal (cdr (claude-code-mcp-tests--eval-answer "(list 1 2 3 4)"))
-                   "(1 2 3 4)"))
-    (should (equal (cdr (claude-code-mcp-tests--eval-answer "'(1 (2 (3 (4))))"))
-                   "(1 (2 (3 (4))))"))))
-
-(ert-deftest claude-code-mcp-test-eval-sees-the-session-directory ()
-  "The evaluated form runs in the calling session's own working directory."
-  (claude-code-mcp-tests--with-session-at 4242 "/home/test/proj"
-    (let ((result (alist-get 'result
-                             (claude-code-mcp-tests--call-tool
-                              4242 "eval" (cons 'code "default-directory")))))
-      (should (eq (alist-get 'isError result) :false))
-      (should (equal (alist-get 'text (aref (alist-get 'content result) 0))
-                     "\"/home/test/proj/\"")))))
-
-;;;; Pure dispatch: tools/call spawn
+          ;; A caller with no sessions/ file works where the request arrived.
+          (pcase-dolist (`(,caller ,cwd) '((4242 "/home/test/proj")
+                                           (4343 "/home/test/root")
+                                           (nil "/home/test/root")))
+            (setq seen 'unset)
+            (claude-code-mcp-tests--call-tool caller "cc-mcp-test-cwd")
+            (should (equal seen (cons cwd (file-name-as-directory cwd)))))
+          (should-not claude-code--mcp-session-cwd)
+          ;; A directory a call gives the buffer it arrived in stays.
+          (claude-code-mcp-tests--call-tool
+           4242 "eval"
+           (cons 'code (format "(with-current-buffer %S
+                                  (setq default-directory \"/home/test/root/wt/\"))"
+                               (buffer-name))))
+          (should (equal default-directory "/home/test/root/wt/")))))
+    (claude-code-tests--with-fixtures
+      (should (equal (claude-code-mcp-tests--answer
+                      (claude-code-mcp-tests--call-tool
+                       1003 "eval" (cons 'code "default-directory")))
+                     '(nil . "\"/home/test/proj/.claude/worktrees/feat/\""))))))
 
 (defmacro claude-code-mcp-tests--with-caller (var cwd execs &rest body)
   "Run BODY with VAR the PID of a `claude' working in CWD, the launch stubbed.
@@ -583,238 +380,52 @@ reached the CLI without a `claude' ever running."
      (claude-code-mcp-tests--with-session-at ,var ,cwd
        (claude-code-tests--recording-launch ,execs ,@body))))
 
-(defun claude-code-mcp-tests--result-text (response)
-  "Return the text payload of RESPONSE's tool result."
-  (alist-get 'text (aref (alist-get 'content (alist-get 'result response)) 0)))
-
-(ert-deftest claude-code-mcp-test-spawn-in-the-callers-directory ()
-  "`spawn' runs in the calling session's own directory and returns the id.
-The directory is the server's to resolve -- the tool takes no path argument --
-and the id is what the caller has to find the session by afterwards."
+(ert-deftest claude-code-mcp-test-spawn ()
+  "`spawn' launches an instance where its caller works and answers with its id."
   (let ((execs '()))
     (claude-code-mcp-tests--with-caller caller "/home/test/proj" execs
-      (let* ((response (claude-code-mcp-tests--call-tool caller "spawn"))
-             (id (claude-code-mcp-tests--result-text response)))
-        (should (eq (alist-get 'isError (alist-get 'result response))
-                    :false))
-        (should (string-match-p claude-code-tests--uuid-re id))
-        (should (= (length execs) 1))
-        ;; The instance was registered under that id, launched from the
-        ;; caller's root, and carries the session id on its command line.
-        (should (equal (plist-get (claude-code-tests--entry id) :origin)
-                       (claude-code--normalize-root "/home/test/proj")))
-        (should (equal (nth 1 (car execs))
-                       (list "--session-id" id)))))
+      (cl-flet ((spawn (&rest arguments)
+                  (apply #'claude-code-mcp-tests--call-tool caller "spawn" arguments))
+                (launched () (car execs)))
+        (let ((answer (claude-code-mcp-tests--answer (spawn))))
+          (should-not (car answer))
+          (should (string-match-p claude-code-tests--uuid-re (cdr answer)))
+          (should (= (length execs) 1))
+          (should (equal (cadr (member "--session-id" (nth 1 (launched))))
+                         (cdr answer)))
+          (should-not (member "--model" (nth 1 (launched))))
+          (should (equal (buffer-local-value 'default-directory (car (launched)))
+                         "/home/test/proj/")))
+        ;; The effort is not vetted, and the worktree is one argument whatever
+        ;; it is called.
+        (spawn '(prompt . "do the thing") '(name . "a long name") '(model . "opus")
+               '(effort . "turbo") '(worktree . "--ax-screen-reader"))
+        (let ((args (nth 1 (launched))))
+          (should (member "--name=a long name" args))
+          (should (equal (cadr (member "--model" args)) "opus"))
+          (should (equal (cadr (member "--effort" args)) "turbo"))
+          (should (member "--worktree=--ax-screen-reader" args))
+          (should-not (member "--ax-screen-reader" args))
+          (should (equal (cadr (member "--" args)) "do the thing")))
+        ;; An empty string is an option left out, not one given no value.
+        (spawn '(prompt . "") '(name . "") '(model . "") '(effort . "")
+               '(worktree . ""))
+        (let ((args (nth 1 (launched))))
+          (should-not (member "" args))
+          (should-not (seq-find (lambda (arg) (string-suffix-p "=" arg)) args)))
+        (dolist (value '(t :false))
+          (let ((launches (length execs)))
+            (should (= (car (claude-code-mcp-tests--error
+                             (spawn (cons 'worktree value))))
+                       -32602))
+            (should (= (length execs) launches))))))
     ;; A caller in a Claude worktree has the instance join that worktree.
     (claude-code-mcp-tests--with-caller caller
         "/home/test/proj/.claude/worktrees/feat" execs
-      (let ((id (claude-code-mcp-tests--result-text
-                 (claude-code-mcp-tests--call-tool caller "spawn"))))
-        (should (equal (plist-get (claude-code-tests--entry id) :origin)
-                       (claude-code--normalize-root "/home/test/proj")))
-        (should (equal (nth 1 (car execs))
-                       (list "--session-id" id "--worktree=feat")))))))
-
-(ert-deftest claude-code-mcp-test-spawn-options ()
-  "Every option reaches the CLI, and a worktree is asked for by name."
-  (let ((execs '()))
-    (claude-code-mcp-tests--with-caller caller "/home/test/proj" execs
-      (let ((id (claude-code-mcp-tests--result-text
-                 (claude-code-mcp-tests--call-tool
-                  caller "spawn" '(prompt . "do the thing") '(model . "opus")
-                  '(effort . "xhigh") '(worktree . "feat")
-                  '(name . "a long name")))))
-        (should (equal (nth 1 (car execs))
-                       (list "--session-id" id "--name=a long name"
-                             "--worktree=feat"
-                             "--model" "opus" "--effort" "xhigh"
-                             "--" "do the thing"))))
-      ;; A name on its own is the whole request.
-      (claude-code-mcp-tests--call-tool caller "spawn" '(worktree . "solo"))
-      (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree=solo")))
-      ;; The name joins the flag in one argument, so a caller-chosen name the
-      ;; CLI would otherwise take for a flag of its own cannot become one.
-      (claude-code-mcp-tests--call-tool caller "spawn"
-                                        '(worktree . "--ax-screen-reader"))
-      (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--worktree=--ax-screen-reader")))
-      ;; A worktree is asked for by name, so a value that is not one is
-      ;; refused, and refused before anything is launched.
-      (dolist (value '(t :false))
-        (let* ((launched (length execs))
-               (error-object
-                (alist-get 'error (claude-code-mcp-tests--call-tool
-                                   caller "spawn" (cons 'worktree value)))))
-          (should (equal (alist-get 'code error-object) -32602))
-          (should (string-match-p "must be of type string"
-                                  (alist-get 'message error-object)))
-          (should (= (length execs) launched))))
-      ;; An empty string is an omitted option, not an empty value: `--model ""'
-      ;; would reach the CLI and kill the instance at startup, and an unnamed
-      ;; worktree is no worktree.
-      (claude-code-mcp-tests--call-tool
-       caller "spawn" '(prompt . "") '(model . "") '(effort . "")
-       '(worktree . "") '(name . ""))
-      (should (null (nthcdr 2 (nth 1 (car execs)))))
-      ;; Neither the model nor the effort is held to a set of values: an unknown
-      ;; one reaches the CLI, whose error it is to report.
-      (claude-code-mcp-tests--call-tool caller "spawn" '(effort . "turbo"))
-      (should (equal (nthcdr 2 (nth 1 (car execs)))
-                     (list "--effort" "turbo"))))))
-
-;;;; Wire serialization (arrays are vectors, false is JSON false)
-
-(ert-deftest claude-code-mcp-test-serialize-shapes ()
-  "The serialized `eval' result uses a JSON array and JSON false."
-  (let ((json (claude-code--mcp-serialize
-               (claude-code-mcp-tests--call-eval "(+ 40 2)"))))
-    (should (string-match-p "\"content\":\\[" json))
-    (should (string-match-p "\"isError\":false" json))
-    (should (string-match-p "\"text\":\"42\"" json)))
-  ;; A parse-error envelope serializes a null id, not `{}'.
-  (should (string-match-p "\"id\":null"
-                          (claude-code--mcp-serialize
-                           (claude-code--mcp-error :null -32700 "Parse error")))))
-
-(ert-deftest claude-code-mcp-test-serialize-carries-a-parsed-false ()
-  "An `id' the parser produced serializes without translation on the way back."
-  (let* ((body (concat "{\"jsonrpc\":\"2.0\",\"id\":false,"
-                       "\"method\":\"initialize\"}"))
-         (response (claude-code--mcp-response-for-body 4242 body)))
-    (should (eq (alist-get 'id response) :false))
-    (should (string-match-p "\"id\":false"
-                            (claude-code--mcp-serialize response)))))
-
-;;;; Tool registry
-
-(ert-deftest claude-code-mcp-test-make-tool ()
-  "`claude-code-mcp-make-tool' registers a tool and validates required slots."
-  (claude-code-mcp-tests--with-tools '("cc-mcp-test-echo")
-    (let ((tool (claude-code-mcp-make-tool
-                 :name "cc-mcp-test-echo"
-                 :description "Echo its argument."
-                 :args (list (list :name "text" :type 'string
-                                   :description "Text to echo."))
-                 :handler #'identity)))
-      (should (equal (plist-get tool :description) "Echo its argument."))
-      (should (gethash "cc-mcp-test-echo" claude-code--mcp-tools))
-      ;; It shows up in the advertised catalog.
-      (should (claude-code-mcp-tests--tool "cc-mcp-test-echo"))))
-  ;; A missing :handler is an error.
-  (should-error (claude-code-mcp-make-tool
-                 :name "bad" :description "No handler."))
-  ;; So is any arg spec the schema cannot carry: a type no predicate enforces,
-  ;; a nameless argument, an enum of anything but strings.  Each would break
-  ;; `tools/list' for the whole catalog, so none of them registers.
-  (dolist (arg '((:name "count" :type integer :description "How many.")
-                 (:type string :description "Nameless.")
-                 (:name "level" :type string :enum (low high))))
-    (should-error (claude-code-mcp-make-tool
-                   :name "cc-mcp-test-bad-arg" :description "Malformed arg."
-                   :args (list arg) :handler #'identity))
-    (should-not (gethash "cc-mcp-test-bad-arg" claude-code--mcp-tools))))
-
-(ert-deftest claude-code-mcp-test-boolean-args ()
-  "A `boolean' argument reaches its handler as a Lisp truth value.
-The parser renders JSON false as `:false' and null as `:null', both non-nil in
-Lisp, so each must reach the handler as nil."
-  (let ((seen 'unset))
-    (claude-code-mcp-tests--with-tools '("cc-mcp-test-bool")
-      (claude-code-mcp-make-tool
-       :name "cc-mcp-test-bool" :description "One optional boolean."
-       :args (list (list :name "flag" :type 'boolean
-                         :description "A flag." :optional t))
-       :handler (lambda (&optional flag) (setq seen flag) "ok"))
-      ;; The advertised schema type is the JSON name of the `:type' symbol.
-      (should (equal (alist-get 'type
-                                (alist-get 'flag
-                                           (alist-get 'properties
-                                                      (claude-code-mcp-tests--tool-schema
-                                                       "cc-mcp-test-bool"))))
-                     "boolean"))
-      (dolist (case '((:false . nil) (:null . nil) (t . t)))
-        (setq seen 'unset)
-        (claude-code-mcp-tests--isolated
-          (claude-code--mcp-handle-request
-           4242
-           (claude-code-mcp-tests--request
-            "tools/call" 2
-            (list (cons 'name "cc-mcp-test-bool")
-                  (cons 'arguments (list (cons 'flag (car case))))))))
-        (should (eq seen (cdr case)))))))
-
-;;;; Dispatch: the bridge's entry point
-
-(defun claude-code-mcp-tests--encode (request)
-  "Return REQUEST, an alist, as the base64 JSON line the bridge passes on."
-  (base64-encode-string (json-serialize request) t))
-
-(defun claude-code-mcp-tests--decode (reply)
-  "Return REPLY, base64 JSON from `claude-code-mcp-dispatch', parsed."
-  (json-parse-string (decode-coding-string (base64-decode-string reply) 'utf-8)
-                     :object-type 'alist))
-
-(ert-deftest claude-code-mcp-test-dispatch ()
-  "A request round-trips through base64 JSON, text outside ASCII included.
-A notification is answered with nothing, which the bridge prints nothing for."
-  (claude-code-mcp-tests--isolated
-    (let ((resp (claude-code-mcp-tests--decode
-                 (claude-code-mcp-dispatch
-                  (claude-code-mcp-tests--encode
-                   (claude-code-mcp-tests--request
-                    "tools/call" 3
-                    (list (cons 'name "eval")
-                          (cons 'arguments
-                                (list (cons 'code "(concat \"ñ\" \"✓\")"))))))
-                  4242))))
-      (should (equal (alist-get 'id resp) 3))
-      (should (equal (claude-code-mcp-tests--result-text resp) "\"ñ✓\"")))
-    (should-not (claude-code-mcp-dispatch
-                 (claude-code-mcp-tests--encode
-                  (claude-code-mcp-tests--request "notifications/initialized"))
-                 4242))))
-
-(ert-deftest claude-code-mcp-test-dispatch-never-signals ()
-  "Whatever reaches the dispatch is answered, since an error would end the bridge."
-  (claude-code-mcp-tests--isolated
-    ;; Neither base64 nor, decoded, JSON: both are a parse error.
-    (dolist (request (list "%%%" (base64-encode-string "{not json" t)))
-      (let ((error-object (alist-get 'error (claude-code-mcp-tests--decode
-                                             (claude-code-mcp-dispatch
-                                              request 4242)))))
-        (should (= (alist-get 'code error-object) -32700))))
-    ;; A quit while decoding is a parse error, not the nil of no reply.
-    (cl-letf* ((decode (symbol-function 'base64-decode-string))
-               ((symbol-function 'base64-decode-string)
-                (lambda (string &rest _)
-                  (if (equal string "quit") (signal 'quit nil)
-                    (funcall decode string)))))
-      (should (= (alist-get 'code (alist-get 'error (claude-code-mcp-tests--decode
-                                                     (claude-code-mcp-dispatch
-                                                      "quit" 4242))))
-                 -32700)))
-    ;; A quit outside any tool is an internal error for the request.
-    (cl-letf (((symbol-function 'claude-code--mcp-tools-list)
-               (lambda () (signal 'quit nil))))
-      (let ((resp (claude-code-mcp-tests--decode
-                   (claude-code-mcp-dispatch
-                    (claude-code-mcp-tests--encode
-                     (claude-code-mcp-tests--request "tools/list" 4))
-                    4242))))
-        (should (equal (alist-get 'id resp) 4))
-        (should (= (alist-get 'code (alist-get 'error resp)) -32603))))
-    ;; So is a response JSON cannot carry.
-    (cl-letf (((symbol-function 'claude-code--mcp-handle-request)
-               (lambda (_caller _request)
-                 (list (cons 'id 5) (cons 'result (current-buffer))))))
-      (let ((resp (claude-code-mcp-tests--decode
-                   (claude-code-mcp-dispatch
-                    (claude-code-mcp-tests--encode
-                     (claude-code-mcp-tests--request "tools/list" 5))
-                    4242))))
-        (should (equal (alist-get 'id resp) 5))
-        (should (= (alist-get 'code (alist-get 'error resp)) -32603))))))
+      (claude-code-mcp-tests--call-tool caller "spawn")
+      (should (equal (buffer-local-value 'default-directory (car (car execs)))
+                     "/home/test/proj/"))
+      (should (member "--worktree=feat" (nth 1 (car execs)))))))
 
 ;;;; Launch wiring
 
@@ -834,108 +445,32 @@ launch has warned yet; `display-warning' pushes onto `warnings' instead."
                 (lambda (type message &rest _) (push (cons type message) warnings))))
        ,@body)))
 
-(ert-deftest claude-code-mcp-test-wiring ()
-  "A local launch names this Emacs's server and auto-approves the tools.
-The variable `emacsclient' would try first is unset, so it reaches this server
-whatever the environment Emacs runs in says."
-  (with-temp-buffer
-    (let ((claude-code-mcp-auto-approve t))
-      (claude-code-mcp-tests--with-server-at nil "/run/test/emacs/"
-        (should (equal (claude-code--mcp-wiring (current-buffer))
-                       '(("--allowedTools" "mcp__emacs")
-                         ("EMACS_SOCKET_NAME" . "/run/test/emacs/server")
-                         ("EMACS_SERVER_FILE")))))
-      (claude-code-mcp-tests--with-server-at t "/home/test/server/"
-        (should (equal (cdr (claude-code--mcp-wiring (current-buffer)))
-                       '(("EMACS_SERVER_FILE" . "/home/test/server/server")
-                         ("EMACS_SOCKET_NAME"))))
-        ;; Without auto-approval the instance is pointed at Emacs all the same.
-        (let ((claude-code-mcp-auto-approve nil))
-          (should (equal (car (claude-code--mcp-wiring (current-buffer)))
-                         nil)))))))
-
-(ert-deftest claude-code-mcp-test-wiring-without-a-server ()
-  "With no server running, a launch still names the one this Emacs would run.
-An instance so reaches this Emacs once its server starts.  The user is told
-once, not per launch, and told when the name belongs to another Emacs, which
-is where the instance's calls then go."
-  (with-temp-buffer
-    (claude-code-mcp-tests--with-server-at nil "/run/test/emacs/"
-      (dotimes (_ 2)
-        (should (equal (cdr (claude-code--mcp-wiring (current-buffer)))
-                       '(("EMACS_SOCKET_NAME" . "/run/test/emacs/server")
-                         ("EMACS_SERVER_FILE")))))
-      (should (= (length warnings) 1))
-      (should (eq (car (car warnings)) 'claude-code-mcp))
-      (should (string-match-p "No Emacs server is running" (cdr (car warnings)))))
-    (claude-code-mcp-tests--with-server-at nil "/run/test/emacs/"
-      (cl-letf (((symbol-function 'server-running-p) (lambda (&rest _) t)))
-        (claude-code--mcp-wiring (current-buffer)))
-      (should (string-match-p "Another Emacs.s server holds the name .server."
-                              (cdr (car warnings)))))
-    ;; A live server draws no warning.
-    (claude-code-mcp-tests--with-server-at nil "/run/test/emacs/"
-      (setq server-process (make-pipe-process :name "cc-mcp-test-server"
-                                              :noquery t))
-      (unwind-protect (claude-code--mcp-wiring (current-buffer))
-        (delete-process server-process))
-      (should (null warnings)))))
-
-(ert-deftest claude-code-mcp-test-no-wiring-in-a-remote-directory ()
-  "An instance in a remote directory is not wired, and nothing is checked for it.
-Its bridge runs on its host, and a rule auto-approving an `emacs' server there
-would approve whatever that host calls by the name."
-  (claude-code-mcp-tests--with-server-at nil "/run/test/emacs/"
+(ert-deftest claude-code-mcp-test-launch-wiring ()
+  "A local instance is pointed at this Emacs's server, running yet or not."
+  (cl-flet ((child-env (wiring name)
+              (let ((process-environment (list "EMACS_SOCKET_NAME=/stale"
+                                               "EMACS_SERVER_FILE=/stale")))
+                (claude-code--apply-env (cdr wiring))
+                (getenv name))))
     (with-temp-buffer
-      (setq default-directory "/ssh:cc-test-host:/r/")
-      (should (null (claude-code--mcp-wiring (current-buffer)))))
-    (should (null warnings))))
-
-(ert-deftest claude-code-mcp-test-install ()
-  "Install replaces the user-scope entry, in the config dir launches use.
-It runs the CLI from the home directory, whatever host the current buffer is
-on, and reports what the CLI says when registering fails."
-  (let ((calls '())
-        (resolved-in nil)
-        (status 0)
-        (default-directory "/ssh:cc-test-host:/r/")
-        (claude-code-config-dir "/home/test/config")
-        (environment (getenv "CLAUDE_CONFIG_DIR")))
-    (cl-letf (((symbol-function 'claude-code--resolve-executable)
-               (lambda (program) (setq resolved-in default-directory) program))
-              ((symbol-function 'call-process)
-               (lambda (program _infile destination _display &rest args)
-                 (push (list program args default-directory
-                             (getenv "CLAUDE_CONFIG_DIR"))
-                       calls)
-                 (when (equal (cadr args) "add-json")
-                   (when (eq destination t) (insert "boom"))
-                   status)))
-              ((symbol-function 'message) #'ignore))
-      (let ((claude-code-cli "claude"))
-        (claude-code-mcp-install)
-        (should (equal resolved-in (expand-file-name "~/")))
-        (should (equal (reverse calls)
-                       (list (list "claude"
-                                   '("mcp" "remove" "--scope" "user" "emacs")
-                                   (expand-file-name "~/") "/home/test/config")
-                             (list "claude"
-                                   (list "mcp" "add-json" "--scope" "user" "emacs"
-                                         (claude-code--mcp-serialize
-                                          (claude-code--mcp-server-config)))
-                                   (expand-file-name "~/") "/home/test/config"))))
-        (should (equal (getenv "CLAUDE_CONFIG_DIR") environment))
-        (setq status 1)
-        (should (equal (cadr (should-error (claude-code-mcp-install)))
-                       "Cannot register the MCP server: boom"))))))
-
-(ert-deftest claude-code-mcp-test-server-config ()
-  "The registered entry runs the bridge through sh, with nothing else to it."
-  (should (equal (json-parse-string
-                  (claude-code--mcp-serialize (claude-code--mcp-server-config))
-                  :object-type 'alist)
-                 `((type . "stdio") (command . "sh")
-                   (args . ["-c" ,claude-code-mcp-bridge])))))
+      (pcase-dolist (`(,tcp ,dir ,named ,unset)
+                     '((nil "/run/test/emacs/" "EMACS_SOCKET_NAME" "EMACS_SERVER_FILE")
+                       (t "/home/test/server/" "EMACS_SERVER_FILE" "EMACS_SOCKET_NAME")))
+        (claude-code-mcp-tests--with-server-at tcp dir
+          (let* ((claude-code-mcp-auto-approve t)
+                 (wiring (claude-code--mcp-wiring (current-buffer))))
+            (should (equal (child-env wiring named) (concat dir "server")))
+            (should-not (child-env wiring unset))
+            (should (equal (cadr (member "--allowedTools" (car wiring)))
+                           "mcp__emacs")))
+          (let ((claude-code-mcp-auto-approve nil))
+            (should-not (member "--allowedTools"
+                                (car (claude-code--mcp-wiring (current-buffer))))))))
+      ;; Its bridge would run on the remote host, where `emacs' is anyone's.
+      (claude-code-mcp-tests--with-server-at nil "/run/test/emacs/"
+        (setq default-directory "/ssh:cc-test-host:/r/")
+        (should-not (claude-code--mcp-wiring (current-buffer)))
+        (should-not warnings)))))
 
 ;;;; The bridge, end to end through a real Emacs server
 
@@ -960,24 +495,27 @@ still allows; BODY is skipped when no server can start."
        (delete-directory server-auth-dir t))))
 
 (defun claude-code-mcp-tests--bridge (env)
-  "Start `claude-code-mcp-bridge' with the cells of ENV set; return its process.
+  "Run the registered MCP server with the cells of ENV set; return its process.
 ENV holds cells as `claude-code--apply-env' takes them.  What the bridge
-writes collects in its process buffer."
-  (let ((process-environment
-         (append (mapcar (pcase-lambda (`(,name . ,value))
-                           (if value (concat name "=" value) name))
-                         env)
-                 process-environment)))
-    (make-process :name "cc-mcp-bridge"
-                  :buffer (generate-new-buffer " *cc-mcp-bridge*")
-                  ;; `emacsclient' complains on stderr, which is not the
-                  ;; reply stream under test.
-                  :command (list "sh" "-c"
-                                 (concat "exec 2>/dev/null\n"
-                                         claude-code-mcp-bridge))
-                  :connection-type 'pipe :noquery t
-                  ;; Not the default, which reports the exit in the buffer.
-                  :sentinel #'ignore)))
+writes to stdout collects in its process buffer, its stderr apart."
+  (let* ((config (claude-code--mcp-server-config))
+         (stderr (generate-new-buffer " *cc-mcp-bridge-stderr*"))
+         (process-environment
+          (append (mapcar (pcase-lambda (`(,name . ,value))
+                            (if value (concat name "=" value) name))
+                          env)
+                  process-environment))
+         (bridge (make-process :name "cc-mcp-bridge"
+                               :buffer (generate-new-buffer " *cc-mcp-bridge*")
+                               :stderr stderr
+                               :command (cons (alist-get 'command config)
+                                              (append (alist-get 'args config) nil))
+                               :connection-type 'pipe :noquery t
+                               ;; Not the default, which reports the exit in
+                               ;; the buffer.
+                               :sentinel #'ignore)))
+    (process-put bridge 'stderr stderr)
+    bridge))
 
 (defun claude-code-mcp-tests--bridge-lines (bridge)
   "Return the lines BRIDGE has written so far."
@@ -1001,12 +539,10 @@ an `id'."
     (mapcar (lambda (line) (json-parse-string line :object-type 'alist))
             (nthcdr before (claude-code-mcp-tests--bridge-lines bridge)))))
 
-(ert-deftest claude-code-mcp-test-bridge ()
-  "The bridge carries a session's handshake and calls to this Emacs and back.
-A notification draws no line, so each reply lines up with its request; text
-outside ASCII and a reply far past one `server.el' message arrive intact; and
-the bridge names its parent as the caller, which works where its sessions/
-file says, or, with none, in the directory its bridge started in."
+(ert-deftest claude-code-mcp-test-registered-bridge ()
+  "The registered MCP server carries a session's calls to this Emacs and back.
+Its caller is its parent, working where its sessions/ file says or else where
+the bridge started.  Once Emacs is gone it exits silently on the next message."
   (skip-unless (executable-find "emacsclient"))
   (claude-code-mcp-tests--with-emacs-server
     (claude-code-mcp-tests--isolated
@@ -1014,82 +550,60 @@ file says, or, with none, in the directory its bridge started in."
                                  (make-temp-file "cc-mcp-cwd" t)))
              (cwd default-directory)
              (bridge (claude-code-mcp-tests--bridge
-                      (claude-code--mcp-server-env))))
+                      (cons '("ALTERNATE_EDITOR" . "echo")
+                            (claude-code--mcp-server-env))))
+             (call-eval (lambda (id code)
+                          (claude-code-mcp-tests--request
+                           "tools/call" id
+                           (list (cons 'name "eval")
+                                 (cons 'arguments (list (cons 'code code))))))))
         (unwind-protect
-            (pcase-let ((`(,init ,tools ,eval ,big ,here)
-                         (claude-code-mcp-tests--bridge-ask
-                          bridge
-                          (claude-code-mcp-tests--request
-                           "initialize" 1
-                           (list (cons 'protocolVersion "2025-06-18")))
-                          (claude-code-mcp-tests--request
-                           "notifications/initialized")
-                          (claude-code-mcp-tests--request "tools/list" 2)
-                          (claude-code-mcp-tests--request
-                           "tools/call" 3
-                           (list (cons 'name "eval")
-                                 (cons 'arguments
-                                       (list (cons 'code "(concat \"ñ\" \"✓\")")))))
-                          (claude-code-mcp-tests--request
-                           "tools/call" 4
-                           (list (cons 'name "eval")
-                                 (cons 'arguments
-                                       (list (cons 'code
-                                                   "(make-string 200000 ?x)")))))
-                          (claude-code-mcp-tests--request
-                           "tools/call" "five"
-                           (list (cons 'name "eval")
-                                 (cons 'arguments
-                                       (list (cons 'code
-                                                   "default-directory"))))))))
-              (should (equal (alist-get 'protocolVersion (alist-get 'result init))
-                             claude-code--mcp-protocol-version))
-              (should (seq-find (lambda (tool) (equal (alist-get 'name tool) "eval"))
-                                (alist-get 'tools (alist-get 'result tools))))
-              (should (equal (claude-code-mcp-tests--result-text eval) "\"ñ✓\""))
-              (should (= (length (claude-code-mcp-tests--result-text big)) 200002))
-              (should (equal (alist-get 'id here) "five"))
-              (should (equal (file-truename
-                              (read (claude-code-mcp-tests--result-text here)))
-                             (file-truename cwd)))
-              ;; The bridge's parent is this Emacs.
+            (progn
+              ;; A notification draws no line, so each reply lines up with its
+              ;; request.
+              (pcase-let ((`(,init ,tools ,text ,big ,here)
+                           (claude-code-mcp-tests--bridge-ask
+                            bridge
+                            (claude-code-mcp-tests--request
+                             "initialize" 1
+                             (list (cons 'protocolVersion "2025-06-18")))
+                            (claude-code-mcp-tests--request
+                             "notifications/initialized")
+                            (claude-code-mcp-tests--request "tools/list" 2)
+                            (funcall call-eval 3 "(concat \"ñ\" \"✓\")")
+                            (funcall call-eval 4 "(make-string 200000 ?x)")
+                            (funcall call-eval "five" "default-directory"))))
+                (should (equal (alist-get 'protocolVersion (alist-get 'result init))
+                               claude-code--mcp-protocol-version))
+                (should (seq-find (lambda (tool) (equal (alist-get 'name tool) "eval"))
+                                  (alist-get 'tools (alist-get 'result tools))))
+                (should (equal (claude-code-mcp-tests--result-text text) "\"ñ✓\""))
+                (should (= (length (claude-code-mcp-tests--result-text big)) 200002))
+                (should (equal (alist-get 'id here) "five"))
+                (should (equal (file-truename
+                                (read (claude-code-mcp-tests--result-text here)))
+                               (file-truename cwd))))
               (claude-code-mcp-tests--with-session-at (emacs-pid) "/home/test/proj"
                 (should (equal (claude-code-mcp-tests--result-text
                                 (car (claude-code-mcp-tests--bridge-ask
-                                      bridge
-                                      (claude-code-mcp-tests--request
-                                       "tools/call" 6
-                                       (list (cons 'name "eval")
-                                             (cons 'arguments
-                                                   (list (cons 'code
-                                                               "default-directory"))))))))
-                               "\"/home/test/proj/\""))))
+                                      bridge (funcall call-eval 6 "default-directory"))))
+                               "\"/home/test/proj/\"")))
+              (server-start t t)
+              (let ((lines (length (claude-code-mcp-tests--bridge-lines bridge))))
+                (process-send-string
+                 bridge (concat (json-serialize (claude-code-mcp-tests--request
+                                                 "tools/list" 7))
+                                "\n"))
+                (should (claude-code-tests--await
+                         (lambda () (not (process-live-p bridge))) 10))
+                (should (= (process-exit-status bridge) 1))
+                (should (= (length (claude-code-mcp-tests--bridge-lines bridge))
+                           lines))))
           (delete-process bridge)
           (kill-buffer (process-buffer bridge))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer (process-get bridge 'stderr)))
           (delete-directory cwd t))))))
-
-(ert-deftest claude-code-mcp-test-bridge-exits-without-emacs ()
-  "With no server to reach, the bridge exits on the first message and says nothing.
-Claude then starts it again for the next call.  It never falls back to an
-alternate editor, which would run with the MCP pipe as its input, or start a
-daemon of its own."
-  (skip-unless (executable-find "emacsclient"))
-  (let ((bridge (claude-code-mcp-tests--bridge
-                 '(("EMACS_SERVER_FILE" . "/claude-code-mcp-tests-nonexistent")
-                   ("EMACS_SOCKET_NAME" . "/claude-code-mcp-tests-nonexistent")
-                   ("ALTERNATE_EDITOR" . "echo")))))
-    (unwind-protect
-        (progn
-          (process-send-string
-           bridge
-           (concat (json-serialize (claude-code-mcp-tests--request "tools/list" 1))
-                   "\n"))
-          (should (claude-code-tests--await
-                   (lambda () (not (process-live-p bridge))) 10))
-          (should (= (process-exit-status bridge) 1))
-          (should (null (claude-code-mcp-tests--bridge-lines bridge))))
-      (delete-process bridge)
-      (kill-buffer (process-buffer bridge)))))
 
 ;;;; Live integration (real `claude' + real MCP handshake)
 ;;
@@ -1140,17 +654,27 @@ ignored so a partially-created worktree is still cleaned up."
           (ignore-errors
             (call-process "git" nil nil nil "branch" "-D" (cdr wt))))))))
 
-(ert-deftest claude-code-test-integration-mcp-handshake ()
-  "A spawned instance reaches this Emacs through the bridge, named by its PID.
-An eval from it, in a worktree, sees the worktree as its cwd.  The instance
-is handed the entry `claude-code-mcp-install' registers, alone, so the test
-reads no user configuration and leaves none behind."
+(ert-deftest claude-code-test-integration-instance-life ()
+  "A real instance's whole life: launch, MCP, name, rename, kill and delete.
+Spawned named, in a new worktree, it reports the PID Ghostel runs it under,
+reaches this Emacs's MCP server under that PID, and works in its worktree.  A
+long rename lands even when Claude reads the command and its RET in one go:
+stopping the instance across the send stands for a Claude too busy to read
+between the two.  Killed and deleted, it leaves no process and no transcript.
+The instance is handed only the entry `claude-code-mcp-install' registers, so
+the test reads no user configuration and leaves none behind."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))
+         (name "emacs integration name")
+         (long-name (concat "emacs integration " (make-string 60 ?x)))
          (initialized nil)
-         (probe (lambda (caller request)
-                  (when (equal (alist-get 'method request) "initialize")
+         (probe (lambda (request caller)
+                  (when (equal (alist-get 'method
+                                          (ignore-errors
+                                            (claude-code-mcp-tests--decode
+                                             request)))
+                               "initialize")
                     (setq initialized caller))))
          (config (make-temp-file
                   "cc-mcp-config" nil ".json"
@@ -1170,57 +694,102 @@ reads no user configuration and leaves none behind."
          ;; Snapshot existing worktrees so teardown removes only what this test
          ;; creates, never a developer's real worktrees.
          (worktrees-before (mapcar #'car (claude-code-mcp-tests--worktrees root)))
-         buffer pid)
+         buffer id pid cwd)
     (set-file-modes wrapper #o700)
-    (advice-add 'claude-code--mcp-handle-request :before probe)
-    (unwind-protect
-        (claude-code-tests--with-top-level-env
-          (server-start nil t)
-          (setq buffer (cdr (claude-code-spawn
-                             root :worktree t
-                             :prompt "Respond with the single word: pong")))
-          (should (claude-code-tests--await
-                   (lambda () (setq pid (claude-code--instance-pid buffer))) 10))
-          ;; The real CLI performs the MCP initialize handshake through the
-          ;; bridge, which names the instance by its PID.
-          (should (claude-code-tests--await (lambda () initialized) 45))
-          (should (eql initialized pid))
-          ;; Once the worktree session's sessions file lands, its real cwd is the
-          ;; worktree dir; an `eval' of `default-directory' returns it.
-          (should (claude-code-tests--await
-                   (lambda ()
-                     (let ((cwd (claude-code--pid-cwd pid)))
-                       (and cwd (string-match-p "/\\.claude/worktrees/" cwd))))
-                   45))
-          (let* ((resp (claude-code--mcp-handle-request
-                        pid
-                        (claude-code-mcp-tests--request
-                         "tools/call" 1
-                         (list (cons 'name "eval")
-                               (cons 'arguments
-                                     (list (cons 'code "default-directory")))))))
-                 (result (alist-get 'result resp)))
-            (should (eq (alist-get 'isError result) :false))
-            ;; The text is `prin1-to-string' of the bound directory (quoted).
-            (should (equal (read (claude-code-mcp-tests--result-text resp))
-                           (file-name-as-directory (claude-code--pid-cwd pid))))))
-      (advice-remove 'claude-code--mcp-handle-request probe)
-      (when (buffer-live-p buffer)
-        (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))
-      (when (and pid (process-attributes pid))
-        (ignore-errors (signal-process pid 'SIGKILL))
-        ;; Let the process and its git children die before touching its worktree.
-        (claude-code-tests--await (lambda () (not (process-attributes pid))) 5))
-      (ignore-errors (server-start t t))
-      (delete-file config)
-      (delete-file wrapper)
-      ;; Spawning with `:worktree t' leaves a locked git worktree behind that the
-      ;; CLI never tears down.  Remove only worktrees that appeared during this
-      ;; test; every pre-existing real worktree stays untouched.  A nil snapshot
-      ;; means the pre-spawn listing failed -- a live repo always lists its main
-      ;; worktree -- so skip cleanup rather than mistake every worktree for new.
-      (when worktrees-before
-        (claude-code-mcp-tests--remove-new-worktrees root worktrees-before)))))
+    (advice-add 'claude-code-mcp-dispatch :before probe)
+    (cl-flet ((session ()
+                (claude-code-tests--find-session
+                 (claude-code-project-sessions root) id)))
+      (unwind-protect
+          (claude-code-tests--with-top-level-env
+            (server-start nil t)
+            (pcase-setq `(,id . ,buffer)
+                        (claude-code-spawn
+                         root :name name :worktree t
+                         :prompt "Respond with the single word: pong"))
+            (should (string-match-p claude-code-tests--uuid-re id))
+            ;; The launch wrapper reports the PID it `exec's the CLI under.
+            (should (claude-code-tests--await
+                     (lambda () (setq pid (claude-code--instance-pid buffer)))
+                     10))
+            (should (eql pid (buffer-local-value 'ghostel--pid buffer)))
+            ;; The CLI's MCP handshake reaches this Emacs through the bridge,
+            ;; which names the instance by its PID.
+            (should (claude-code-tests--await (lambda () initialized) 45))
+            (should (eql initialized pid))
+            ;; The instance runs in the config dir this Emacs reads.
+            (when-let* ((environ (claude-code-tests--proc-strings pid "environ")))
+              (should (equal (seq-find (lambda (entry)
+                                         (string-prefix-p "CLAUDE_CONFIG_DIR="
+                                                          entry))
+                                       environ)
+                             (when-let* ((env (claude-code--config-env)))
+                               (concat "CLAUDE_CONFIG_DIR=" env)))))
+            ;; Listed under the root, alive and named as spawned, once Claude
+            ;; has written the transcript and finished the turn.
+            (should (claude-code-tests--await
+                     (lambda ()
+                       (when-let* ((s (session)))
+                         (and (claude-code-session-alive-p s)
+                              (equal (claude-code-session-title s) name)
+                              (equal (claude-code-session-status s) "idle"))))
+                     60))
+            ;; An eval from it runs in the worktree it works in.
+            (setq cwd (claude-code--pid-cwd pid))
+            (should (string-match-p "/\\.claude/worktrees/" cwd))
+            (pcase-let ((`(,error-p . ,text)
+                         (claude-code-mcp-tests--answer
+                          (claude-code-mcp-tests--call-tool
+                           pid "eval" (cons 'code "default-directory")))))
+              (should-not error-p)
+              (should (equal (read text) (file-name-as-directory cwd))))
+            (signal-process pid 'SIGSTOP)
+            (unwind-protect (claude-code-rename (session) long-name)
+              (signal-process pid 'SIGCONT))
+            (should (claude-code-tests--await
+                     (lambda ()
+                       (equal (claude-code-session-title (session)) long-name))
+                     30))
+            (claude-code-kill (session))
+            (let ((s (session)))
+              (should-not (and s (claude-code-session-alive-p s))))
+            (should (claude-code-tests--await
+                     (lambda () (not (process-attributes pid))) 15))
+            (let ((s (session)))
+              (should (file-exists-p (claude-code-session-transcript s)))
+              (claude-code-delete s)
+              (should-not (file-exists-p (claude-code-session-transcript s)))))
+        (advice-remove 'claude-code-mcp-dispatch probe)
+        ;; Where the transcript went, read while the instance still runs.
+        (unless cwd
+          (setq cwd (and pid (ignore-errors (claude-code--pid-cwd pid)))))
+        (when (buffer-live-p buffer)
+          (let ((kill-buffer-query-functions nil)) (kill-buffer buffer)))
+        (when (and pid (process-attributes pid))
+          (ignore-errors (signal-process pid 'SIGCONT))
+          (ignore-errors (signal-process pid 'SIGKILL))
+          ;; Let the process and its git children die before touching its
+          ;; worktree.
+          (claude-code-tests--await (lambda () (not (process-attributes pid))) 5))
+        (ignore-errors (server-start t t))
+        (delete-file config)
+        (delete-file wrapper)
+        (when (and id cwd)
+          (let* ((dir (claude-code-tests--project-dir cwd))
+                 (file (expand-file-name (concat id ".jsonl") dir))
+                 ;; Where a `/rename' also leaves the name.
+                 (own (expand-file-name id dir)))
+            (when (file-exists-p file) (delete-file file))
+            (when (file-directory-p own) (delete-directory own t))
+            ;; The worktree's own transcript directory, once nothing is left in it.
+            (ignore-errors (delete-directory dir))))
+        ;; Spawning with `:worktree t' leaves a locked git worktree behind that the
+        ;; CLI never tears down.  Remove only worktrees that appeared during this
+        ;; test; every pre-existing real worktree stays untouched.  A nil snapshot
+        ;; means the pre-spawn listing failed -- a live repo always lists its main
+        ;; worktree -- so skip cleanup rather than mistake every worktree for new.
+        (when worktrees-before
+          (claude-code-mcp-tests--remove-new-worktrees root worktrees-before))))))
 
 (provide 'claude-code-mcp-tests)
 ;;; claude-code-mcp-tests.el ends here
