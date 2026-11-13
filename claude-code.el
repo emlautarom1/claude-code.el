@@ -2667,8 +2667,8 @@ Also the view's `revert-buffer-function', whose arguments it ignores."
 
 (defun claude-code-sessions-refresh ()
   "Read the sessions again and redraw the view.
-A local project's view also has this machine's sessions/ watched
-\(`claude-code--watch-sessions'), which exists only once Claude has run here."
+In a local project's view, also start watching this machine's sessions/
+\(`claude-code--watch-sessions')."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (unless (file-remote-p claude-code--project)
