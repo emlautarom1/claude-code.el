@@ -6406,6 +6406,50 @@ The session the instance left becomes a dead row of its own, unmarked."
                            '("b")))))
       (kill-buffer instance))))
 
+(ert-deftest claude-code-test-view-point-follows-a-session-across-liveness ()
+  "Point follows a session whose row changes key as it gains or loses an instance.
+Detached, a row loses the instance buffer that keyed it; resumed, a dead row
+gains one.  Either way the row moves, and point stays on its session."
+  (let* ((instance (generate-new-buffer " *cc-instance*"))
+         (at (lambda (n) (seconds-to-time (* 60 n))))
+         (b (claude-code-session--create :id "b" :alive-p t :status "busy"
+                                         :last-active (funcall at 40)))
+         (c (claude-code-session--create :id "c" :alive-p t :status "idle"
+                                         :last-active (funcall at 30)))
+         (sessions (list (claude-code-session--create
+                          :id "a" :alive-p t :status "busy" :buffer instance
+                          :last-active (funcall at 50))
+                         b c
+                         (claude-code-session--create
+                          :id "d" :last-active (funcall at 20)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code-project-sessions)
+                   (lambda (_) sessions)))
+          (claude-code-tests--in-view
+            (setq claude-code--project "/r"
+                  claude-code--collapsed nil)
+            (claude-code-sessions-refresh)
+            (claude-code-tests--goto-session instance)
+            (setq sessions (list (claude-code-session--create
+                                  :id "a" :external-p t
+                                  :last-active (funcall at 50))
+                                 b c
+                                 (claude-code-session--create
+                                  :id "d" :last-active (funcall at 20))))
+            (claude-code-sessions-refresh)
+            (should (equal (claude-code-session-id (claude-code--session-at-point))
+                           "a"))
+            (claude-code-tests--goto-session "d")
+            (setq sessions (list (car sessions) b c
+                                 (claude-code-session--create
+                                  :id "d" :alive-p t :status "idle"
+                                  :buffer instance
+                                  :last-active (funcall at 20))))
+            (claude-code-sessions-refresh)
+            (should (equal (claude-code-session-id (claude-code--session-at-point))
+                           "d"))))
+      (kill-buffer instance))))
+
 (ert-deftest claude-code-test-confirmations-name-their-targets ()
   "Kill and delete ask about their targets by name."
   (let ((asked '()))

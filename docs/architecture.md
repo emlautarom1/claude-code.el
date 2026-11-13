@@ -132,7 +132,7 @@ Spawn, resume, attach, kill, detach and delete update every view through `claude
 
 A view reads its project only in `claude-code--read-view`; `TAB`, `G`, sorting and the column-width commands reprint that read. A remote project's view is read on `g` and by the commands above, never patched from what Emacs knows: a status from the last read beside a turn end from now would show a state the instance was never in. Instead, `k`, `x` and `d` offer to refresh a remote view that Emacs knows has changed (`claude-code--view-outdated-p`).
 
-`claude-code--redraw` keeps the view's point, and the point and start of every window showing it, on the row or group header each was on, or on their line once it is gone. A caller that acted on a group outranks that: `claude-code-sessions-toggle-group` names the group it folded, which is what makes `TAB TAB` fold and unfold in place.
+`claude-code--redraw` keeps the view's point, and the point and start of every window showing it, on the row or group header each was on: the same row, else the row of the same session, whose row changes as it gains or loses an instance, else the same line. A caller that acted on a group outranks that: `claude-code-sessions-toggle-group` names the group it folded, which is what makes `TAB TAB` fold and unfold in place.
 
 Every `claude-code-sessions-*` command reads the view's buffer-local state, so each one guards with `claude-code--ensure-sessions-mode` (a `user-error` outside the view) and tags its `interactive` form with the mode. The tag scopes `M-x`/`M-S-x` completion, but the guard is the real boundary: when `read-extended-command-predicate` is otherwise unset, transient installs one that ignores mode tags.
 

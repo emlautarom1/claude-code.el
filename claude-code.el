@@ -2479,8 +2479,13 @@ Return nil and leave point alone when no line matches."
 (defun claude-code--print-entry (id cols)
   "Print the row for ID with COLS, tagging it when ID is in `claude-code--marks'.
 The view's `tabulated-list-printer': tagging here rather than after the fact
-keeps a mark visible through reprints that bypass `claude-code--redraw'."
-  (tabulated-list-print-entry id cols)
+keeps a mark visible through reprints that bypass `claude-code--redraw'.  The
+row carries its session's id (`claude-code--line-session')."
+  (let ((start (point)))
+    (tabulated-list-print-entry id cols)
+    (put-text-property start (point) 'claude-code-session
+                       (claude-code-session-id
+                        (gethash id claude-code--session-table))))
   (when (member id claude-code--marks)
     (save-excursion
       (forward-line -1)
@@ -2612,20 +2617,29 @@ A row is named by its entry id, a group header by its group's key."
                                           'claude-code-group)))
       (cons 'group group))))
 
+(defun claude-code--line-session ()
+  "Return the id of the session on the current line, or nil on a group header."
+  (get-text-property (line-beginning-position) 'claude-code-session))
+
 (defun claude-code--row-place (pos)
-  "Return POS as (KEY LINE . COLUMN), for `claude-code--row-pos'."
+  "Return POS as (KEY SESSION LINE . COLUMN), for `claude-code--row-pos'."
   (save-excursion
     (goto-char pos)
-    (cons (claude-code--line-key) (cons (line-number-at-pos) (current-column)))))
+    (cons (claude-code--line-key)
+          (cons (claude-code--line-session)
+                (cons (line-number-at-pos) (current-column))))))
 
 (defun claude-code--row-pos (place)
   "Return the position `claude-code--row-place' PLACE names in the reprint.
-That is its column on the line its key names, or on its line when no line
-carries the key any more."
-  (pcase-let ((`(,key ,line . ,column) place))
+That is its column on the line its key names, else on the row of its session,
+whose key changes as it gains or loses an instance, else on its line."
+  (pcase-let ((`(,key ,session ,line . ,column) place))
     (save-excursion
-      (unless (and key (claude-code--goto-line-where
-                        (lambda () (equal (claude-code--line-key) key))))
+      (unless (or (and key (claude-code--goto-line-where
+                            (lambda () (equal (claude-code--line-key) key))))
+                  (and session (claude-code--goto-line-where
+                                (lambda ()
+                                  (equal (claude-code--line-session) session)))))
         (goto-char (point-min))
         (forward-line (1- line)))
       (move-to-column column)
