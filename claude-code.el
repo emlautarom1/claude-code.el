@@ -509,8 +509,8 @@ MSG is nil when Claude sent none."
   (when-let* ((record (claude-code--root-record buffer)))
     (cons (plist-get record :state) (plist-get record :msg))))
 
-(defun claude-code--record-modifier (record)
-  "Return the status modifier program status RECORD carries, or nil.
+(defun claude-code--record-turn-end (record)
+  "Return the turn end program status RECORD reports, or nil.
 That is (STATE . MSG) while its state is `done' or `error', MSG nil when
 Claude sent none."
   (when (memq (plist-get record :state) '(done error))
@@ -602,9 +602,10 @@ ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live instance,
 in which case BUFFER holds the Ghostel buffer and PID its `claude' process, on
 the project's host and nil until reported (`claude-code--report-pid').  STATUS
 is Claude's native `busy'/`idle'/`waiting' string (alive sessions only), with
-WAITING-FOR set while waiting.  MODIFIER is the instance's root program
-status state when that is `done' or `error', with MODIFIER-MESSAGE Claude's
-message for it, if any.  EXTERNAL-P flags a session whose process is
+WAITING-FOR set while waiting.  TURN-END is how the instance's last turn ended,
+`done' or `error', read off its root program status record, with
+TURN-END-MESSAGE Claude's message for it, if any.  EXTERNAL-P flags a session
+whose process is
 running outside Emacs, so it must not be resumed or deleted.  TITLE and
 LAST-PROMPT come from the transcript and, via
 `claude-code--session-display-name', are the session's only display-name
@@ -618,7 +619,7 @@ LAST-ACTIVE is the session's last genuine activity, taken from the newest
 timestamped transcript line.  HOLDER is the dtach socket, as a file name on the
 session's host, of the detachable instance running an external session, which
 can therefore be attached; nil for every other session."
-  id status waiting-for modifier modifier-message alive-p pid buffer
+  id status waiting-for turn-end turn-end-message alive-p pid buffer
   worktree worktree-binding title last-prompt recap transcript external-p
   last-active holder)
 
@@ -805,7 +806,7 @@ and the registry stands in for the worktree."
   (let* ((entry (gethash buffer claude-code--managed))
          (id (plist-get entry :session))
          (info (plist-get entry :info))
-         (modifier (claude-code--record-modifier
+         (turn-end (claude-code--record-turn-end
                     (claude-code--root-record buffer))))
     (when args
       (plist-put entry :named (cons id args)))
@@ -814,8 +815,8 @@ and the registry stands in for the worktree."
            :buffer buffer :pid (claude-code--instance-pid buffer)
            :status (plist-get info :status)
            :waiting-for (plist-get info :waiting-for)
-           :modifier (car modifier)
-           :modifier-message (cdr modifier)
+           :turn-end (car turn-end)
+           :turn-end-message (cdr turn-end)
            (or args (claude-code--transcript-session-args nil entry)))))
 
 (defun claude-code--transcript-for (root id)
@@ -1096,8 +1097,8 @@ A parent of your own may replace the empty one.")
 
 (defvar claude-code--sessions-changed-hook nil
   "Hook run when this machine's sessions may have changed.
-That is when an instance here registers, reports its PID, changes its status
-modifier or closes, and when a file in this machine's sessions/ changes.")
+That is when an instance here registers, reports its PID, changes its turn end
+or closes, and when a file in this machine's sessions/ changes.")
 
 (defun claude-code--sessions-changed ()
   "Run `claude-code--sessions-changed-hook'.
@@ -1125,16 +1126,16 @@ RECORD-ID is \"\", changes state from OLD to NEW."
     (claude-code--follow-cwd)))
 
 (defun claude-code--on-root-status (record-id old new)
-  "Report a change of this buffer's status modifier, from OLD to NEW.
-A `ghostel-program-status-functions' entry: the modifier is read off the root
+  "Report a change of this buffer's turn end, from OLD to NEW.
+A `ghostel-program-status-functions' entry: the turn end is read off the root
 record, whose RECORD-ID is \"\", so a change of it runs
 `claude-code--sessions-changed' for a managed instance on this machine.  A
-modifier appearing is left to the sessions/ rewrite of the turn it ends, which
+turn end appearing is left to the sessions/ rewrite of the turn it ends, which
 follows the report, so a view never pairs it with the status of the turn
 before."
   (when-let* (((string-empty-p record-id))
-              (was (claude-code--record-modifier old))
-              ((not (equal was (claude-code--record-modifier new))))
+              (was (claude-code--record-turn-end old))
+              ((not (equal was (claude-code--record-turn-end new))))
               (entry (gethash (current-buffer) claude-code--managed))
               ((not (claude-code--entry-host entry))))
     (claude-code--sessions-changed)))
@@ -2278,9 +2279,9 @@ The empty string is returned when TIME is nil."
             ((< secs 604800) (format "%dd" (/ secs 86400)))
             (t (format "%dw" (/ secs 604800)))))))
 
-(defun claude-code--modifier-glyph (session)
-  "Return the glyph for SESSION's status modifier, or nil for none."
-  (pcase (claude-code-session-modifier session)
+(defun claude-code--turn-end-glyph (session)
+  "Return the glyph for SESSION's turn end, or nil for none."
+  (pcase (claude-code-session-turn-end session)
     ('done (propertize "✓" 'face 'success 'help-echo "Turn finished"))
     ('error (propertize "✗" 'face 'error 'help-echo "Turn failed"))))
 
@@ -2294,7 +2295,7 @@ USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
   (let ((status (claude-code--status-display session))
         (glyph (if (claude-code-session-holder session)
                    claude-code--attachable-glyph
-                 (claude-code--modifier-glyph session))))
+                 (claude-code--turn-end-glyph session))))
     (vector (concat (propertize (car status) 'face (cdr status))
                     (and glyph (concat " " glyph)))
             (propertize (claude-code--format-relative-time
@@ -2333,7 +2334,7 @@ splits out by status, and only when grouping by status."
 (defun claude-code--group-header (key sessions collapsed)
   "Return the header line for group KEY holding SESSIONS.
 A COLLAPSED group also counts how many of them are marked and how many carry
-each status modifier, or are attachable, standing in for the tags and flags it
+each turn end, or are attachable, standing in for the tags and flags it
 is not showing."
   (let ((counts
          (when collapsed
@@ -2342,9 +2343,9 @@ is not showing."
                                         (member (claude-code--row-key s)
                                                 claude-code--marks)))
                          ("done" . ,(lambda (s)
-                                      (eq (claude-code-session-modifier s) 'done)))
+                                      (eq (claude-code-session-turn-end s) 'done)))
                          ("error" . ,(lambda (s)
-                                       (eq (claude-code-session-modifier s) 'error)))
+                                       (eq (claude-code-session-turn-end s) 'error)))
                          ("attachable" . ,#'claude-code-session-holder))
                     for n = (seq-count pred sessions)
                     unless (zerop n) collect (format "%d %s" n label)))))
@@ -2441,11 +2442,11 @@ The view's variable `tabulated-list-groups', so every reprint draws what
 
 (defun claude-code--eldoc-session (&rest _)
   "Return the documentation of the session on the current line, or nil.
-The view's `eldoc-documentation-functions' member: the status modifier's
+The view's `eldoc-documentation-functions' member: the turn end's
 message, then the recap.  Both are struct fields, so this answers
 synchronously by returning the string."
   (when-let* ((session (claude-code--session-at-point))
-              (parts (delq nil (list (claude-code-session-modifier-message session)
+              (parts (delq nil (list (claude-code-session-turn-end-message session)
                                      (claude-code-session-recap session)))))
     (string-join parts "\n\n")))
 
@@ -2523,9 +2524,9 @@ the redraw happens however the batch ends."
   "Return non-nil when Emacs knows a remote view no longer shows its instances.
 A view of a remote project is read only on `g' and by the commands that change
 its sessions.  Emacs knows without asking the host when an instance of the
-project starts or closes, and when a drawn one reports another PID or status
-modifier.  A view of a local project is read again on each of these, so it
-never is."
+project starts or closes, and when a drawn one reports another PID or turn
+end.  A view of a local project is read again on each of these, so it never
+is."
   (when (file-remote-p claude-code--project)
     (or (seq-some
          (lambda (session)
@@ -2533,11 +2534,11 @@ never is."
              (or (not (claude-code--session-process buffer))
                  (not (eql (claude-code-session-pid session)
                            (claude-code--instance-pid buffer)))
-                 (not (equal (and (claude-code-session-modifier session)
-                                  (cons (claude-code-session-modifier session)
-                                        (claude-code-session-modifier-message
+                 (not (equal (and (claude-code-session-turn-end session)
+                                  (cons (claude-code-session-turn-end session)
+                                        (claude-code-session-turn-end-message
                                          session)))
-                             (claude-code--record-modifier
+                             (claude-code--record-turn-end
                               (claude-code--root-record buffer)))))))
          (seq-filter #'claude-code-session-alive-p
                      (hash-table-values claude-code--session-table)))

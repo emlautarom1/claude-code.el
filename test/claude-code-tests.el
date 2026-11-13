@@ -1137,8 +1137,8 @@ the views name; the worktree itself still lists it too."
             (should (equal (claude-code--session-display-name s1)
                            "Understand the project layout"))))))))
 
-(ert-deftest claude-code-test-sessions-carry-the-status-modifier ()
-  "An alive session's modifier is its root record's `done' or `error'.
+(ert-deftest claude-code-test-sessions-carry-the-turn-end ()
+  "An alive session's turn end is its root record's `done' or `error'.
 It lasts exactly as long as the record: any other state, or no record once
 Ghostel dropped it on input, leaves none, and a subagent's record never
 counts.  A session Emacs does not run has no record to read."
@@ -1148,7 +1148,7 @@ counts.  A session Emacs does not run has no record to read."
         (claude-code--register id buf "/home/test/proj" nil)
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
-          (pcase-dolist (`(,records ,modifier ,message)
+          (pcase-dolist (`(,records ,turn-end ,message)
                          '(((("" :state done)) done nil)
                            ((("" :state done :msg "m")) done "m")
                            ((("" :state error :msg "There's an issue"))
@@ -1165,10 +1165,10 @@ counts.  A session Emacs does not run has no record to read."
             (dolist (s (claude-code-project-sessions "/home/test/proj"))
               (if (equal (claude-code-session-id s) id)
                   (progn
-                    (should (eq (claude-code-session-modifier s) modifier))
-                    (should (equal (claude-code-session-modifier-message s)
+                    (should (eq (claude-code-session-turn-end s) turn-end))
+                    (should (equal (claude-code-session-turn-end-message s)
                                    message)))
-                (should-not (claude-code-session-modifier s))))))))))
+                (should-not (claude-code-session-turn-end s))))))))))
 
 (ert-deftest claude-code-test-sessions-alive-from-another-root ()
   "Aliveness is keyed by session id, not by the root the query used.
@@ -2698,10 +2698,10 @@ and an instance on another host is not followed: its PID names a process there."
       (kill-buffer remote))))
 
 (ert-deftest claude-code-test-instance-changes-are-reported ()
-  "Registering, reporting a PID, a modifier change and closing are reported.
-The modifier is the root record's `done' or `error' state and its message, so a
+  "Registering, reporting a PID, a turn end change and closing are reported.
+The turn end is the root record's `done' or `error' state and its message, so a
 root record changing without changing those reports nothing, and neither does a
-subagent's record or a terminal Emacs does not manage.  Nor does a modifier
+subagent's record or a terminal Emacs does not manage.  Nor does a turn end
 appearing: the turn it ends rewrites sessions/, which reports it along with the
 status that goes with it.  An instance on another host reports nothing."
   (let ((changed 0)
@@ -4649,7 +4649,7 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
                :id "abcdef01-0000-4000-8000-000000000000"
                :alive-p nil :title "The Title"))
            (v (claude-code--format-session s nil now)))
-      ;; No status modifier -> the status alone.
+      ;; No turn end -> the status alone.
       (should (equal (substring-no-properties (aref v 0)) "dead"))
       ;; No last-active -> empty Active cell.
       (should (equal (substring-no-properties (aref v 1)) ""))
@@ -4673,12 +4673,12 @@ Order is Status[0] Active[1] Id[2] Worktree[3] CPU%[4] Mem[5] Name[6]."
       (should (equal (aref v 4) "12.5"))
       (should (equal (aref v 5) "200M"))
       (should (equal (aref v 6) "Worker task")))
-    ;; A status modifier's glyph follows the status, in its own face.
-    (pcase-dolist (`(,modifier ,cell ,face) '((done "idle ✓" success)
+    ;; A turn end's glyph follows the status, in its own face.
+    (pcase-dolist (`(,turn-end ,cell ,face) '((done "idle ✓" success)
                                               (error "idle ✗" error)))
       (let* ((v (claude-code--format-session
                  (claude-code-session--create :id "a" :alive-p t :status "idle"
-                                              :modifier modifier)
+                                              :turn-end turn-end)
                  nil now))
              (glyph (1- (length (aref v 0)))))
         (should (equal (substring-no-properties (aref v 0)) cell))
@@ -5188,11 +5188,11 @@ since the last refresh still draws as alive."
     (should (claude-code--group-at-point))
     (should-not (claude-code--eldoc-session))))
 
-(ert-deftest claude-code-test-view-eldoc-leads-with-the-modifier-message ()
+(ert-deftest claude-code-test-view-eldoc-leads-with-the-turn-end-message ()
   "A failed turn's message heads the ElDoc answer, above the recap."
   (let ((session (claude-code-session--create
                   :id "a" :alive-p t :status "idle" :recap "Where it stood."
-                  :modifier 'error :modifier-message "There's an issue")))
+                  :turn-end 'error :turn-end-message "There's an issue")))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () session)))
       (should (equal (claude-code--eldoc-session)
@@ -6262,8 +6262,8 @@ Only a read settles the change; a reprint of the last read does not."
 
 (ert-deftest claude-code-test-remote-view-outdated-by-what-emacs-knows ()
   "A remote view is outdated once Emacs knows its instances changed since the read.
-An instance of the project starting or closing, or a drawn one's PID or status
-modifier changing, is known without asking the host.  A view of a local
+An instance of the project starting or closing, or a drawn one's PID or turn
+end changing, is known without asking the host.  A view of a local
 project, read again on every such change, never is."
   (let* ((root "/ssh:cc-test-host:/r")
          (old (generate-new-buffer " *cc-old*"))
@@ -6438,14 +6438,14 @@ The session the instance left becomes a dead row of its own, unmarked."
     (should (string-match-p "^▾ Dead (6)$" (thing-at-point 'line t)))
     (should (equal 2 (length (claude-code-tests--tagged-ids))))))
 
-(ert-deftest claude-code-test-view-collapsed-group-reports-its-modifiers ()
-  "A folded group counts the status modifiers of the rows it hides.
+(ert-deftest claude-code-test-view-collapsed-group-reports-its-turn-ends ()
+  "A folded group counts the turn ends of the rows it hides.
 They follow its marks, and an expanded group shows the glyphs themselves."
   (claude-code-tests--in-view
     (let ((sessions (mapcar (lambda (spec)
                               (claude-code-session--create
                                :id (car spec) :alive-p t :status "idle"
-                               :modifier (cdr spec)))
+                               :turn-end (cdr spec)))
                             '(("a" . done) ("b" . done) ("c" . error)
                               ("d") ("e")))))
       (cl-letf (((symbol-function 'claude-code-project-sessions)
@@ -6462,13 +6462,13 @@ They follow its marks, and an expanded group shows the glyphs themselves."
                         (car (car (claude-code--tabulated-groups))))
                        "▾ Idle (5)"))))))
 
-(ert-deftest claude-code-test-view-sorts-by-modifier ()
-  "`S' on the Status column sorts each group by status modifier."
+(ert-deftest claude-code-test-view-sorts-by-turn-end ()
+  "`S' on the Status column sorts each group by turn end."
   (claude-code-tests--in-view
     (let ((sessions (mapcar (lambda (spec)
                               (claude-code-session--create
                                :id (car spec) :alive-p t :status "idle"
-                               :modifier (cdr spec)))
+                               :turn-end (cdr spec)))
                             '(("a" . done) ("b") ("c" . error)))))
       (cl-letf (((symbol-function 'claude-code-project-sessions)
                  (lambda (_) sessions)))
