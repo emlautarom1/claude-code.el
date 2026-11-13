@@ -6209,6 +6209,18 @@ found, which costs a remote view no round trip."
         (claude-code-sessions-refresh)
         (should (= reads 3))))))
 
+(ert-deftest claude-code-test-view-stays-stale-until-read ()
+  "A view a change reached out of sight is read when shown, whatever reprinted it.
+Only a read settles the change; a reprint of the last read does not."
+  (cl-letf (((symbol-function 'claude-code-project-sessions) (lambda (_) nil)))
+    (claude-code-tests--in-view
+      (setq claude-code--project "/r"
+            claude-code--stale t)
+      (claude-code-sessions-cycle-grouping)
+      (should claude-code--stale)
+      (claude-code-sessions-refresh)
+      (should-not claude-code--stale))))
+
 (ert-deftest claude-code-test-remote-view-outdated-by-what-emacs-knows ()
   "A remote view is outdated once Emacs knows its instances changed since the read.
 An instance of the project starting or closing, or a drawn one's PID or status
