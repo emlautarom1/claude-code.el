@@ -5296,7 +5296,7 @@ since the last refresh still draws as alive."
 The model answers for whatever root it is handed -- `claude-code-sessions'
 hands it the parent (`claude-code--current-project'), but nothing in the model
 depends on that, since a session belongs to both roots.  The row must land in
-its status group, so `d' has no target there and `k' does."
+the alive group, so `d' has no target there and `k' does."
   (claude-code-tests--with-fixtures
     (claude-code-tests--with-managed-buffer (buf 1003)
       (let ((id "33333333-3333-4333-8333-333333333333")
@@ -5314,7 +5314,7 @@ its status group, so `d' has no target there and `k' does."
                   (claude-code-sessions-refresh)
                   (let ((text (buffer-substring-no-properties
                                (point-min) (point-max))))
-                    (should (string-match-p "Waiting (1)" text))
+                    (should (string-match-p "Alive (1)" text))
                     (should-not (string-match-p "Dead" text)))
                   ;; Point on the row: delete finds nothing to act on, kill does.
                   (goto-char (point-min))
@@ -6640,15 +6640,15 @@ They follow its marks, and an expanded group shows the glyphs themselves."
                  (lambda (_) sessions)))
         (setq claude-code--project "/r")
         (setq claude-code--marks '("d" "e"))
-        (setq claude-code--collapsed (list "idle"))
+        (setq claude-code--collapsed (list "alive"))
         (claude-code--read-view)
         (should (equal (substring-no-properties
                         (car (car (claude-code--tabulated-groups))))
-                       "▸ Idle (5, 2 marked, 2 done, 1 error)"))
+                       "▸ Alive (5, 2 marked, 2 done, 1 error)"))
         (setq claude-code--collapsed nil)
         (should (equal (substring-no-properties
                         (car (car (claude-code--tabulated-groups))))
-                       "▾ Idle (5)"))))))
+                       "▾ Alive (5)"))))))
 
 (ert-deftest claude-code-test-view-sorts-by-turn-end ()
   "`S' on the Status column sorts each group by turn end."

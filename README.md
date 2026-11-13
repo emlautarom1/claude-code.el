@@ -7,7 +7,7 @@ Orchestrate and manage [Claude Code](https://www.anthropic.com/claude-code) CLI 
 ## Features
 
 - **Per-project sessions view** (`M-x claude-code-sessions`) — a `tabulated-list-mode` buffer listing every [interactive session](docs/glossary.md) of the current `project.el` project, alive and dead. A view of a project on this machine keeps itself current as instances start, change status, switch sessions and exit; a remote project's shows what `g` last read, and `k`, `x` and `d` offer to refresh it first when Emacs knows it has changed.
-- **Grouping** by status (`busy`/`shell`/`idle`/`waiting`) or by liveness (alive / external / dead), with **collapsible groups** and column **sorting**.
+- **Grouping** by liveness (alive / external / dead) or by status (`busy`/`shell`/`idle`/`waiting`), with **collapsible groups** and column **sorting**.
 - **Status and resource usage** — Claude's native status plus CPU% and memory summed over each instance's process subtree. A row's status is followed by `✓` when the instance's last turn finished and `✗` when it failed, until you type into it.
 - **Session recaps in the echo area** — Claude writes a short account of where a session stood each time you come back to it after a break. Move point onto a row and the view hands that session's latest recap to ElDoc, the way `emacs-lisp-mode` documents the variable under point; `M-x eldoc-doc-buffer` shows the full text. A finished or failed turn's message, if any, comes first; a session with neither shows nothing.
 - **Transcripts beside the view** — `t` shows the conversation of the session at point the way Claude's own `/export` writes it, MCP tool calls aside, in a window beside the view that the next row's transcript takes over. `g` there exports it again.
@@ -65,7 +65,7 @@ Run `M-x claude-code-sessions` to open the sessions view, or `M-x claude-code-sp
 | `t`       | show the transcript of the session at point beside the view |
 | `v`       | show VC status of the tree the session at point works in    |
 | `m` / `u` | mark / unmark the session at point                          |
-| `G`       | cycle grouping (status ↔ liveness)                          |
+| `G`       | cycle grouping (liveness ↔ status)                          |
 | `g`       | refresh                                                     |
 | `?`       | describe the mode, listing every keybinding                 |
 

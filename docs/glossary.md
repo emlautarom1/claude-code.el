@@ -38,7 +38,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
 
   The worktree is a `project.el` project of its own, but the package never scopes to it: a buffer inside one acts on the parent project, which is the only root that lists the whole tree (`claude-code--current-project`, and [the filing cwd](storage-model.md#the-filing-cwd--relocated) for why). The create menu asks for that worktree by name instead, so a session created from inside one is created *in* it. An instance launched from a worktree's root is likewise launched from the parent with that worktree named.
 
-- **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named after its project (`*claude-sessions: <project>*`), that lists a project's sessions grouped by status or by liveness, opened with `M-x claude-code-sessions`.
+- **Sessions view** — the `tabulated-list-mode` buffer (`claude-code-sessions-mode`), named after its project (`*claude-sessions: <project>*`), that lists a project's sessions grouped by liveness or by status, opened with `M-x claude-code-sessions`.
 
 - **Project** — the current `project.el` project (usually a git repository). Each project has its own view. Sessions are associated with a project by their working directory. The sessions-view buffer pins its `default-directory` to the project root, so project-aware commands (`magit`, `project.el`, `compile`, …) resolve the current project directly from the view instead of prompting. It pins `list-buffers-directory` there too, which is where tools that expect a buffer to visit a file — `ibuffer`, completion annotators such as `marginalia` — look for a directory instead.
 

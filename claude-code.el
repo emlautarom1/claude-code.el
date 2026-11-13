@@ -2223,13 +2223,13 @@ It is remembered in SESSION's buffer, for `claude-code--close-posted'."
 ;;;; View
 ;;
 ;; A `tabulated-list-mode' buffer listing every session of a project, grouped by
-;; status or by liveness (Emacs 30 `tabulated-list-groups' prints a header line
+;; liveness or by status (Emacs 30 `tabulated-list-groups' prints a header line
 ;; per group); a collapsed group simply contributes no entry rows.
 
 (defvar-local claude-code--project nil
   "Project root a sessions view is scoped to.")
-(defvar-local claude-code--group-by 'status
-  "How the sessions view groups rows: `status' or `state'.")
+(defvar-local claude-code--group-by 'state
+  "How the sessions view groups rows: `state' (liveness) or `status'.")
 (defvar-local claude-code--collapsed nil
   "List of collapsed group names in a sessions view.
 `claude-code-sessions-mode' seeds this with the \"dead\" group so it starts
