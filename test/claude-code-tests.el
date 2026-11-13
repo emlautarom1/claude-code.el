@@ -2719,9 +2719,8 @@ and an instance on another host is not followed: its PID names a process there."
   "Registering, reporting a PID, a turn end change and closing are reported.
 The turn end is the root record's `done' or `error' state and its message, so a
 root record changing without changing those reports nothing, and neither does a
-subagent's record or a terminal Emacs does not manage.  Nor does a turn end
-appearing: the turn it ends rewrites sessions/, which reports it along with the
-status that goes with it.  An instance on another host reports nothing."
+subagent's record or a terminal Emacs does not manage.  An instance on another
+host reports nothing."
   (let ((changed 0)
         (local (generate-new-buffer " *cc-instance*"))
         (remote (generate-new-buffer " *cc-remote*")))
@@ -2748,13 +2747,14 @@ status that goes with it.  An instance on another host reports nothing."
                 (funcall report "" nil '(:state working))
                 (funcall report "" '(:state working) '(:state blocked))
                 (funcall report "a93609d08ab42add7" nil '(:state error))
-                (funcall report "" '(:state blocked) '(:state done))
                 (should (= changed 2))
+                (funcall report "" '(:state blocked) '(:state done))
+                (should (= changed 3))
                 (funcall report "" '(:state done) '(:state done :msg "m"))
                 (funcall report "" '(:state done :msg "m") nil)
-                (should (= changed 4))
+                (should (= changed 5))
                 (kill-buffer local)
-                (should (= changed 5)))
+                (should (= changed 6)))
               (with-current-buffer remote
                 (claude-code-instance-mode)
                 (claude-code--register "id" remote "/ssh:cc-test-host:/r" nil)
@@ -2764,9 +2764,59 @@ status that goes with it.  An instance on another host reports nothing."
                 (claude-code--report-pid "4244")
                 (funcall report "" '(:state done) nil)
                 (kill-buffer remote)
-                (should (= changed 5))))))
+                (should (= changed 6))))))
       (dolist (buffer (list local remote))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest claude-code-test-turn-end-reaches-the-view-in-either-order ()
+  "A turn's end shows once both its report and its sessions/ rewrite are in.
+Each of the two runs the change hook, so whichever comes second shows it, and
+the read the first one makes pairs no turn end with the turn's own status."
+  (claude-code-tests--with-registry
+    (claude-code-tests--with-config
+      (let ((buf (generate-new-buffer " *cc-instance*"))
+            (changed 0))
+        (unwind-protect
+            (cl-letf (((symbol-function 'ghostel--update-directory) #'ignore))
+              (with-current-buffer buf
+                (claude-code-instance-mode)
+                (setq-local claude-code--pid 4242))
+              (claude-code--register "id" buf "/r" nil)
+              (add-hook 'claude-code--sessions-changed-hook
+                        (lambda () (cl-incf changed)))
+              (cl-flet ((rewrite (status)
+                          (claude-code-tests--write-session-file
+                           4242 (format "{\"sessionId\":\"id\",\"status\":\"%s\"}"
+                                        status))
+                          (claude-code--on-session-file 4242))
+                        (report (old new)
+                          (with-current-buffer buf
+                            (setq ghostel-program-status (list (cons "" new)))
+                            (run-hook-with-args 'ghostel-program-status-functions
+                                                "" old new)))
+                        (shown ()
+                          (claude-code-session-turn-end
+                           (claude-code--instance-session buf))))
+                ;; The report first: the status read with it is the turn's own.
+                (rewrite "busy")
+                (setq changed 0)
+                (report '(:state working) '(:state done))
+                (should (= changed 1))
+                (should-not (shown))
+                (rewrite "idle")
+                (should (= changed 2))
+                (should (eq (shown) 'done))
+                ;; The rewrite first: the record read with it is the turn's own.
+                (report '(:state done) '(:state working))
+                (rewrite "busy")
+                (setq changed 0)
+                (rewrite "idle")
+                (should (= changed 1))
+                (should-not (shown))
+                (report '(:state working) '(:state done))
+                (should (= changed 2))
+                (should (eq (shown) 'done))))
+          (kill-buffer buf))))))
 
 (ert-deftest claude-code-test-watch-sessions-once ()
   "This machine's sessions/ is watched once, and again once that watch stopped.

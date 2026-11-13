@@ -803,8 +803,9 @@ and the registry stands in for the worktree."
   (let* ((entry (gethash buffer claude-code--managed))
          (id (plist-get entry :session))
          (info (plist-get entry :info))
-         ;; Only a resting instance has ended its turn: the record of the last
-         ;; one can outlive it by the moment Claude takes to report a new one.
+         ;; Only a resting instance has ended its turn.  A turn's report and
+         ;; its sessions/ rewrite arrive apart, so either can be read beside
+         ;; what the other said of the turn before.
          (turn-end (and (member (plist-get info :status) '("idle" "shell"))
                         (claude-code--record-turn-end
                          (claude-code--root-record buffer)))))
@@ -1129,13 +1130,10 @@ RECORD-ID is \"\", changes state from OLD to NEW."
   "Report a change of this buffer's turn end, from OLD to NEW.
 A `ghostel-program-status-functions' entry: the turn end is read off the root
 record, whose RECORD-ID is \"\", so a change of it runs
-`claude-code--sessions-changed' for a managed instance on this machine.  A
-turn end appearing is left to the sessions/ rewrite of the turn it ends, which
-follows the report, so a view never pairs it with the status of the turn
-before."
+`claude-code--sessions-changed' for a managed instance on this machine."
   (when-let* (((string-empty-p record-id))
-              (was (claude-code--record-turn-end old))
-              ((not (equal was (claude-code--record-turn-end new))))
+              ((not (equal (claude-code--record-turn-end old)
+                           (claude-code--record-turn-end new))))
               (entry (gethash (current-buffer) claude-code--managed))
               ((not (claude-code--entry-host entry))))
     (claude-code--sessions-changed)))
