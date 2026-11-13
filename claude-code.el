@@ -2739,13 +2739,16 @@ the group's header."
 (defun claude-code--visit-session (session display)
   "Show SESSION's instance buffer through DISPLAY, getting it one if it has none.
 The instance the row was drawn for is shown while it runs, even once a
-`/clear' has moved it onto another session, which refreshes the views.  An
-external session a detachable instance runs is attached, and any other
-session is resumed."
+`/clear' has moved it onto another session, which refreshes the views, and
+refused once it has left Emacs.  An external session a detachable instance
+runs is attached, and any other session is resumed."
   (let* ((drawn (claude-code-session-buffer session))
          (id (claude-code-session-id session))
          (buffer (cond
                   ((claude-code--session-process drawn) drawn)
+                  ((claude-code-session-alive-p session)
+                   (user-error "Session %s has left Emacs; press g to refresh"
+                               id))
                   ((claude-code-session-holder session)
                    (claude-code-attach claude-code--project id
                                        (claude-code--session-display-name

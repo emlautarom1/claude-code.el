@@ -4855,8 +4855,9 @@ operation that would only refuse it."
 
 (ert-deftest claude-code-test-sessions-visit-dispatch ()
   "RET shows a row's running instance, else what attaching or resuming returns.
-An attachable row is attached, and any other external row is refused by the
-model alone (`claude-code-test-resume-refuses-external')."
+An alive row whose instance has left Emacs is refused, an attachable row is
+attached, and any other external row is refused by the model alone
+\(`claude-code-test-resume-refuses-external')."
   (claude-code-tests--with-managed-buffer (terminal 70)
     (let* ((binding '(:name "feat" :path "/r/.claude/worktrees/feat" :bound nil))
            (alive (claude-code-session--create :id "a" :alive-p t :pid 70
@@ -4903,12 +4904,13 @@ model alone (`claude-code-test-resume-refuses-external')."
             (setq at-point moved calls nil)
             (claude-code-sessions-visit)
             (should (equal (reverse calls) `((refresh) (show ,terminal))))
-            ;; A row still drawn alive whose instance has since exited displays
-            ;; what the model returns, and the views catch up.
+            ;; A row still drawn alive whose instance has since left Emacs is
+            ;; refused: what runs its session now takes a read to know.
             (setq at-point stale calls nil)
-            (claude-code-sessions-visit)
-            (should (equal (reverse calls)
-                           `((resume "/r" "s" nil) (refresh) (show ,terminal))))
+            (should (equal (cadr (should-error (claude-code-sessions-visit)
+                                               :type 'user-error))
+                           "Session s has left Emacs; press g to refresh"))
+            (should-not calls)
             ;; An external row goes to the model like any other.
             (setq at-point external calls nil)
             (claude-code-sessions-visit)
@@ -4937,8 +4939,9 @@ The dispatch is shared with RET \(`claude-code-test-sessions-visit-dispatch')."
         (at-point nil) (shown nil))
     (cl-letf (((symbol-function 'claude-code--session-at-point)
                (lambda () at-point))
-              ((symbol-function 'claude-code--resume)
-               (lambda (&rest _) 'terminal))
+              ((symbol-function 'claude-code--session-process)
+               (lambda (b) (eq b 'terminal)))
+              ((symbol-function 'claude-code--refresh-views) #'ignore)
               ((symbol-function 'switch-to-buffer-other-window)
                (lambda (b) (setq shown b))))
       (claude-code-tests--in-view
