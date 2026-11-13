@@ -23,11 +23,12 @@ Terms used throughout `claude-code.el` and its documentation. They are chosen to
 A session's *liveness* is one of three states — *alive*, *external*, or *dead*:
 
 - **Alive session** — a session with a live managed instance. Its **status** is Claude's native value:
-  - `busy` — actively working, including between turns while a background shell command runs.
+  - `busy` — actively working.
+  - `shell` — the turn has ended, but a background shell command the instance started still runs; its completion starts the next turn.
   - `idle` — finished; waiting for the next prompt.
   - `waiting` — blocked on the user (a question or tool-permission prompt); the `waitingFor` field says what for.
 
-  Its **turn end** is how its last turn ended, `done` (finished) or `error` (failed), while Ghostel holds the root status record of that turn, with Claude's message if it sent one. Input to the instance (under `ghostel-status-auto-acknowledge`'s default, `input`) or its next state clears the record. The turn end sits beside the status: a failed turn reads `idle` with `error`, and a turn that ends while a background shell command runs reads `busy` with its `done` or `error`.
+  While it rests, `idle` or `shell`, its **turn end** is how its last turn ended, `done` (finished) or `error` (failed), for as long as Ghostel holds the root status record of that turn, with Claude's message if it sent one. Input to the instance (under `ghostel-status-auto-acknowledge`'s default, `input`) or its next state clears the record. The turn end sits beside the status: a failed turn reads `idle` with `error`, and one ending while a background shell command runs reads `shell` with its `done` or `error`.
 
 - **Dead session** — a session that no `claude` process is running: its transcript exists on disk but neither Emacs nor any external process is handling it. A dead session is the only kind that can be resumed or deleted.
 

@@ -268,10 +268,9 @@ files its transcripts under itself, making it a project in its own right."
 
 (defun claude-code--read-session-file (file)
   "Return what sessions/ FILE says of its `claude' process, or nil.
-A plist with keys :session, :cwd, :status, :waiting-for and :shell-p.  Nil
-covers a file that is gone, unreadable, or names no session.  A missing status
-field yields a nil :status, and Claude's \"shell\" reads as \"busy\" with
-:shell-p set (see docs/storage-model.md)."
+A plist with keys :session, :cwd, :status and :waiting-for.  Nil covers a file
+that is gone, unreadable, or names no session.  A missing status field yields a
+nil :status."
   (when-let* ((obj (ignore-errors
                      (with-temp-buffer
                        (insert-file-contents file)
@@ -279,13 +278,11 @@ field yields a nil :status, and Claude's \"shell\" reads as \"busy\" with
               ((hash-table-p obj))
               (session (gethash "sessionId" obj))
               ((stringp session)))
-    (let ((status (gethash "status" obj))
-          (cwd (gethash "cwd" obj)))
+    (let ((cwd (gethash "cwd" obj)))
       (list :session session
             :cwd (and (stringp cwd) (concat (file-remote-p file) cwd))
-            :status (if (equal status "shell") "busy" status)
-            :waiting-for (gethash "waitingFor" obj)
-            :shell-p (equal status "shell")))))
+            :status (gethash "status" obj)
+            :waiting-for (gethash "waitingFor" obj)))))
 
 (defconst claude-code--session-file-re "\\`[0-9]+\\.json\\'"
   "Matches the name of a sessions/ file, which is its process's PID.")
@@ -601,7 +598,7 @@ on a signal or a lost connection, which leave the instance running."
 ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live instance,
 in which case BUFFER holds the Ghostel buffer and PID its `claude' process, on
 the project's host and nil until reported (`claude-code--report-pid').  STATUS
-is Claude's native `busy'/`idle'/`waiting' string (alive sessions only), with
+is Claude's native `busy'/`shell'/`idle'/`waiting' string (alive sessions only), with
 WAITING-FOR set while waiting.  TURN-END is how the instance's last turn ended,
 `done' or `error', read off its root program status record, with
 TURN-END-MESSAGE Claude's message for it, if any.  EXTERNAL-P flags a session
@@ -806,8 +803,11 @@ and the registry stands in for the worktree."
   (let* ((entry (gethash buffer claude-code--managed))
          (id (plist-get entry :session))
          (info (plist-get entry :info))
-         (turn-end (claude-code--record-turn-end
-                    (claude-code--root-record buffer))))
+         ;; Only a resting instance has ended its turn: the record of the last
+         ;; one can outlive it by the moment Claude takes to report a new one.
+         (turn-end (and (member (plist-get info :status) '("idle" "shell"))
+                        (claude-code--record-turn-end
+                         (claude-code--root-record buffer)))))
     (when args
       (plist-put entry :named (cons id args)))
     (apply #'claude-code-session--create
@@ -2001,7 +2001,8 @@ neither ends the stretch of work nor announces anything."
              (not (and (eq state 'done)
                        (let ((entry (claude-code--instance-entry buffer)))
                          (and (not (claude-code--entry-host entry))
-                              (plist-get (plist-get entry :info) :shell-p))))))
+                              (equal (plist-get (plist-get entry :info) :status)
+                                     "shell"))))))
     (with-current-buffer buffer
       (let ((since claude-code--working-since))
         (unless (eq state 'blocked)
@@ -2259,6 +2260,7 @@ when `/clear', `/resume' or `/branch' moves it onto another session."
   (pcase (claude-code--session-liveness session)
     ('alive (pcase (claude-code-session-status session)
               ("busy" (cons "busy" 'warning))
+              ("shell" (cons "shell" 'success))
               ("idle" (cons "idle" 'success))
               ("waiting" (cons "waiting" 'error))
               ('nil (cons "alive" 'default))
@@ -2322,8 +2324,8 @@ splits out by status, and only when grouping by status."
 
 (defun claude-code--group-rank (key)
   "Return the display rank of group KEY; lower ranks come first."
-  (or (alist-get key '(("waiting" . 0) ("busy" . 1) ("idle" . 2) ("alive" . 3)
-                       ("external" . 8) ("dead" . 9))
+  (or (alist-get key '(("waiting" . 0) ("busy" . 1) ("shell" . 2) ("idle" . 3)
+                       ("alive" . 4) ("external" . 8) ("dead" . 9))
                  nil nil #'equal)
       5))
 

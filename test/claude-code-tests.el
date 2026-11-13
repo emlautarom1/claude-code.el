@@ -371,20 +371,16 @@ The directory is named as CLI v2.1.304 named it for that cwd."
                        "11111111-1111-4111-8111-111111111111"))
         (should (equal (plist-get p1 :cwd) "/home/test/proj"))
         (should (equal (plist-get p1 :status) "busy"))
-        (should-not (plist-get p1 :shell-p))
-        ;; The parser exposes only :session, :cwd, :status, :waiting-for and
-        ;; :shell-p.
+        ;; The parser exposes only :session, :cwd, :status and :waiting-for.
         (should (null (plist-get p1 :name))))
       (let ((p3 (gethash 1003 table)))
         (should (equal (plist-get p3 :status) "waiting"))
         (should (equal (plist-get p3 :waiting-for) "permission prompt")))
       ;; A file without a status field yields nil, not an error.
       (should (null (plist-get (gethash 1004 table) :status)))
-      ;; Claude's `shell' (between turns, a background command running) is
-      ;; busy, and flagged as such.
-      (let ((p6 (gethash 1006 table)))
-        (should (equal (plist-get p6 :status) "busy"))
-        (should (plist-get p6 :shell-p)))
+      ;; Claude's `shell' (between turns, a background command running) is a
+      ;; status of its own.
+      (should (equal (plist-get (gethash 1006 table) :status) "shell"))
       ;; `claude-code--pid-info' reads one process's file the same way.
       (should (equal (claude-code--pid-info 1003) (gethash 1003 table)))
       (should-not (claude-code--pid-info 999999))
@@ -1146,6 +1142,8 @@ counts.  A session Emacs does not run has no record to read."
     (claude-code-tests--with-managed-buffer buf
       (let ((id "11111111-1111-4111-8111-111111111111"))
         (claude-code--register id buf "/home/test/proj" nil)
+        (claude-code--entry-update (gethash buf claude-code--managed)
+                                   (list :session id :status "idle"))
         (cl-letf (((symbol-function 'claude-code--session-process)
                    (lambda (b) (eq b buf))))
           (pcase-dolist (`(,records ,turn-end ,message)
@@ -1169,6 +1167,24 @@ counts.  A session Emacs does not run has no record to read."
                     (should (equal (claude-code-session-turn-end-message s)
                                    message)))
                 (should-not (claude-code-session-turn-end s))))))))))
+
+(ert-deftest claude-code-test-turn-end-only-while-resting ()
+  "A turn end shows only while the instance rests, `idle' or `shell'.
+A turn the instance is still working or waiting in has not ended, and one it
+has not reported a status for yet has no turn behind it."
+  (claude-code-tests--with-managed-buffer buf
+    (claude-code--register "id" buf "/r" nil)
+    (with-current-buffer buf
+      (setq ghostel-program-status '(("" :state done :msg "m"))))
+    (pcase-dolist (`(,status ,turn-end) '(("idle" done) ("shell" done)
+                                          ("busy" nil) ("waiting" nil)
+                                          (nil nil)))
+      (plist-put (gethash buf claude-code--managed) :info
+                 (list :session "id" :status status))
+      (let ((session (claude-code--alive-session buf)))
+        (should (eq (claude-code-session-turn-end session) turn-end))
+        (should (equal (claude-code-session-turn-end-message session)
+                       (and turn-end "m")))))))
 
 (ert-deftest claude-code-test-sessions-alive-from-another-root ()
   "Aliveness is keyed by session id, not by the root the query used.
@@ -1416,7 +1432,7 @@ query, so it holds back no announcement."
       ;; What a query read and built, the worktree checked on the host then.
       (claude-code--entry-update (gethash buf claude-code--managed)
                                  (list :session "s" :cwd (concat host "/w")
-                                       :status "busy" :shell-p t))
+                                       :status "shell"))
       (cl-letf (((symbol-function 'file-directory-p) #'always))
         (claude-code--alive-session
          buf (claude-code--transcript-session-args
@@ -1435,7 +1451,7 @@ query, so it holds back no announcement."
         (let ((s (claude-code--instance-session buf)))
           (should (equal (claude-code-session-title s) "Remote title"))
           (should (equal (claude-code-session-worktree s) "feat"))
-          (should (equal (claude-code-session-status s) "busy")))
+          (should (equal (claude-code-session-status s) "shell")))
         (claude-code--announce buf 'done 1000.0)
         (should (equal seen '("Finished")))
         ;; Once a query sees a `/clear', what it built for the session left
@@ -3868,7 +3884,7 @@ pushes its body."
              ((symbol-function 'claude-code--pid-info)
               (lambda (pid &optional _host)
                 (and (eql pid (claude-code--instance-pid ,buf))
-                     (list :session "id" :shell-p ,shell))))
+                     (list :session "id" :status (if ,shell "shell" "idle")))))
              ((symbol-function 'claude-code--notify)
               (lambda (_buffer body) (push body ,seen))))
      (claude-code--register "id" ,buf "/r" nil)
@@ -4631,6 +4647,9 @@ sight leaves it up."
   (should (eq (cdr (claude-code--status-display
                     (claude-code-session--create :alive-p t :status "busy")))
               'warning))
+  (should (equal (claude-code--status-display
+                  (claude-code-session--create :alive-p t :status "shell"))
+                 '("shell" . success)))
   (should (eq (cdr (claude-code--status-display
                     (claude-code-session--create :alive-p t :status "waiting")))
               'error))
@@ -4758,9 +4777,9 @@ computed for every row, so one odd id would abort a whole view refresh."
 
 (ert-deftest claude-code-test-group-order ()
   "Groups sort by urgency, with external and dead last."
-  (should (equal (sort (list "dead" "idle" "external" "waiting" "busy")
+  (should (equal (sort (list "dead" "idle" "external" "shell" "waiting" "busy")
                        #'claude-code--group-less-p)
-                 '("waiting" "busy" "idle" "external" "dead"))))
+                 '("waiting" "busy" "shell" "idle" "external" "dead"))))
 
 (ert-deftest claude-code-test-target-sessions-by-liveness ()
   "Marked targets are filtered to the liveness a command's operation accepts.
@@ -6284,7 +6303,9 @@ project, read again on every such change, never is."
               (with-current-buffer (car spec)
                 (setq-local claude-code--pid (nth 1 spec)
                             ghostel-program-status nil)))
-            (puthash old (list :origin root :session "a") claude-code--managed)
+            (puthash old (list :origin root :session "a"
+                                      :info (list :status "idle"))
+                     claude-code--managed)
             (claude-code-tests--in-view
               (setq claude-code--project root)
               (claude-code-sessions-refresh)
@@ -6298,7 +6319,9 @@ project, read again on every such change, never is."
               (should (claude-code--view-outdated-p))
               (claude-code-sessions-refresh)
               (push new live)
-              (puthash new (list :origin root :session "b") claude-code--managed)
+              (puthash new (list :origin root :session "b"
+                                        :info (list :status "idle"))
+                       claude-code--managed)
               (should (claude-code--view-outdated-p))
               (claude-code-sessions-refresh)
               (should-not (claude-code--view-outdated-p))
