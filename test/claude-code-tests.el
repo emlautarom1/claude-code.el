@@ -6164,6 +6164,62 @@ so an unrelated `claude-code'-prefixed package cannot fail this."
         (funcall reprint)
         (should (equal marked (claude-code-tests--tagged-ids)))))))
 
+(ert-deftest claude-code-test-view-instance-row-survives-a-session-switch ()
+  "An instance's row is keyed by its buffer, so `/clear' keeps point and mark on it.
+The session the instance left becomes a dead row of its own, unmarked."
+  (let* ((instance (generate-new-buffer " *cc-instance*"))
+         (sessions (list (claude-code-session--create
+                          :id "a" :alive-p t :status "idle" :buffer instance)
+                         (claude-code-session--create
+                          :id "z" :last-active (seconds-to-time 0)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code-project-sessions)
+                   (lambda (_) sessions)))
+          (claude-code-tests--in-view
+            (setq claude-code--project "/r"
+                  claude-code--collapsed nil)
+            (claude-code-sessions-refresh)
+            (claude-code-tests--goto-session instance)
+            (claude-code-sessions-mark)
+            (claude-code-tests--goto-session instance)
+            (setq sessions (list (claude-code-session--create
+                                  :id "b" :alive-p t :status "idle"
+                                  :buffer instance)
+                                 (claude-code-session--create
+                                  :id "a" :last-active (seconds-to-time 60))
+                                 (claude-code-session--create
+                                  :id "z" :last-active (seconds-to-time 0))))
+            (claude-code-sessions-refresh)
+            (should (eq (tabulated-list-get-id) instance))
+            (should (equal (claude-code-session-id (claude-code--session-at-point))
+                           "b"))
+            (should (equal claude-code--marks (list instance)))
+            (should (equal (mapcar #'claude-code-session-id
+                                   (claude-code--target-sessions))
+                           '("b")))))
+      (kill-buffer instance))))
+
+(ert-deftest claude-code-test-confirmations-name-their-targets ()
+  "Kill and delete ask about their targets by name."
+  (let ((asked '()))
+    (cl-letf (((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (push prompt asked) nil)))
+      (claude-code-tests--in-view
+        (setq-local claude-code--project "/r")
+        (dolist (s (list (claude-code-session--create
+                          :id "a" :alive-p t :title "Fix the parser")
+                         (claude-code-session--create
+                          :id "b" :external-p t :last-prompt "why is CI red")
+                         (claude-code-session--create :id "d" :title "Old work")))
+          (puthash (claude-code-session-id s) s claude-code--session-table))
+        (setq-local claude-code--marks (list "a" "b"))
+        (claude-code-sessions-kill)
+        (setq-local claude-code--marks (list "d"))
+        (claude-code-sessions-delete)
+        (should (equal (reverse asked)
+                       '("Kill \"Fix the parser\", \"why is CI red\"? "
+                         "Delete \"Old work\"? ")))))))
+
 (ert-deftest claude-code-test-view-restore-original-order-is-harmless ()
   "`C-u -1 S' does not signal: it sorts `tabulated-list-entries' directly."
   (claude-code-tests--in-fixture-view '(1002)

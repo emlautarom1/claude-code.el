@@ -2233,15 +2233,21 @@ It is remembered in SESSION's buffer, for `claude-code--close-posted'."
 `claude-code-sessions-mode' seeds this with the \"dead\" group so it starts
 folded.")
 (defvar-local claude-code--marks nil
-  "List of marked session ids in a sessions view.")
+  "List of the keys (`claude-code--row-key') of the marked rows in a view.")
 (defvar-local claude-code--session-table nil
-  "Hash of session id -> struct for the rows currently displayed.")
+  "Hash of row key -> struct for the rows currently displayed.")
 (defvar-local claude-code--usage-table nil
-  "Hash of session id -> (CPU . RSS) for the rows currently displayed.")
+  "Hash of row key -> (CPU . RSS) for the rows currently displayed.")
 (defvar-local claude-code--stale nil
   "Non-nil when a change reached a sessions view while no window showed it.")
 
 ;;;;; Formatting
+
+(defun claude-code--row-key (session)
+  "Return the key of SESSION's row: its instance's buffer, or else its id.
+Keyed by the buffer, an instance keeps its row, and the point and mark on it,
+when `/clear', `/resume' or `/branch' moves it onto another session."
+  (or (claude-code-session-buffer session) (claude-code-session-id session)))
 
 (defun claude-code--status-display (session)
   "Return (STRING . FACE) describing SESSION's liveness and status."
@@ -2329,7 +2335,7 @@ is not showing."
          (when collapsed
            (cl-loop for (label . pred)
                     in `(("marked" . ,(lambda (s)
-                                        (member (claude-code-session-id s)
+                                        (member (claude-code--row-key s)
                                                 claude-code--marks)))
                          ("done" . ,(lambda (s)
                                       (eq (claude-code-session-modifier s) 'done)))
@@ -2354,7 +2360,7 @@ sorts lowest."
 
 (defun claude-code--entry-time (entry)
   "Return the last-active time of ENTRY's session as a float, infinity if unknown.
-ENTRY is a tabulated-list entry whose car is the session id, looked up in
+ENTRY is a tabulated-list entry whose car is the row key, looked up in
 `claude-code--session-table'."
   (if-let* ((session (gethash (car entry) claude-code--session-table))
             (time (claude-code-session-last-active session)))
@@ -2383,19 +2389,19 @@ cannot outlive its row and come back armed."
     (clrhash claude-code--session-table)
     (clrhash claude-code--usage-table)
     (dolist (session sessions)
-      (let ((id (claude-code-session-id session))
+      (let ((row (claude-code--row-key session))
             (key (claude-code--group-key session)))
-        (puthash id session claude-code--session-table)
+        (puthash row session claude-code--session-table)
         (when (and (claude-code-session-alive-p session)
                    (claude-code-session-pid session))
-          (puthash id (claude-code--process-usage
-                       (claude-code-session-pid session) snapshot)
+          (puthash row (claude-code--process-usage
+                        (claude-code-session-pid session) snapshot)
                    claude-code--usage-table))
         (push key order)
         (push session (gethash key buckets))))
     (setq order (sort (delete-dups order) #'claude-code--group-less-p))
     (setq claude-code--marks
-          (seq-filter (lambda (id) (gethash id claude-code--session-table))
+          (seq-filter (lambda (row) (gethash row claude-code--session-table))
                       claude-code--marks))
     (mapcar
      (lambda (key)
@@ -2404,11 +2410,11 @@ cannot outlive its row and come back armed."
          (cons (claude-code--group-header key rows collapsed)
                (unless collapsed
                  (mapcar (lambda (s)
-                           (list (claude-code-session-id s)
-                                 (claude-code--format-session
-                                  s (gethash (claude-code-session-id s)
-                                             claude-code--usage-table)
-                                  now)))
+                           (let ((row (claude-code--row-key s)))
+                             (list row
+                                   (claude-code--format-session
+                                    s (gethash row claude-code--usage-table)
+                                    now))))
                          rows)))))
      order)))
 
@@ -2468,8 +2474,8 @@ keeps a mark visible through reprints that bypass `claude-code--redraw'."
 LIVENESS, when given, are the states (`claude-code--session-liveness') to keep,
 so a command's targets are exactly the ones its model operation accepts."
   (let ((targets (if claude-code--marks
-                     (delq nil (mapcar (lambda (id)
-                                         (gethash id claude-code--session-table))
+                     (delq nil (mapcar (lambda (row)
+                                         (gethash row claude-code--session-table))
                                        claude-code--marks))
                    (when-let* ((s (claude-code--session-at-point))) (list s)))))
     (if liveness
@@ -2481,7 +2487,7 @@ so a command's targets are exactly the ones its model operation accepts."
   "Call OPERATION on each session in TARGETS, then redraw every view.
 A refusal from OPERATION does not end the batch: the other targets are still
 acted on and the refusals reported, DONE naming what OPERATION did.  Only the
-ids acted on lose their marks, leaving a refused one armed for a retry, and
+rows acted on lose their marks, leaving a refused one armed for a retry, and
 the redraw happens however the batch ends."
   (let ((acted '())
         (refused '()))
@@ -2489,7 +2495,7 @@ the redraw happens however the batch ends."
         (dolist (session targets)
           (condition-case err
               (progn (funcall operation session)
-                     (push (claude-code-session-id session) acted))
+                     (push (claude-code--row-key session) acted))
             ;; A refusal is a `user-error' and belongs in the report; a real
             ;; fault must still reach the debugger.
             (user-error (push (error-message-string err) refused))))
@@ -2636,14 +2642,15 @@ change its sessions."
 (add-hook 'claude-code--sessions-changed-functions
           #'claude-code--on-sessions-changed)
 
-(defun claude-code--drop-marks (ids)
-  "Unmark IDS in every sessions view.
-A killed session stays listed, so the pruning `claude-code--tabulated-groups'
-does on redraw would otherwise keep its mark armed."
+(defun claude-code--drop-marks (rows)
+  "Unmark the rows whose keys are ROWS in every sessions view.
+A killed external session stays listed under its key, so the pruning
+`claude-code--tabulated-groups' does on redraw would otherwise keep its mark
+armed."
   (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
       (setq claude-code--marks
-            (cl-set-difference claude-code--marks ids :test #'equal)))))
+            (cl-set-difference claude-code--marks rows :test #'equal)))))
 
 (defun claude-code-sessions-toggle-group ()
   "Collapse or expand the group at point.
@@ -2723,7 +2730,7 @@ Called with the directory of the session at point by
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
-    (cl-pushnew (claude-code-session-id s) claude-code--marks :test #'equal)
+    (cl-pushnew (claude-code--row-key s) claude-code--marks :test #'equal)
     (tabulated-list-put-tag "*" t)))
 
 (defun claude-code-sessions-unmark ()
@@ -2731,8 +2738,19 @@ Called with the directory of the session at point by
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (when-let* ((s (claude-code--session-at-point)))
-    (setq claude-code--marks (delete (claude-code-session-id s) claude-code--marks))
+    (setq claude-code--marks (delete (claude-code--row-key s) claude-code--marks))
     (tabulated-list-put-tag " " t)))
+
+(defun claude-code--confirm (verb targets)
+  "Ask whether to VERB the sessions TARGETS, naming each by its display name."
+  (yes-or-no-p
+   (format "%s %s? " verb
+           (mapconcat (lambda (session)
+                        (format "\"%s\"" (truncate-string-to-width
+                                          (claude-code--session-display-name
+                                           session)
+                                          40 nil nil "…")))
+                      targets ", "))))
 
 (defun claude-code-sessions-kill ()
   "Kill the processes of the marked running sessions, or of the one at point.
@@ -2742,7 +2760,7 @@ A running session is an alive or an external one; see `claude-code-kill'."
   (let ((targets (claude-code--target-sessions 'alive 'external)))
     (if (null targets)
         (user-error "No running session selected")
-      (when (yes-or-no-p (format "Kill %d instance(s)? " (length targets)))
+      (when (claude-code--confirm "Kill" targets)
         (claude-code--act-on targets #'claude-code-kill "Killed")))))
 
 (defun claude-code-sessions-detach ()
@@ -2762,7 +2780,7 @@ See `claude-code-detach'."
   (let ((targets (claude-code--target-sessions 'dead)))
     (if (null targets)
         (user-error "No dead session selected")
-      (when (yes-or-no-p (format "Delete %d dead session(s)? " (length targets)))
+      (when (claude-code--confirm "Delete" targets)
         (claude-code--act-on targets #'claude-code-delete "Deleted")))))
 
 (defun claude-code-sessions-rename ()
