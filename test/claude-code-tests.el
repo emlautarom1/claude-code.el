@@ -2863,6 +2863,23 @@ it would report a launch as failed while its instance runs on."
         (claude-code--watch-sessions)
         (should-not claude-code--sessions-watch)))))
 
+(ert-deftest claude-code-test-register-watches-local-sessions ()
+  "Registering an instance on this machine watches this machine's sessions/.
+A remote instance's sessions/ is on its host, whose views wait for `g'."
+  (claude-code-tests--with-registry
+    (let ((watched 0)
+          (local (generate-new-buffer " *cc-local*"))
+          (remote (generate-new-buffer " *cc-remote*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'claude-code--watch-sessions)
+                     (lambda () (cl-incf watched))))
+            (claude-code--register "r" remote "/ssh:cc-test-host:/r" nil)
+            (should (= watched 0))
+            (claude-code--register "l" local "/r" nil)
+            (should (= watched 1)))
+        (kill-buffer local)
+        (kill-buffer remote)))))
+
 (ert-deftest claude-code-test-buffer-kill-unregisters ()
   "An instance's buffer dying removes its registry entry."
   (claude-code-tests--with-managed-buffer buf
