@@ -2701,7 +2701,9 @@ and an instance on another host is not followed: its PID names a process there."
   "Registering, reporting a PID, a modifier change and closing report the host.
 The modifier is the root record's `done' or `error' state and its message, so a
 root record changing without changing those reports nothing, and neither does a
-subagent's record or a terminal Emacs does not manage."
+subagent's record or a terminal Emacs does not manage.  Nor does a modifier
+appearing: the turn it ends rewrites sessions/, which reports it along with the
+status that goes with it."
   (let ((changed '())
         (buffer (generate-new-buffer " *cc-instance*")))
     (unwind-protect
@@ -2730,11 +2732,12 @@ subagent's record or a terminal Emacs does not manage."
                   (funcall report "a93609d08ab42add7" nil '(:state error))
                   (should (= (length changed) 2))
                   (funcall report "" '(:state blocked) '(:state done))
+                  (should (= (length changed) 2))
                   (funcall report "" '(:state done) '(:state done :msg "m"))
                   (funcall report "" '(:state done :msg "m") nil)
-                  (should (= (length changed) 5))
+                  (should (= (length changed) 4))
                   (kill-buffer buffer)
-                  (should (equal changed (make-list 6 host))))))))
+                  (should (equal changed (make-list 5 host))))))))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (ert-deftest claude-code-test-watch-sessions-once ()

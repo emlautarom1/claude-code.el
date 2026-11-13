@@ -1129,10 +1129,12 @@ RECORD-ID is \"\", changes state from OLD to NEW."
   "Report a change of this buffer's status modifier, from OLD to NEW.
 A `ghostel-program-status-functions' entry: the modifier is read off the root
 record, whose RECORD-ID is \"\", so a change of it runs
-`claude-code--sessions-changed' for a managed instance's host."
+`claude-code--sessions-changed' for a managed instance's host.  A modifier
+appearing is left to the sessions/ rewrite of the turn it ends, which follows
+the report, so a view never pairs it with the status of the turn before."
   (when-let* (((string-empty-p record-id))
-              ((not (equal (claude-code--record-modifier old)
-                           (claude-code--record-modifier new))))
+              (was (claude-code--record-modifier old))
+              ((not (equal was (claude-code--record-modifier new))))
               (entry (gethash (current-buffer) claude-code--managed)))
     (claude-code--sessions-changed (claude-code--entry-host entry))))
 
