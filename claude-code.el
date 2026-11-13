@@ -2670,17 +2670,19 @@ has nothing to list, so it is not a view for these purposes."
               (buffer-list)))
 
 (defun claude-code--update-view ()
-  "Refresh the current view while a window shows it, else once one does."
-  (if (get-buffer-window-list nil nil t)
-      (claude-code--refresh-view)
-    (setq claude-code--stale t)))
+  "Refresh the current view while a window shows it, else once one does.
+A remote project's view out of sight is left as it is: Emacs shows a view
+during redisplay, where a read over the network would freeze it."
+  (cond ((get-buffer-window-list nil nil t) (claude-code--refresh-view))
+        ((not (file-remote-p claude-code--project))
+         (setq claude-code--stale t))))
 
 (defun claude-code--redraw-if-stale (window)
-  "Refresh the view WINDOW shows if a change reached it out of sight.
-A buffer-local `window-buffer-change-functions' entry."
-  (with-current-buffer (window-buffer window)
-    (when claude-code--stale
-      (claude-code--refresh-view))))
+  "Refresh the current view if WINDOW now shows it and a change reached it.
+A buffer-local `window-buffer-change-functions' entry, which also runs when
+WINDOW stops showing the view."
+  (when (and claude-code--stale (eq (window-buffer window) (current-buffer)))
+    (claude-code--refresh-view)))
 
 (defun claude-code--refresh-views ()
   "Update every sessions view (`claude-code--update-view').

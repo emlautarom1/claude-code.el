@@ -5885,6 +5885,7 @@ window shows is left to redraw once one does."
          (alive (claude-code-session--create :id "a" :alive-p t))
          (dead (claude-code-session--create :id "d"))
          (projectless (generate-new-buffer " *cc-view-projectless*"))
+         (remote (generate-new-buffer " *cc-view-remote*"))
          (all (sort (mapcar #'buffer-name (list acting other)) #'string<))
          ;; Only this test's views are asserted over: a real view left open by
          ;; the Emacs running the suite is one of `claude-code--views' too.
@@ -5917,6 +5918,7 @@ window shows is left to redraw once one does."
                                (cons sibling root)
                                (cons other (claude-code--normalize-root
                                             "/home/test/elsewhere"))
+                               (cons remote "/ssh:cc-test-host:/home/test/proj")
                                ;; A buffer left in the mode by hand names no
                                ;; project, so it has nothing to list.
                                (cons projectless nil)))
@@ -5939,24 +5941,33 @@ window shows is left to redraw once one does."
             (setq claude-code--marks (list "d"))
             (claude-code-sessions-delete)
             (should (equal (funcall redrawn-since) all)))
-          ;; The view out of sight waits for a window, and gets one redraw then.
+          ;; The view out of sight waits for a window, and gets one redraw then:
+          ;; not when the window it leaves runs its hook, but the one it enters.
           (should-not (member (buffer-name sibling) ever-redrawn))
           (should (buffer-local-value 'claude-code--stale sibling))
           (should (memq #'claude-code--redraw-if-stale
                         (buffer-local-value 'window-buffer-change-functions
                                             sibling)))
+          (with-current-buffer sibling
+            (claude-code--redraw-if-stale (selected-window)))
+          (should-not (member (buffer-name sibling) ever-redrawn))
           (let ((window (split-window)))
             (set-window-buffer window sibling)
-            (claude-code--redraw-if-stale window))
+            (with-current-buffer sibling
+              (claude-code--redraw-if-stale window)))
           (should (equal (seq-filter (lambda (name)
                                        (equal name (buffer-name sibling)))
                                      ever-redrawn)
                          (list (buffer-name sibling))))
+          ;; A remote view out of sight is not read when shown, which happens
+          ;; during redisplay.
+          (should-not (buffer-local-value 'claude-code--stale remote))
+          (should-not (member (buffer-name remote) ever-redrawn))
           ;; The project-less buffer was never asked to list anything, which is
           ;; what keeps a mutation from erroring on it and stranding the rest.
           (should-not (member (buffer-name projectless) ever-redrawn))))
       (mapc #'kill-buffer
-            (list acting sibling other projectless instance)))))
+            (list acting sibling other remote projectless instance)))))
 
 (ert-deftest claude-code-test-local-changes-update-local-views ()
   "A change on this machine updates every view of a local project, and no other.
