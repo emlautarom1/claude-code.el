@@ -63,9 +63,11 @@ Clears the transcript cache first so tests do not leak into each other."
 (defmacro claude-code-tests--with-registry (&rest body)
   "Run BODY with `claude-code--managed' rebound to an empty registry.
 Instances a test registers are therefore invisible to every other test, and
-registering one watches no sessions/ directory."
+registering one neither watches a sessions/ directory nor updates a view of
+the Emacs running the suite."
   (declare (indent 0))
-  `(let ((claude-code--managed (make-hash-table)))
+  `(let ((claude-code--managed (make-hash-table))
+         (claude-code--sessions-changed-hook nil))
      (cl-letf (((symbol-function 'claude-code--watch-sessions) #'ignore))
        ,@body)))
 
