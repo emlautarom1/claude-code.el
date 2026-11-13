@@ -5132,6 +5132,63 @@ The view binds neither, so motion is `tabulated-list-mode-map's `next-line' and
       (claude-code-sessions-refresh)
       (should (equal (tabulated-list-get-id) id)))))
 
+(ert-deftest claude-code-test-view-redraw-keeps-every-window-on-its-row ()
+  "A redraw keeps every window showing the view, and the view's point, on its row.
+Window start is kept the same way, so a window other than the selected one
+neither jumps to the top nor drifts when rows print above it.  A place whose row
+is no longer printed keeps its line."
+  (let* ((make (lambda (n)
+                 (claude-code-session--create
+                  :id (format "s%02d" n) :alive-p t :status "idle"
+                  :last-active (seconds-to-time (* 60 n)))))
+         (sessions (mapcar make (number-sequence 1 60)))
+         (view (generate-new-buffer " *cc-view*"))
+         (other (generate-new-buffer " *cc-other*")))
+    (cl-flet ((id-at (pos)
+                (with-current-buffer view
+                  (save-excursion (goto-char pos) (tabulated-list-get-id))))
+              (pos-of (id)
+                (with-current-buffer view
+                  (save-excursion (claude-code-tests--goto-session id) (point))))
+              (line (pos)
+                (with-current-buffer view (line-number-at-pos pos))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'claude-code-project-sessions)
+                     (lambda (_) sessions)))
+            (save-window-excursion
+              (delete-other-windows)
+              (set-window-buffer (selected-window) other)
+              (with-current-buffer view
+                (claude-code-sessions-mode)
+                (setq claude-code--project "/r")
+                (claude-code-sessions-refresh)
+                (claude-code-tests--goto-session "s10")
+                (forward-char 4))
+              (let ((window (split-window)))
+                (set-window-buffer window view)
+                (set-window-start window (pos-of "s50"))
+                (set-window-point window (+ (pos-of "s45") 3))
+                ;; Newest first: these five print above every row in view.
+                (setq sessions (append sessions
+                                       (mapcar make (number-sequence 61 65))))
+                (with-current-buffer view (claude-code--redraw))
+                (should (equal (id-at (window-start window)) "s50"))
+                (should (equal (id-at (window-point window)) "s45"))
+                (should (= (window-point window) (+ (pos-of "s45") 3)))
+                (with-current-buffer view
+                  (should (equal (tabulated-list-get-id) "s10"))
+                  (should (= (current-column) 4)))
+                (let ((held (line (window-point window))))
+                  (setq sessions (seq-remove
+                                  (lambda (s)
+                                    (equal (claude-code-session-id s) "s45"))
+                                  sessions))
+                  (with-current-buffer view (claude-code--redraw))
+                  (should (= (line (window-point window)) held))
+                  (should (equal (id-at (window-start window)) "s50"))))))
+        (kill-buffer view)
+        (kill-buffer other)))))
+
 (ert-deftest claude-code-test-view-pins-its-directories ()
   "Opening the view points both directory variables at the root, and it sticks."
   (claude-code-tests--with-fixtures

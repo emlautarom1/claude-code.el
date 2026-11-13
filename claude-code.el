@@ -2432,11 +2432,50 @@ dedicated view window is never taken."
   (unless (derived-mode-p 'claude-code-sessions-mode)
     (user-error "Not in a Claude sessions buffer")))
 
+(defun claude-code--line-key ()
+  "Return what names the current line across a reprint, or nil.
+A row is named by its entry id, a group header by its group's key."
+  (if-let* ((id (tabulated-list-get-id)))
+      (cons 'row id)
+    (when-let* ((group (get-text-property (line-beginning-position)
+                                          'claude-code-group)))
+      (cons 'group group))))
+
+(defun claude-code--row-place (pos)
+  "Return POS as (KEY LINE . COLUMN), for `claude-code--row-pos'."
+  (save-excursion
+    (goto-char pos)
+    (cons (claude-code--line-key) (cons (line-number-at-pos) (current-column)))))
+
+(defun claude-code--row-pos (place)
+  "Return the position `claude-code--row-place' PLACE names in the reprint.
+That is its column on the line its key names, or on its line when no line
+carries the key any more."
+  (pcase-let ((`(,key ,line . ,column) place))
+    (save-excursion
+      (unless (and key (claude-code--goto-line-where
+                        (lambda () (equal (claude-code--line-key) key))))
+        (goto-char (point-min))
+        (forward-line (1- line)))
+      (move-to-column column)
+      (point))))
+
 (defun claude-code--redraw (&optional group)
-  "Reprint the view, leaving point on the header of GROUP when given.
-Without GROUP, `tabulated-list-print' restores point to the row it was on by
-session id, and to the top of the buffer when that row is no longer printed."
-  (tabulated-list-print t)
+  "Reprint the view, keeping every window showing it on the row it was on.
+The view's own point and each window's point and start are found again by the
+row or group header they were on, and by their line when it is no longer
+printed.  GROUP, when given, puts point on that group's header instead."
+  (let ((windows (mapcar (lambda (window)
+                           (list window
+                                 (claude-code--row-place (window-point window))
+                                 (claude-code--row-place (window-start window))))
+                         (get-buffer-window-list nil nil t)))
+        (here (claude-code--row-place (point))))
+    (tabulated-list-print)
+    (goto-char (claude-code--row-pos here))
+    (pcase-dolist (`(,window ,place ,start) windows)
+      (set-window-point window (claude-code--row-pos place))
+      (set-window-start window (claude-code--row-pos start) t)))
   (claude-code--goto-group group))
 
 (defun claude-code-sessions-refresh ()
