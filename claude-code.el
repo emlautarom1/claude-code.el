@@ -2522,7 +2522,7 @@ the redraw happens however the batch ends."
             ;; fault must still reach the debugger.
             (user-error (push (error-message-string err) refused))))
       (claude-code--drop-marks acted)
-      (claude-code--refresh-views))
+      (claude-code--refresh-views (file-remote-p claude-code--project)))
     (when refused
       (message "%s %d, refused %d: %s" done (length acted) (length refused)
                (string-join (nreverse refused) "; ")))))
@@ -2704,26 +2704,17 @@ WINDOW stops showing the view."
   (when (and claude-code--stale (eq (window-buffer window) (current-buffer)))
     (claude-code--refresh-view)))
 
-(defun claude-code--refresh-views ()
-  "Update every sessions view (`claude-code--update-view').
+(defun claude-code--refresh-views (&optional host)
+  "Update every view of a project on HOST, this machine when nil.
 Which sessions a view lists is not exclusive to it (see
-`claude-code-project-sessions'), so any view can hold the row a command changed."
+`claude-code-project-sessions'), but a session is listed only by views of its
+own host.  Also a `claude-code--sessions-changed-hook' entry."
   (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
-      (claude-code--update-view))))
-
-(defun claude-code--on-sessions-changed ()
-  "Update every view of a project on this machine.
-A `claude-code--sessions-changed-hook' entry.  A view of a remote project
-reads over the network, so it is read on `g' and by the commands that change
-its sessions; `claude-code--view-outdated-p' is what it knows in between."
-  (dolist (buffer (claude-code--views))
-    (with-current-buffer buffer
-      (unless (file-remote-p claude-code--project)
+      (when (equal (file-remote-p claude-code--project) host)
         (claude-code--update-view)))))
 
-(add-hook 'claude-code--sessions-changed-hook
-          #'claude-code--on-sessions-changed)
+(add-hook 'claude-code--sessions-changed-hook #'claude-code--refresh-views)
 
 (defun claude-code--drop-marks (rows)
   "Unmark the rows whose keys are ROWS in every sessions view.
@@ -2769,7 +2760,7 @@ session is resumed."
     (unless (and (eq buffer drawn)
                  (equal (plist-get (claude-code--instance-entry buffer) :session)
                         id))
-      (claude-code--refresh-views))
+      (claude-code--refresh-views (file-remote-p claude-code--project)))
     (funcall display buffer)))
 
 (defun claude-code-sessions-visit ()
@@ -3156,7 +3147,7 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
                          (and transient-current-command
                               (list :detachable
                                     (transient-arg-value "--detached" args))))))
-    (claude-code--refresh-views)
+    (claude-code--refresh-views (file-remote-p root))
     (claude-code--show (cdr instance))))
 
 ;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.

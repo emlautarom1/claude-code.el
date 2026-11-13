@@ -2260,7 +2260,7 @@ A refusal does not end the batch, and only what was detached loses its mark."
                      (user-error "Session %s is not detachable" id))
                    (push id detached))))
               ((symbol-function 'claude-code--refresh-views)
-               (lambda () (cl-incf refreshed)))
+               (lambda (&rest _) (cl-incf refreshed)))
               ((symbol-function 'message)
                (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
       (claude-code-tests--in-view
@@ -4833,7 +4833,7 @@ model alone (`claude-code-test-resume-refuses-external')."
                 ((symbol-function 'claude-code--show)
                  (lambda (b &rest _) (push (list 'show b) calls)))
                 ((symbol-function 'claude-code--refresh-views)
-                 (lambda () (push '(refresh) calls)))
+                 (lambda (&rest _) (push '(refresh) calls)))
                 ((symbol-function 'claude-code-sessions-toggle-group)
                  (lambda () (push '(toggle) calls))))
         (claude-code-tests--with-config
@@ -6026,6 +6026,41 @@ A view of a remote project would read over the network to redraw."
       (kill-buffer local)
       (kill-buffer remote))))
 
+(ert-deftest claude-code-test-commands-update-only-their-hosts-views ()
+  "A command acting in a view updates the views of that view's host alone.
+A session is listed only by views of its own host, so reading another host's
+view, over the network for a remote one, would show nothing new."
+  (let ((read '())
+        (local (generate-new-buffer " *cc-view-local*"))
+        (remote (generate-new-buffer " *cc-view-remote*"))
+        (session (claude-code-session--create :id "x" :external-p t)))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) local)
+          (set-window-buffer (split-window) remote)
+          (cl-letf (((symbol-function 'claude-code--read-view)
+                     (lambda () (push (current-buffer) read)))
+                    ((symbol-function 'claude-code--redraw) #'ignore)
+                    ((symbol-function 'claude-code--view-outdated-p) #'ignore)
+                    ((symbol-function 'yes-or-no-p) #'always)
+                    ((symbol-function 'claude-code-kill) #'ignore))
+            (pcase-dolist (`(,buffer . ,root)
+                           `((,local . "/home/test/proj")
+                             (,remote . "/ssh:cc-test-host:/home/test/proj")))
+              (with-current-buffer buffer
+                (claude-code-sessions-mode)
+                (setq claude-code--project root)
+                (puthash "x" session claude-code--session-table)))
+            (dolist (buffer (list local remote))
+              (setq read '())
+              (with-current-buffer buffer
+                (setq claude-code--marks (list "x"))
+                (claude-code-sessions-kill))
+              (should (equal read (list buffer))))))
+      (kill-buffer local)
+      (kill-buffer remote))))
+
 (ert-deftest claude-code-test-spawn-displays-the-instance ()
   "A spawn displays its instance through `claude-code--show', from any buffer.
 Where an instance lands is one decision, made in one place; `RET' reaching the
@@ -6659,7 +6694,7 @@ are dropped, and what was skipped is reported."
                    (when (equal id "b") (user-error "Session %s is alive" id))
                    (push id deleted))))
               ((symbol-function 'claude-code--refresh-views)
-               (lambda () (cl-incf refreshed)))
+               (lambda (&rest _) (cl-incf refreshed)))
               ((symbol-function 'yes-or-no-p) (lambda (_) t))
               ((symbol-function 'message)
                (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
@@ -6690,7 +6725,7 @@ mid-batch; the rest are still killed and the refusal reported."
                    (when (equal id "b") (user-error "Session %s is not running" id))
                    (push id killed))))
               ((symbol-function 'claude-code--refresh-views)
-               (lambda () (cl-incf refreshed)))
+               (lambda (&rest _) (cl-incf refreshed)))
               ((symbol-function 'yes-or-no-p) (lambda (_) t))
               ((symbol-function 'message)
                (lambda (fmt &rest args) (setq reported (apply #'format fmt args)))))
@@ -6721,7 +6756,7 @@ on the way out."
                      (signal 'file-error (list "Permission denied")))
                    (push id deleted))))
               ((symbol-function 'claude-code--refresh-views)
-               (lambda () (cl-incf refreshed)))
+               (lambda (&rest _) (cl-incf refreshed)))
               ((symbol-function 'yes-or-no-p) (lambda (_) t)))
       (claude-code-tests--in-view
         (setq-local claude-code--project "/r")
