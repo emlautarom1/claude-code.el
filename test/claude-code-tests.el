@@ -62,10 +62,12 @@ Clears the transcript cache first so tests do not leak into each other."
 
 (defmacro claude-code-tests--with-registry (&rest body)
   "Run BODY with `claude-code--managed' rebound to an empty registry.
-Instances a test registers are therefore invisible to every other test."
+Instances a test registers are therefore invisible to every other test, and
+registering one watches no sessions/ directory."
   (declare (indent 0))
   `(let ((claude-code--managed (make-hash-table)))
-     ,@body))
+     (cl-letf (((symbol-function 'claude-code--watch-sessions) #'ignore))
+       ,@body)))
 
 (defmacro claude-code-tests--with-managed-buffer (spec &rest body)
   "Run BODY with a fresh buffer bound and an empty managed registry.
@@ -401,6 +403,37 @@ companion `<pid>.<sha256>.key' all describe nothing."
       (should (equal (plist-get (gethash 10 table) :session) "kept")))
     (should-not (claude-code--pid-info 11))
     (should-not (claude-code--pid-info 12))))
+
+(ert-deftest claude-code-test-watch-sessions-dir ()
+  "A watch on sessions/ reports the PID whose file was created, rewritten or deleted.
+The companion `.key' files and every other action report nothing, and with no
+sessions/ yet there is nothing to watch."
+  (let ((added '()) (pids '()))
+    (cl-letf (((symbol-function 'file-notify-add-watch)
+               (lambda (dir flags callback)
+                 (push (list dir flags callback) added)
+                 'descriptor)))
+      (claude-code-tests--with-config
+        (let ((dir (claude-code--sessions-dir)))
+          (should (eq (claude-code--watch-sessions-dir
+                       (lambda (pid) (push pid pids)))
+                      'descriptor))
+          (pcase-let ((`((,watched ,flags ,callback)) added))
+            (should (equal watched dir))
+            (should (equal flags '(change)))
+            (dolist (event `((created ,(expand-file-name "4242.json" dir))
+                             (changed ,(expand-file-name "4243.json" dir))
+                             (deleted ,(expand-file-name "4244.json" dir))
+                             (changed ,(expand-file-name "4245.0a1b.key" dir))
+                             (attribute-changed
+                              ,(expand-file-name "4246.json" dir))
+                             (stopped ,dir)))
+              (funcall callback (cons 'descriptor event))))
+          (should (equal (nreverse pids) '(4242 4243 4244)))
+          (delete-directory dir)
+          (setq added '())
+          (should-not (claude-code--watch-sessions-dir #'ignore))
+          (should-not added))))))
 
 (ert-deftest claude-code-test-pid-cwd ()
   "A process's working directory is read off its own sessions/ file, by pid."
@@ -2625,6 +2658,114 @@ it last took, as Ghostel does."
               (claude-code--register "id" (current-buffer) "/home/test/other" nil)
               (funcall report "" '(:state working) '(:state done))
               (should (equal handed '("/home/test/other"))))))))))
+
+(ert-deftest claude-code-test-session-file-change-follows-the-instance ()
+  "A sessions/ file changing follows the directory of the instance with its PID.
+The change is reported for this machine whichever process the file belongs to,
+and an instance on another host is not followed: its PID names a process there."
+  (let ((handed '()) (changed '())
+        (local (generate-new-buffer " *cc-local*"))
+        (remote (generate-new-buffer " *cc-remote*")))
+    (unwind-protect
+        (claude-code-tests--with-fixtures
+          (claude-code-tests--with-registry
+            (cl-letf (((symbol-function 'ghostel--update-directory)
+                       (lambda (dir) (push (cons (current-buffer) dir) handed))))
+              (let ((claude-code--sessions-changed-functions
+                     (list (lambda (host) (push host changed)))))
+                (pcase-dolist (`(,buffer . ,origin)
+                               (list (cons remote "/ssh:cc-test-host:/home/test/proj")
+                                     (cons local "/home/test/proj")))
+                  (with-current-buffer buffer
+                    ;; sessions/1003.json runs in the fixture project's worktree.
+                    (setq-local claude-code--pid 1003)
+                    (setq-local ghostel--last-directory nil)
+                    (setq default-directory "/home/test/proj/"))
+                  (puthash buffer (list :origin origin :session "id")
+                           claude-code--managed))
+                (claude-code--on-session-file 1003)
+                (should (equal handed
+                               (list (cons local
+                                           "/home/test/proj/.claude/worktrees/feat"))))
+                (should (equal changed '(nil)))
+                (setq handed nil changed nil)
+                (claude-code--on-session-file 999999)
+                (should-not handed)
+                (should (equal changed '(nil)))))))
+      (kill-buffer local)
+      (kill-buffer remote))))
+
+(ert-deftest claude-code-test-instance-changes-are-reported ()
+  "Registering, reporting a PID, a modifier change and closing report the host.
+The modifier is the root record's `done' or `error' state and its message, so a
+root record changing without changing those reports nothing, and neither does a
+subagent's record or a terminal Emacs does not manage."
+  (let ((changed '())
+        (buffer (generate-new-buffer " *cc-instance*")))
+    (unwind-protect
+        (claude-code-tests--with-registry
+          (cl-letf (((symbol-function 'ghostel--update-directory) #'ignore))
+            (let ((claude-code--sessions-changed-functions
+                   (list (lambda (host) (push host changed))))
+                  (host "/ssh:cc-test-host:"))
+              (with-current-buffer buffer
+                (claude-code-instance-mode)
+                (let ((report (lambda (id old new)
+                                (run-hook-with-args 'ghostel-program-status-functions
+                                                    id old new))))
+                  (claude-code--report-pid "4242")
+                  (funcall report "" nil '(:state done))
+                  (should-not changed)
+                  (claude-code--register "id" buffer (concat host "/r") nil)
+                  (should (equal changed (list host)))
+                  (setq-local ghostel-eval-cmds
+                              (list (list claude-code--pid-report
+                                          #'claude-code--report-pid)))
+                  (claude-code--report-pid "4243")
+                  (should (= (length changed) 2))
+                  (funcall report "" nil '(:state working))
+                  (funcall report "" '(:state working) '(:state blocked))
+                  (funcall report "a93609d08ab42add7" nil '(:state error))
+                  (should (= (length changed) 2))
+                  (funcall report "" '(:state blocked) '(:state done))
+                  (funcall report "" '(:state done) '(:state done :msg "m"))
+                  (funcall report "" '(:state done :msg "m") nil)
+                  (should (= (length changed) 5))
+                  (kill-buffer buffer)
+                  (should (equal changed (make-list 6 host))))))))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest claude-code-test-watch-sessions-once ()
+  "This machine's sessions/ is watched once, and again once that watch stopped.
+A config dir naming another directory moves the watch there, and nothing is
+watched before the directory exists."
+  (let ((added 0) (removed '()) (valid t)
+        (claude-code--sessions-watch nil))
+    (cl-letf (((symbol-function 'claude-code--watch-sessions-dir)
+               (lambda (_callback)
+                 (and (file-directory-p (claude-code--sessions-dir))
+                      (cl-incf added))))
+              ((symbol-function 'file-notify-valid-p) (lambda (_) valid))
+              ((symbol-function 'file-notify-rm-watch)
+               (lambda (watch) (push watch removed))))
+      (claude-code-tests--with-config
+        (claude-code--watch-sessions)
+        (claude-code--watch-sessions)
+        (should (= added 1))
+        (setq valid nil)
+        (claude-code--watch-sessions)
+        (setq valid t)
+        (should (= added 2))
+        (should (equal removed '(1))))
+      (claude-code-tests--with-config
+        (claude-code--watch-sessions)
+        (should (= added 3))
+        (should (equal removed '(2 1))))
+      (let ((claude-code-config-dir (make-temp-name
+                                     (expand-file-name "cc-none" temporary-file-directory))))
+        (claude-code--watch-sessions)
+        (should (= added 3))
+        (should-not claude-code--sessions-watch)))))
 
 (ert-deftest claude-code-test-buffer-kill-unregisters ()
   "An instance's buffer dying removes its registry entry."
@@ -5197,7 +5338,8 @@ is no longer printed keeps its line."
       (unwind-protect
           (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
                     ((symbol-function 'project-root) (lambda (_p) root))
-                    ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq buf b))))
+                    ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq buf b)))
+                    ((symbol-function 'claude-code--watch-sessions) #'ignore))
             ;; Opening the view runs a real refresh over the fixtures; the pin
             ;; must outlive it, so the refresh is deliberately not stubbed out.
             (claude-code-sessions)
@@ -5267,7 +5409,8 @@ keeps the act from reordering `buffer-list', which the pick reads."
   (let ((shown nil))
     (cl-letf (((symbol-function 'project-current) (lambda (&optional _ _dir) 'proj))
               ((symbol-function 'project-root) (lambda (_p) root))
-              ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq shown b))))
+              ((symbol-function 'pop-to-buffer) (lambda (b &rest _) (setq shown b)))
+              ((symbol-function 'claude-code--watch-sessions) #'ignore))
       (claude-code-sessions))
     shown))
 
@@ -5710,9 +5853,10 @@ The switch is `:unsavable', so a session made detachable by hand pins no
                      '((t "opus") (nil "opus")))))))
 
 (ert-deftest claude-code-test-mutations-refresh-every-view ()
-  "Spawn, resume, kill and delete redraw every sessions view, displayed or not.
+  "Spawn, resume, kill and delete update every sessions view.
 A view of another project is included: no view owns a session, so redrawing only
-the acting view's root would leave a view of the same session stale."
+the acting view's root would leave a view of the same session stale.  A view no
+window shows is left to redraw once one does."
   (let* ((root (claude-code--normalize-root "/home/test/proj"))
          (redrawn '())
          (ever-redrawn '())
@@ -5723,7 +5867,7 @@ the acting view's root would leave a view of the same session stale."
          (alive (claude-code-session--create :id "a" :alive-p t))
          (dead (claude-code-session--create :id "d"))
          (projectless (generate-new-buffer " *cc-view-projectless*"))
-         (all (sort (mapcar #'buffer-name (list acting sibling other)) #'string<))
+         (all (sort (mapcar #'buffer-name (list acting other)) #'string<))
          ;; Only this test's views are asserted over: a real view left open by
          ;; the Emacs running the suite is one of `claude-code--views' too.
          (redrawn-since
@@ -5732,7 +5876,11 @@ the acting view's root would leave a view of the same session stale."
                                   #'string<)
                        (setq redrawn nil)))))
     (unwind-protect
-        (cl-letf (((symbol-function 'claude-code--redraw)
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) acting)
+          (set-window-buffer (split-window) other)
+         (cl-letf (((symbol-function 'claude-code--redraw)
                    (lambda (&rest _)
                      (push (buffer-name) redrawn)
                      (push (buffer-name) ever-redrawn)))
@@ -5772,11 +5920,52 @@ the acting view's root would leave a view of the same session stale."
             (setq claude-code--marks (list "d"))
             (claude-code-sessions-delete)
             (should (equal (funcall redrawn-since) all)))
+          ;; The view out of sight waits for a window, and gets one redraw then.
+          (should-not (member (buffer-name sibling) ever-redrawn))
+          (should (buffer-local-value 'claude-code--stale sibling))
+          (should (memq #'claude-code--redraw-if-stale
+                        (buffer-local-value 'window-buffer-change-functions
+                                            sibling)))
+          (let ((window (split-window)))
+            (set-window-buffer window sibling)
+            (claude-code--redraw-if-stale window))
+          (should (equal (seq-filter (lambda (name)
+                                       (equal name (buffer-name sibling)))
+                                     ever-redrawn)
+                         (list (buffer-name sibling))))
           ;; The project-less buffer was never asked to list anything, which is
           ;; what keeps a mutation from erroring on it and stranding the rest.
-          (should-not (member (buffer-name projectless) ever-redrawn)))
+          (should-not (member (buffer-name projectless) ever-redrawn))))
       (mapc #'kill-buffer
             (list acting sibling other projectless instance)))))
+
+(ert-deftest claude-code-test-local-changes-update-local-views ()
+  "A change on this machine updates every view of a local project, and no other.
+A view of a remote project would read over the network to redraw."
+  (let ((redrawn '())
+        (local (generate-new-buffer " *cc-view-local*"))
+        (remote (generate-new-buffer " *cc-view-remote*")))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) local)
+          (set-window-buffer (split-window) remote)
+          (cl-letf (((symbol-function 'claude-code--redraw)
+                     (lambda (&rest _) (push (current-buffer) redrawn))))
+            (with-current-buffer local
+              (claude-code-sessions-mode)
+              (setq claude-code--project "/home/test/proj"))
+            (with-current-buffer remote
+              (claude-code-sessions-mode)
+              (setq claude-code--project "/ssh:cc-test-host:/home/test/proj"))
+            (claude-code--sessions-changed "/ssh:cc-test-host:")
+            (should-not (memq local redrawn))
+            (should-not (memq remote redrawn))
+            (claude-code--sessions-changed nil)
+            (should (memq local redrawn))
+            (should-not (memq remote redrawn))))
+      (kill-buffer local)
+      (kill-buffer remote))))
 
 (ert-deftest claude-code-test-spawn-displays-the-instance ()
   "A spawn displays its instance through `claude-code--show', from any buffer.

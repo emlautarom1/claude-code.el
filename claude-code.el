@@ -29,6 +29,7 @@
 
 (require 'cl-lib)
 (require 'eldoc)
+(require 'filenotify)
 (require 'seq)
 (require 'project)
 (require 'subr-x)
@@ -286,6 +287,9 @@ field yields a nil :status, and Claude's \"shell\" reads as \"busy\" with
             :waiting-for (gethash "waitingFor" obj)
             :shell-p (equal status "shell")))))
 
+(defconst claude-code--session-file-re "\\`[0-9]+\\.json\\'"
+  "Matches the name of a sessions/ file, which is its process's PID.")
+
 (defun claude-code--live-table (&optional host)
   "Parse the per-process files under HOST's sessions/ into a hash keyed by PID.
 Each value is a `claude-code--read-session-file' plist.  This is pure parsing
@@ -294,10 +298,26 @@ decided by the caller."
   (let ((dir (claude-code--sessions-dir host))
         (table (make-hash-table)))
     (when (file-directory-p dir)
-      (dolist (file (directory-files dir t "\\`[0-9]+\\.json\\'"))
+      (dolist (file (directory-files dir t claude-code--session-file-re))
         (when-let* ((info (claude-code--read-session-file file)))
           (puthash (string-to-number (file-name-base file)) info table))))
     table))
+
+(defun claude-code--watch-sessions-dir (callback)
+  "Watch this machine's sessions/, calling CALLBACK with a PID on each change.
+CALLBACK runs when the file of the process PID is created, rewritten or
+deleted.  Return the watch descriptor, or nil while there is no sessions/
+yet.  A rewrite can reach CALLBACK before it is complete; the read it makes
+then fails to parse, and the event of the write completing it follows."
+  (let ((dir (claude-code--sessions-dir)))
+    (when (file-directory-p dir)
+      (file-notify-add-watch
+       dir '(change)
+       (lambda (event)
+         (let ((name (file-name-nondirectory (nth 2 event))))
+           (when (and (memq (nth 1 event) '(created changed deleted))
+                      (string-match-p claude-code--session-file-re name))
+             (funcall callback (string-to-number (file-name-base name))))))))))
 
 (defun claude-code--pid-info (pid &optional host)
   "Return what sessions/ says of the `claude' process PID on HOST, or nil.
@@ -478,12 +498,22 @@ and never leaves this function.  The worktree a session runs in is
 ;; decoded from the OSC 7501 reports Claude sends.  Their layout is Ghostel's,
 ;; described under `ghostel-program-status-functions'.
 
+(defun claude-code--root-record (buffer)
+  "Return the root program status record of BUFFER's terminal, or nil.
+The root record speaks for the session; the others are its subagents."
+  (cdr (assoc "" (buffer-local-value 'ghostel-program-status buffer))))
+
 (defun claude-code--root-status (buffer)
   "Return the root program status of BUFFER's terminal as (STATE . MSG), or nil.
-The root record speaks for the session; the others are its subagents.  MSG is
-nil when Claude sent none."
-  (when-let* ((record (cdr (assoc "" (buffer-local-value 'ghostel-program-status
-                                                         buffer)))))
+MSG is nil when Claude sent none."
+  (when-let* ((record (claude-code--root-record buffer)))
+    (cons (plist-get record :state) (plist-get record :msg))))
+
+(defun claude-code--record-modifier (record)
+  "Return the status modifier program status RECORD carries, or nil.
+That is (STATE . MSG) while its state is `done' or `error', MSG nil when
+Claude sent none."
+  (when (memq (plist-get record :state) '(done error))
     (cons (plist-get record :state) (plist-get record :msg))))
 
 
@@ -775,8 +805,8 @@ and the registry stands in for the worktree."
   (let* ((entry (gethash buffer claude-code--managed))
          (id (plist-get entry :session))
          (info (plist-get entry :info))
-         (root (claude-code--root-status buffer))
-         (modifier (car (memq (car root) '(done error)))))
+         (modifier (claude-code--record-modifier
+                    (claude-code--root-record buffer))))
     (when args
       (plist-put entry :named (cons id args)))
     (apply #'claude-code-session--create
@@ -784,8 +814,8 @@ and the registry stands in for the worktree."
            :buffer buffer :pid (claude-code--instance-pid buffer)
            :status (plist-get info :status)
            :waiting-for (plist-get info :waiting-for)
-           :modifier modifier
-           :modifier-message (and modifier (cdr root))
+           :modifier (car modifier)
+           :modifier-message (cdr modifier)
            (or args (claude-code--transcript-session-args nil entry)))))
 
 (defun claude-code--transcript-for (root id)
@@ -1064,18 +1094,47 @@ A parent of your own may replace the empty one.")
 (defvar-local claude-code--instance-keys nil
   "Non-nil in buffers where `claude-code-instance-mode-map' is active.")
 
-(defun claude-code--follow-directory (record-id old new)
+(defvar claude-code--sessions-changed-functions nil
+  "Abnormal hook run with a HOST whose sessions may have changed.
+HOST is nil for this machine.  It runs when an instance there registers,
+reports its PID, gains or loses its status modifier, or closes, and when a
+sessions/ file on this machine changes.")
+
+(defun claude-code--sessions-changed (host)
+  "Run `claude-code--sessions-changed-functions' for HOST.
+It runs from process filters, file notifications and `kill-buffer-hook', so a
+handler's error is reported rather than raised."
+  (with-demoted-errors "claude-code: reporting a change: %S"
+    (run-hook-with-args 'claude-code--sessions-changed-functions host)))
+
+(defun claude-code--follow-cwd ()
   "Hand Ghostel the directory this buffer's `claude' process works in.
-A `ghostel-program-status-functions' entry, acting when the root record, whose
-RECORD-ID is \"\", changes state from OLD to NEW.  The directory goes through
-Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report itself."
-  (when-let* (((string-empty-p record-id))
-              ((not (eq (plist-get old :state) (plist-get new :state))))
-              (cwd (claude-code--instance-cwd (current-buffer)))
+Nothing is handed while the buffer is there already.  The directory goes
+through Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report."
+  (when-let* ((cwd (claude-code--instance-cwd (current-buffer)))
               ((not (equal (file-name-as-directory cwd) default-directory))))
     ;; Ghostel skips the directory it last took, even one a `let' undid.
     (setq ghostel--last-directory nil)
     (ghostel--update-directory cwd)))
+
+(defun claude-code--follow-directory (record-id old new)
+  "Follow the directory this buffer's instance works in as it changes state.
+A `ghostel-program-status-functions' entry, acting when the root record, whose
+RECORD-ID is \"\", changes state from OLD to NEW."
+  (when (and (string-empty-p record-id)
+             (not (eq (plist-get old :state) (plist-get new :state))))
+    (claude-code--follow-cwd)))
+
+(defun claude-code--on-root-status (record-id old new)
+  "Report a change of this buffer's status modifier, from OLD to NEW.
+A `ghostel-program-status-functions' entry: the modifier is read off the root
+record, whose RECORD-ID is \"\", so a change of it runs
+`claude-code--sessions-changed' for a managed instance's host."
+  (when-let* (((string-empty-p record-id))
+              ((not (equal (claude-code--record-modifier old)
+                           (claude-code--record-modifier new))))
+              (entry (gethash (current-buffer) claude-code--managed)))
+    (claude-code--sessions-changed (claude-code--entry-host entry))))
 
 (defconst claude-code--pid-report "claude-code-pid"
   "The `ghostel-eval-cmds' name an instance's launch wrapper reports under.")
@@ -1083,10 +1142,13 @@ Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report itself."
 (defun claude-code--report-pid (pid)
   "Record PID, a decimal string, as this instance buffer's `claude' process.
 The `ghostel-eval-cmds' entry the launch wrapper calls, dropped once it has
-taken a PID: the wrapper reports ahead of anything else the terminal shows."
+taken a PID: the wrapper reports ahead of anything else the terminal shows.
+A managed instance's report runs `claude-code--sessions-changed'."
   (when (string-match-p "\\`[0-9]+\\'" pid)
     (setq claude-code--pid (string-to-number pid))
-    (setq ghostel-eval-cmds nil)))
+    (setq ghostel-eval-cmds nil)
+    (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
+      (claude-code--sessions-changed (claude-code--entry-host entry)))))
 
 (defun claude-code--refuse-bookmark ()
   "Refuse to bookmark an instance buffer.
@@ -1120,6 +1182,8 @@ included.
   (claude-code--record-name)
   (add-hook 'buffer-list-update-hook #'claude-code--record-name nil t)
   (add-hook 'ghostel-program-status-functions #'claude-code--follow-directory
+            90 t)
+  (add-hook 'ghostel-program-status-functions #'claude-code--on-root-status
             90 t)
   (setq-local vc-deduce-backend-nonvc-modes t))
 
@@ -1160,8 +1224,9 @@ This buffer-local `kill-buffer-hook' is the one report of a buffer closing: a
 non-detachable instance ends with it, and a detachable one that runs on, which
 is announced, goes on as an external session.  A terminal this package does
 not manage retires nothing, and `claude-code-last-instance-exit-hook' runs
-only for the kill that removed the last entry."
-  (when (gethash (current-buffer) claude-code--managed)
+only for the kill that removed the last entry.  The retirement runs
+`claude-code--sessions-changed'."
+  (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
     (when (claude-code--runs-on-p (current-buffer))
       (message "Detached %s: its instance runs on as an external session"
                (buffer-name)))
@@ -1173,7 +1238,8 @@ only for the kill that removed the last entry."
                             ((error quit)
                              (message "claude-code: last-instance hook %S signalled: %S"
                                       handler err)))
-                          nil)))))
+                          nil)))
+    (claude-code--sessions-changed (claude-code--entry-host entry))))
 
 (defun claude-code--report-exit (buffer event)
   "Record the EVENT BUFFER's terminal ended on, reporting an abnormal end.
@@ -1200,7 +1266,9 @@ Stored under :worktree is the name of a named WORKTREE request, nil otherwise
 that carries it -- and under :detachable whether the instance is DETACHABLE.
 Registering a live BUFFER also wires up the entry's removal: BUFFER is made to
 die with its process, reporting an abnormal exit, so its kill is the one event
-that retires the entry."
+that retires the entry.  The registration runs `claude-code--sessions-changed',
+and an instance on this machine has its sessions/ watched
+\(`claude-code--watch-sessions')."
   (with-current-buffer buffer
     (setq-local ghostel-kill-buffer-on-exit t)
     (add-hook 'ghostel-exit-functions #'claude-code--report-exit nil t)
@@ -1210,7 +1278,42 @@ that retires the entry."
                  :worktree (and (stringp worktree) worktree)
                  :session id
                  :detachable detachable)
-           claude-code--managed))
+           claude-code--managed)
+  (unless (file-remote-p origin)
+    (claude-code--watch-sessions))
+  (claude-code--sessions-changed (file-remote-p origin)))
+
+(defvar claude-code--sessions-watch nil
+  "(DIR . DESCRIPTOR) of the watch on this machine's sessions/, or nil.")
+
+(defun claude-code--watch-sessions ()
+  "Watch this machine's sessions/ unless it is watched already.
+The first local instance or view starts the watch, which lasts the session.
+It is added again once it has stopped, or when `claude-code-config-dir' names
+another directory, and not before the directory exists."
+  (let ((dir (claude-code--sessions-dir)))
+    (unless (and (equal (car claude-code--sessions-watch) dir)
+                 (file-notify-valid-p (cdr claude-code--sessions-watch)))
+      (when claude-code--sessions-watch
+        (file-notify-rm-watch (cdr claude-code--sessions-watch)))
+      (setq claude-code--sessions-watch
+            (when-let* ((watch (claude-code--watch-sessions-dir
+                                #'claude-code--on-session-file)))
+              (cons dir watch))))))
+
+(defun claude-code--on-session-file (pid)
+  "React to the sessions/ file of the process PID on this machine changing.
+A managed instance with that PID follows the directory the file names, and
+the change runs `claude-code--sessions-changed'."
+  (when-let* ((buffer (seq-find
+                       (lambda (buffer)
+                         (and (eql (claude-code--instance-pid buffer) pid)
+                              (not (claude-code--entry-host
+                                    (gethash buffer claude-code--managed)))))
+                       (hash-table-keys claude-code--managed))))
+    (with-demoted-errors "claude-code: following a directory: %S"
+      (with-current-buffer buffer (claude-code--follow-cwd))))
+  (claude-code--sessions-changed nil))
 
 (defun claude-code--buffer (session)
   "Return the buffer of SESSION's instance, or signal a `user-error'.
@@ -2135,6 +2238,8 @@ folded.")
   "Hash of session id -> struct for the rows currently displayed.")
 (defvar-local claude-code--usage-table nil
   "Hash of session id -> (CPU . RSS) for the rows currently displayed.")
+(defvar-local claude-code--stale nil
+  "Non-nil when a change reached a sessions view while no window showed it.")
 
 ;;;;; Formatting
 
@@ -2396,9 +2501,10 @@ the redraw happens however the batch ends."
 
 (defun claude-code--instance-at-point ()
   "Return the alive session on the current line, or signal a `user-error'.
-Aliveness is tested through the live process, not the row's `alive-p': no redraw
-follows an instance's exit or detach, so a session that left Emacs since the
-last refresh still draws as alive.  The error names that row's remedy."
+Aliveness is tested through the live process, not the row's `alive-p': a view
+of a remote project is not redrawn when an instance leaves Emacs, so a session
+that left since the last refresh still draws as alive.  The error names that
+row's remedy."
   (let* ((session (or (claude-code--session-at-point)
                       (user-error "No session on this line")))
          (id (claude-code-session-id session)))
@@ -2471,6 +2577,7 @@ printed.  GROUP, when given, puts point on that group's header instead."
                                  (claude-code--row-place (window-start window))))
                          (get-buffer-window-list nil nil t)))
         (here (claude-code--row-place (point))))
+    (setq claude-code--stale nil)
     (tabulated-list-print)
     (goto-char (claude-code--row-pos here))
     (pcase-dolist (`(,window ,place ,start) windows)
@@ -2494,13 +2601,40 @@ has nothing to list, so it is not a view for these purposes."
                        claude-code--project)))
               (buffer-list)))
 
+(defun claude-code--update-view ()
+  "Redraw the current view while a window shows it, else once one does."
+  (if (get-buffer-window-list nil nil t)
+      (claude-code--redraw)
+    (setq claude-code--stale t)))
+
+(defun claude-code--redraw-if-stale (window)
+  "Redraw the view WINDOW shows if a change reached it out of sight.
+A buffer-local `window-buffer-change-functions' entry."
+  (with-current-buffer (window-buffer window)
+    (when claude-code--stale
+      (claude-code--redraw))))
+
 (defun claude-code--refresh-views ()
-  "Redraw every sessions view.
+  "Update every sessions view (`claude-code--update-view').
 Which sessions a view lists is not exclusive to it (see
 `claude-code-project-sessions'), so any view can hold the row a command changed."
   (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
-      (claude-code--redraw))))
+      (claude-code--update-view))))
+
+(defun claude-code--on-sessions-changed (host)
+  "Update every view of a local project when HOST, this machine, has changed.
+A `claude-code--sessions-changed-functions' entry.  A view of a remote project
+reads over the network to redraw, so it is left to `g' and to the commands that
+change its sessions."
+  (unless host
+    (dolist (buffer (claude-code--views))
+      (with-current-buffer buffer
+        (unless (file-remote-p claude-code--project)
+          (claude-code--update-view))))))
+
+(add-hook 'claude-code--sessions-changed-functions
+          #'claude-code--on-sessions-changed)
 
 (defun claude-code--drop-marks (ids)
   "Unmark IDS in every sessions view.
@@ -2849,6 +2983,7 @@ rather than wrapping them a second time.
   (setq-local tabulated-list-entries nil)
   (setq-local tabulated-list-groups #'claude-code--tabulated-groups)
   (add-hook 'eldoc-documentation-functions #'claude-code--eldoc-session nil t)
+  (add-hook 'window-buffer-change-functions #'claude-code--redraw-if-stale nil t)
   (tabulated-list-init-header))
 
 ;;;;; Entry points
@@ -3041,6 +3176,8 @@ The project's existing view is reused when it has one."
       ;; The view visits no file: `ibuffer' and completion annotators read the
       ;; root off here.  Unabbreviated, or ibuffer's filename filters miss it.
       (setq list-buffers-directory default-directory)
+      (unless (file-remote-p root)
+        (claude-code--watch-sessions))
       (claude-code-sessions-refresh))
     (pop-to-buffer buffer)))
 

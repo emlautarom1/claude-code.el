@@ -27,7 +27,7 @@ A session's *liveness* is one of three states — *alive*, *external*, or *dead*
   - `idle` — finished; waiting for the next prompt.
   - `waiting` — blocked on the user (a question or tool-permission prompt); the `waitingFor` field says what for.
 
-  Its **status modifier** is `done` (finished) or `error` (failed) while Ghostel holds the root status record of that turn, with Claude's message if it sent one. Input to the instance (under Ghostel's default `ghostel-status-acknowledge-on-input`) or its next state clears the record. The modifier sits beside the status: a failed turn reads `idle` with `error`, and a `done` while a background shell command runs reads `busy` with `done`.
+  Its **status modifier** is `done` (finished) or `error` (failed) while Ghostel holds the root status record of that turn, with Claude's message if it sent one. Input to the instance (under `ghostel-status-auto-acknowledge`'s default, `input`) or its next state clears the record. The modifier sits beside the status: a failed turn reads `idle` with `error`, and a `done` while a background shell command runs reads `busy` with `done`.
 
 - **Dead session** — a session that no `claude` process is running: its transcript exists on disk but neither Emacs nor any external process is handling it. A dead session is the only kind that can be resumed or deleted.
 
