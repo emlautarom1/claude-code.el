@@ -32,8 +32,10 @@ integration:
 ## Run checkdoc over the sources, failing the build on any diagnostic.
 ## `checkdoc-file' only prints and never signals, so we count every error it
 ## reports (via `checkdoc-create-error', the one chokepoint) and exit non-zero.
+## The experimental verb check, off by default from Emacs 31, is off on every
+## version.
 lint:
-	$(EMACS) -Q --batch -L . --eval '(progn (require (quote checkdoc)) (defvar cc-lint-errors 0) (advice-add (quote checkdoc-create-error) :before (lambda (&rest _) (setq cc-lint-errors (1+ cc-lint-errors)))) (dolist (f (list "claude-code.el" "claude-code-mcp.el")) (checkdoc-file f)) (kill-emacs (if (> cc-lint-errors 0) 1 0)))'
+	$(EMACS) -Q --batch -L . --eval '(progn (require (quote checkdoc)) (setq checkdoc-verb-check-experimental-flag nil) (defvar cc-lint-errors 0) (advice-add (quote checkdoc-create-error) :before (lambda (&rest _) (setq cc-lint-errors (1+ cc-lint-errors)))) (dolist (f (list "claude-code.el" "claude-code-mcp.el")) (checkdoc-file f)) (kill-emacs (if (> cc-lint-errors 0) 1 0)))'
 
 clean:
 	rm -f *.elc test/*.elc
