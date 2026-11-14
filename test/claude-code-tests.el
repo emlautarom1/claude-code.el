@@ -17,23 +17,14 @@
 (defvar ghostel-kill-buffer-on-exit)
 (defvar ghostel-pre-spawn-hook nil)
 
-;; `claude-code-instance-mode' derives from `ghostel-mode' and installs
-;; `ghostel-semi-char-mode-map', so entering it needs both to exist.  An
-;; integration test may `require' Ghostel later in the same Emacs, and Ghostel
-;; defines each of these with a form that leaves an already-bound name alone --
-;; so a stand-in is only safe where the real definition can still take effect
-;; over it.  `ghostel-mode' is safe because `defun' overwrites.
-;; `ghostel-semi-char-mode-map' is safe because Ghostel fills its map in place
-;; (`ghostel--rebuild-semi-char-keymap' ends in a `setcdr'), which reaches this
-;; object and gives it the real bindings and the `ghostel-mode-map' parent that
-;; carries the `C-c' prefix.  Nothing else may be stubbed here on those terms:
-;; a stub `ghostel-mode-map' in particular would stay empty and strand that
-;; prefix, which is why the stand-in below is a plain function -- a
-;; `define-derived-mode' would define one.
+;; `claude-code-instance-mode' needs both.  Each yields to Ghostel's own when an
+;; integration test loads it later: `defun' redefines, and Ghostel fills this
+;; map in place.  A `define-derived-mode' would also define `ghostel-mode-map',
+;; which Ghostel's `defvar-keymap' would then leave empty.
 (unless (featurep 'ghostel)
   (defvar ghostel-semi-char-mode-map (make-sparse-keymap))
   (defun ghostel-mode ()
-    "Stand-in for Ghostel's major mode, reproducing what it owes its caller."
+    "Stand-in for Ghostel's major mode."
     (kill-all-local-variables)
     (setq major-mode 'ghostel-mode)
     (setq mode-name "Ghostel")
@@ -50,18 +41,15 @@
   "Regexp matching a version-4 UUID as `claude-code--new-uuid' formats one.")
 
 (defmacro claude-code-tests--with-fixtures (&rest body)
-  "Run BODY with `claude-code-config-dir' pointed at the fixtures.
-Clears the transcript cache first so tests do not leak into each other."
+  "Run BODY with the fixtures as config dir and an empty transcript cache."
   (declare (indent 0))
   `(let ((claude-code-config-dir claude-code-tests--fixtures))
      (clrhash claude-code--transcript-cache)
      ,@body))
 
 (defmacro claude-code-tests--with-registry (&rest body)
-  "Run BODY with `claude-code--managed' rebound to an empty registry.
-Instances a test registers are therefore invisible to every other test, and
-registering one neither watches a sessions/ directory nor updates a view of
-the Emacs running the suite."
+  "Run BODY with an empty registry of its own.
+Registering there watches no sessions/ directory and refreshes no view."
   (declare (indent 0))
   `(let ((claude-code--managed (make-hash-table))
          (claude-code--sessions-changed-hook nil))
@@ -70,10 +58,8 @@ the Emacs running the suite."
 
 (defmacro claude-code-tests--with-managed-buffer (spec &rest body)
   "Run BODY with a fresh buffer bound and an empty managed registry.
-SPEC is VAR or (VAR PID): the buffer is bound to VAR and carries the reported
-PID, 4242 by default, with no live process and no program status record, as
-an instance's terminal would.  It is killed afterwards even when BODY already
-killed it."
+SPEC is VAR or (VAR PID).  The buffer reports PID, 4242 by default, and has no
+terminal process or program status record."
   (declare (indent 1))
   (pcase-let ((`(,var ,pid) (if (consp spec) spec (list spec 4242))))
     `(claude-code-tests--with-registry
@@ -97,8 +83,7 @@ killed it."
   (gethash (claude-code-tests--instance id) claude-code--managed))
 
 (defmacro claude-code-tests--with-config (&rest body)
-  "Run BODY with `claude-code-config-dir' a scratch directory holding sessions/.
-The directory is removed afterwards."
+  "Run BODY with `claude-code-config-dir' a scratch directory holding sessions/."
   (declare (indent 0))
   `(let ((claude-code-config-dir (make-temp-file "cc-config" t)))
      (unwind-protect
@@ -117,14 +102,10 @@ CONTENT is a string, or a session id to name in an otherwise minimal file."
                       pid content)))))
 
 (defmacro claude-code-tests--with-live-pids (pids &rest body)
-  "Run BODY with exactly the pids in PIDS reading as live processes.
-Pinning the process table keeps a fixture pid that happens to be live on the
-host from classifying its session as external, or from lending it a real
-subtree.  The table also holds Emacs's own pid, as a real one would: an empty
-table is one that could not be read.  Every pinned pid parents to 0 and has no
-children, so no pid is its own ancestor and a subtree walk always terminates."
+  "Run BODY with the pids in PIDS and Emacs's own the only live processes."
   (declare (indent 1))
   (let ((live (gensym "live")))
+    ;; An empty process table is one that could not be read.
     `(let ((,live (cons (emacs-pid) ,pids)))
        (cl-letf (((symbol-function 'list-system-processes) (lambda () ,live))
                  ((symbol-function 'claude-code--child-pids) #'ignore)
@@ -158,10 +139,7 @@ A refresh there watches no sessions/ directory."
         (split-string (buffer-string) "\0" t)))))
 
 (defmacro claude-code-tests--without-requiring (features &rest body)
-  "Run BODY with a `require' of any feature in FEATURES a no-op.
-Every other feature still loads normally.  Shadowing `features' itself would
-not do: it is not a special variable, so under lexical binding the binding is
-invisible to `require'."
+  "Run BODY with a `require' of any feature in FEATURES a no-op."
   (declare (indent 1))
   (let ((orig (gensym "orig")))
     `(let ((,orig (symbol-function 'require)))
@@ -182,11 +160,9 @@ invisible to `require'."
 
 (defmacro claude-code-tests--on-mock-host (dirs &rest body)
   "Run BODY in a remote `default-directory' whose host also searches DIRS.
-The host is TRAMP's `mock' method from `ert-x', a local shell behind the remote
-file handlers, so it shares Emacs's file system.  TRAMP reads
-`tramp-remote-path' once per connection, so the connection is dropped on the
-way in and on the way out.  Skips when the method is unavailable or cannot
-connect."
+The host is the `mock' method of `ert-x', a local shell sharing Emacs's file
+system.  The connection is dropped around BODY, since TRAMP reads
+`tramp-remote-path' once per connection.  Skips when the host is unreachable."
   (declare (indent 1))
   `(progn
      (skip-unless (and ert-remote-temporary-file-directory
@@ -205,9 +181,8 @@ connect."
 
 (defmacro claude-code-tests--recording-ghostel (calls &rest body)
   "Run BODY with Ghostel paste/key stubbed to push onto CALLS.
-Each call pushes (paste STR) or (key NAME).  Every live buffer has a running
-terminal, and Ghostel's native module is absent under test, so requiring it is
-a no-op."
+Each call pushes (paste STR) or (key NAME).  Every live buffer counts as a
+running terminal, and requiring Ghostel is a no-op."
   (declare (indent 1))
   `(claude-code-tests--without-requiring '(ghostel)
      (cl-letf (((symbol-function 'ghostel-paste-string)
@@ -220,16 +195,11 @@ a no-op."
 (defmacro claude-code-tests--recording-launch (execs &rest body)
   "Run BODY with the launch path stubbed, pushing (BUFFER ARGS ENV PROGRAM).
 Each launch is pushed onto EXECS.  PROGRAM and ARGS are what the PID-reporting
-wrapper `exec's.  ENV is what the instance would have inherited, modelling
-only the two things that decide it: the pre-spawn hook runs in the instance's
-buffer, over a `process-environment' sharing its tail with Emacs's own.  Each
-launch's buffer gets a PID of its own, as the wrapper reports it, no live
-process and no program status record.
-Neither Ghostel's native module nor the MCP server is wanted under test, so
-requiring either is a no-op, MCP adds no arguments and no environment, and
-`claude-code-cli' is launched as named.  The focus hook a launch watches is
-bound around BODY, and every buffer a launch hosted is killed afterwards,
-however BODY exits."
+wrapper `exec's.  ENV is what the instance would inherit: Emacs's own
+`process-environment' as `ghostel-pre-spawn-hook' leaves it in BUFFER.  Each
+BUFFER reports a PID of its own and has no terminal process or program status
+record.  MCP wiring adds nothing, `claude-code-cli' is launched as named, and
+requiring Ghostel or the MCP server is a no-op."
   (declare (indent 1))
   (let ((hosted (gensym "hosted")))
     `(let ((,hosted '()))
@@ -260,8 +230,7 @@ however BODY exits."
 
 (defmacro claude-code-tests--with-child-env (child-env &rest body)
   "Run BODY over a stubbed launch path with CHILD-ENV bound to a reader.
-CHILD-ENV names a function of one variable name returning what the instance of
-the latest launch inherited."
+\(CHILD-ENV NAME) is the value of NAME the latest launched instance inherited."
   (declare (indent 1))
   (let ((execs (gensym "execs")))
     `(claude-code-tests--with-registry
@@ -276,12 +245,11 @@ the latest launch inherited."
 
 (ert-deftest claude-code-test-encode-cwd ()
   "Encoding names a directory exactly as Claude does.
-Every expected name under /tmp/cc-probe-enc is one CLI v2.1.304 created
-under projects/ for that directory."
+Every expected name under /tmp/cc-probe-enc is one the CLI created under
+projects/ for that directory."
   (should (equal (claude-code--encode-cwd
                   "/home/emlautarom1/Development/Elisp/claude-code.el")
                  "-home-emlautarom1-Development-Elisp-claude-code-el"))
-  ;; A leading dot (dotfile dir) yields a doubled hyphen.
   (should (equal (claude-code--encode-cwd "/home/emlautarom1/.dotfiles")
                  "-home-emlautarom1--dotfiles"))
   ;; A trailing slash (as `project-root' returns) must not add a trailing dash.
@@ -310,14 +278,12 @@ under projects/ for that directory."
 
 (ert-deftest claude-code-test-worktree-parent ()
   "A checkout `--worktree=NAME' built resolves to the project it was built from.
-The reconstruction is the test, so a path that merely looks the part resolves
-to nothing."
+A path that merely looks the part resolves to nothing."
   (should (equal (claude-code--worktree-parent
                   "/home/me/proj/.claude/worktrees/feat")
                  '("/home/me/proj" . "feat")))
-  ;; The name comes back as the user wrote it: these are real path components,
-  ;; not the lossy transcript-directory encoding.  The CLI flattens a `/' to
-  ;; `+' rather than nesting, so three directories is the whole depth.
+  ;; NAME as the user wrote it: the CLI never nests a checkout, writing a `/'
+  ;; in NAME as `+'.
   (should (equal (claude-code--worktree-parent
                   "/home/me/proj/.claude/worktrees/my.feat")
                  '("/home/me/proj" . "my.feat")))
@@ -329,8 +295,7 @@ to nothing."
                "/home/me/proj/.claude/worktrees/feat/nested"))
   (should-not (claude-code--worktree-parent "/home/me/proj/.claude"))
   (should-not (claude-code--worktree-parent "/home/me/proj"))
-  ;; A worktree kept somewhere else is a project in its own right: it files its
-  ;; transcripts under itself, so no parent's view would list them.
+  ;; A worktree kept elsewhere files its transcripts under itself.
   (should-not (claude-code--worktree-parent "/home/me/checkouts/feat"))
   ;; Walking off the top of the filesystem answers nothing rather than erroring.
   (should-not (claude-code--worktree-parent "/home"))
@@ -370,8 +335,8 @@ to nothing."
 
 (defmacro claude-code-tests--with-transcript (var lines mtime &rest body)
   "Bind VAR to a temp .jsonl holding LINES with file mtime MTIME, run BODY.
-LINES is a list of strings (one JSON object per line).  The transcript cache is
-cleared first and the temp file deleted afterwards."
+LINES are JSON objects as strings, one per line.  The transcript cache starts
+empty."
   (declare (indent 3))
   `(let ((,var (make-temp-file "cc-transcript" nil ".jsonl")))
      (unwind-protect
@@ -450,10 +415,8 @@ how a JSON `null\=' is spelled."
 
 (ert-deftest claude-code-test-transcript-interactive-p ()
   "A session is listed unless a program drove every invocation of it.
-Claude stamps each line with the `entrypoint\=' of the process that wrote it, per
-invocation rather than per session, so the rule names the three stamps a
-program writes and treats every other one -- terminal, IDE, desktop, remote --
-as a person."
+Each line carries the `entrypoint\=' stamp of the invocation that wrote it, and
+only the CLI's three `sdk-' stamps mean a program."
   (let ((interactive-p
          (lambda (&rest lines)
            (claude-code-tests--with-transcript file lines 1800000000
@@ -464,35 +427,26 @@ as a person."
       (should-not (funcall interactive-p
                            (claude-code-tests--stamped-line stamp "go")
                            (claude-code-tests--stamped-line stamp "and again"))))
-    ;; Every other surface has a person behind it, including the ones that are
-    ;; not a terminal at all -- naming the programs is what keeps them listed.
+    ;; Every other stamp is a person's, one added later included.
     (dolist (stamp '("cli" "claude-vscode" "claude-desktop" "ssh-remote"
                      "remote_mobile" "claude-in-teams" "a-stamp-added-later"))
       (should (funcall interactive-p
                        (claude-code-tests--stamped-line stamp "hello"))))
-    ;; The stamp is per invocation: one human-driven line anywhere redeems a
-    ;; session a program started, wherever in the transcript it falls.
+    ;; One person's line anywhere lists a session a program started.
     (should (funcall interactive-p
                      (claude-code-tests--stamped-line "sdk-cli" "say ok")
                      (claude-code-tests--stamped-line "cli" "now tell me why")
                      (claude-code-tests--stamped-line "sdk-cli" "again")))
-    ;; No stamp at all -- a transcript predating the field -- is listed, and so
-    ;; is one whose stamp is JSON null: that arrives as a symbol, matches no
-    ;; program name, and so reads as a person's rather than hiding a session.
+    ;; Neither no stamp nor a JSON null one hides a session.
     (should (funcall interactive-p (claude-code-tests--stamped-line nil "hi")))
     (should (funcall interactive-p (claude-code-tests--stamped-line 'null "hi")))
-    ;; The scan finds its lines by a literal, and a nested `entrypoint' spells
-    ;; that literal exactly; only the parsed top-level key may decide.  Without
-    ;; the parse the first case reads as a person's and the second as a
-    ;; program's, which is backwards in both.
+    ;; Only a top-level `entrypoint' counts, never a nested one.
     (should-not (funcall interactive-p
                          "{\"type\":\"x\",\"meta\":{\"entrypoint\":\"cli\"}}"
                          (claude-code-tests--stamped-line "sdk-py" "go")))
     (should (funcall interactive-p
                      "{\"type\":\"x\",\"meta\":{\"entrypoint\":\"sdk-py\"}}"))
-    ;; Both stamps on one line, the nested one first: reaching the top-level
-    ;; key means reading past a nested match rather than moving to the next
-    ;; line, and getting this wrong hides a session a person drove.
+    ;; Both stamps on one line, the nested one first.
     (should (funcall interactive-p
                      (claude-code-tests--stamped-line "sdk-py" "go")
                      (concat "{\"type\":\"user\",\"meta\":{\"entrypoint\":\"sdk-py\"},"
@@ -589,8 +543,8 @@ as a person."
 
 (ert-deftest claude-code-test-resume-worktree-flag ()
   "Resuming passes `--worktree=NAME' only back to a worktree the session left.
-NAME must also rebuild the recorded path, or the flag would build a fresh
-checkout rather than return to the work."
+The checkout must still be where NAME puts it, or the flag would build a fresh
+one."
   (ert-with-temp-directory config
     (let* ((claude-code-config-dir config)
            (root (file-truename (make-temp-file "cc-root" t)))
@@ -745,8 +699,7 @@ checkout rather than return to the work."
   (seq-find (lambda (s) (equal (claude-code-session-id s) id)) sessions))
 
 (defmacro claude-code-tests--with-scratch-fixtures (&rest body)
-  "Run BODY with `claude-code-config-dir' a scratch copy of the fixtures.
-A transcript BODY deletes is gone from the copy alone."
+  "Run BODY with `claude-code-config-dir' a scratch copy of the fixtures."
   (declare (indent 0))
   `(let ((claude-code-config-dir (make-temp-file "cc-fixtures" t)))
      (unwind-protect
@@ -786,8 +739,7 @@ worktree."
               (should (equal (claude-code-session-worktree
                               (session "55555555-5555-4555-8555-555555555555"))
                              "my.feat"))
-              ;; Its worktree was removed on exit, so a resume lands in the
-              ;; parent tree; the binding rides along for the resume to read.
+              ;; Its worktree was removed on exit; the binding still names it.
               (let ((s (session "44444444-4444-4444-8444-444444444444")))
                 (should-not (claude-code-session-worktree s))
                 (should (equal (plist-get (claude-code-session-worktree-binding s)
@@ -969,8 +921,7 @@ counts every pid as running."
 (ert-deftest claude-code-test-sessions-follow-an-instance-across-a-clear ()
   "A `/clear' moves an instance onto the session its sessions/ file names.
 The session it left is dead: a resume of it starts an instance of its own, and
-it can be deleted.  Here pid 1001 was launched on 22222222 and its file now
-names 11111111."
+it can be deleted."
   (claude-code-tests--with-scratch-fixtures
     (claude-code-tests--with-managed-buffer (buf 1001)
       (let ((root "/home/test/proj")
@@ -998,7 +949,6 @@ names 11111111."
 
 (ert-deftest claude-code-test-remote-instance-answers-from-the-last-query ()
   "What hooks ask of a remote instance comes from the last query, not its host.
-Asking the host from a status hook or a timer would stall Emacs on the network.
 The status that query read is as stale, so a `shell' one holds back no
 announcement."
   (claude-code-tests--with-scratch-fixtures
@@ -1097,10 +1047,8 @@ is on disk, and the root otherwise."
     (unwind-protect
         (progn
           (make-symbolic-link (directory-file-name real) link)
-          ;; The symlinked path resolves to the real directory...
           (should (equal (claude-code--normalize-root link)
                          (directory-file-name (file-truename real))))
-          ;; ...which is not what a bare `expand-file-name' would have produced.
           (should-not (equal (claude-code--normalize-root link)
                              (directory-file-name (expand-file-name link)))))
       (when (file-symlink-p link) (delete-file link))
@@ -1875,8 +1823,8 @@ and a signalling handler costs neither the kill nor the handlers behind it."
 
 (ert-deftest claude-code-test-launch-environment-reaches-only-the-instance ()
   "A launch's environment reaches its instance and leaves Emacs's own alone.
-It arrives from a calling buffer holding a local `process-environment', as
-`envrc' makes it, or a local `ghostel-pre-spawn-hook', with or without `t'."
+That holds from a calling buffer with a local `process-environment', or with a
+local `ghostel-pre-spawn-hook' that does or does not run the global one."
   (claude-code-tests--with-registry
     (let ((execs '())
           (asked nil)
@@ -1947,7 +1895,7 @@ for that worktree unless the caller asked for another."
                       (should (claude-code-tests--await (lambda () announced) 2))
                       (should (equal announced (list id)))))
                   ;; A sessions/ the system refuses to watch costs the launch
-                  ;; nothing: the instance runs whether or not it is watched.
+                  ;; nothing.
                   (cl-letf (((symbol-function 'claude-code--watch-sessions) watch)
                             ((symbol-function 'file-notify-add-watch)
                              (lambda (&rest _)
@@ -2130,15 +2078,14 @@ Every call returns RESULT, 0 for a delivered signal."
           "\"request_id\":\"claude-code\",\"response\":{\"text\":"
           "\"\\n● Because you asked.\\n  Twice.\","
           "\"default_filename\":\"conversation-2026-10-28-203102.txt\"}}}")
-  "The CLI's answer to an export request, as v2.1.304 prints it.")
+  "The CLI's answer to an export request, as it prints it.")
 
 (defmacro claude-code-tests--with-fake-cli (vars script &rest body)
   "Run BODY with `claude-code-cli' a shell script running SCRIPT.
 VARS is (SESSION ROOT LOG): SESSION a dead session whose transcript is on
-disk, ROOT a fresh directory it is listed under, and LOG the file SCRIPT may
-reach as \"$0.log\".  The export's config dir lies inside ROOT, and
-everything is deleted afterwards.  SCRIPT ends in `exec cat', so an export it
-answers lasts until its input closes."
+disk, ROOT a fresh directory holding it and the export's config dir, and LOG
+the file SCRIPT may reach as \"$0.log\".  The CLI exits only once its input
+ends, which a SCRIPT ending in `exec cat' mimics."
   (declare (indent 2))
   (pcase-let ((`(,session ,root ,log) vars))
     `(let* ((,root (file-truename (make-temp-file "cc-export" t)))
@@ -2163,13 +2110,12 @@ answers lasts until its input closes."
 
 (defun claude-code-tests--export (session root)
   "Export SESSION under ROOT; return (CALLS . PROCESS) once the process ends.
-CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE),
-so a second call shows up rather than slipping by.  Asserting here rather than
-in a callback matters: a failed `should' inside a process filter aborts the
-batch run."
+CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE)."
   (let* ((calls '())
          (proc (claude-code-export-transcript
                 session root
+                ;; Recorded, not asserted: a failed `should' in a process
+                ;; filter aborts the batch run.
                 (lambda (text) (push (list 'text text) calls))
                 (lambda (msg) (push (list 'error msg) calls)))))
     (claude-code-tests--await (lambda () (not (process-live-p proc))) 5)
@@ -2430,7 +2376,7 @@ the new one."
   "Run BODY with a managed instance whose terminal runs and reports its status.
 SPEC is (VAR PID SESSION ORIGIN): VAR is bound to the buffer, which carries
 PID and is registered on SESSION, launched from ORIGIN.  Its terminal is a pipe
-process, deleted afterwards, and the focus watch it installs is unwound."
+process, and the focus watch it installs is unwound."
   (declare (indent 1))
   (pcase-let ((`(,var ,pid ,session ,origin) spec)
               (process (gensym "process")))
@@ -2491,8 +2437,8 @@ process, deleted afterwards, and the focus watch it installs is unwound."
                                (1 (working) (done) (working) (done))))
                 (ert-info ((format "Reports: %S" reports))
                   (should (= (apply #'announces reports) count))))
-              ;; A done while a background shell command runs ends no turn;
-              ;; the turn its completion starts does.
+              ;; A done while a background shell task runs reads `shell' and
+              ;; ends no turn.
               (claude-code-tests--write-session-file
                4242 "{\"sessionId\":\"id\",\"status\":\"shell\"}")
               (should (= (announces '(working) '(done)) 0))
@@ -2641,8 +2587,8 @@ process, deleted afterwards, and the focus watch it installs is unwound."
                            "/home/test/proj/.claude/worktrees/feat"
                            "55555555-5555-4555-8555-555555555555" nil
                            "Dotted worktree")
-                     ;; sessions/1006.json reads `shell': its own background
-                     ;; command keeps the turn going.
+                     ;; sessions/1006.json reads `shell': a background shell
+                     ;; task keeps the turn going.
                      (1006 "launched" "/home/test/proj" nil nil nil)))
       (claude-code-tests--with-instance (buf pid launched origin)
         (let* ((announced '())
@@ -2867,23 +2813,18 @@ onto its next session and never outlives its row."
 
 ;;;; Integration (real Ghostel + real `claude')
 ;;
-;; These exercise the live spawn/kill lifecycle against an actual `claude'
-;; process, so they need Ghostel's native module, network access, and a
-;; logged-in CLI.  `make test' and CI never run them: they skip unless
-;; CLAUDE_CODE_INTEGRATION is set (use `make integration').
-;;
-;; BEFORE DEBUGGING SPAWNING, read the nesting-env-var gotcha in CLAUDE.md — it
-;; is why `claude-code-tests--with-top-level-env' exists.
+;; Skipped unless CLAUDE_CODE_INTEGRATION is set, as `make integration' does.
 
 (defconst claude-code-tests--nesting-env-vars
   '("CLAUDECODE" "CLAUDE_CODE_CHILD_SESSION" "CLAUDE_CODE_ENTRYPOINT"
     "CLAUDE_CODE_SSE_PORT" "CLAUDE_CODE_SSE_URL" "CLAUDE_CODE_SESSION_ID")
-  "Runtime variables a parent `claude' sets to mark nested children.")
+  "Claude Code variables kept from a `claude' an integration test spawns.
+An interactive `claude' with `CLAUDE_CODE_CHILD_SESSION' set, as a running
+`claude' sets it for its children, registers no sessions/ file and writes no
+transcript.")
 
 (defmacro claude-code-tests--with-top-level-env (&rest body)
-  "Run BODY with the Claude nesting markers removed from the environment.
-This lets a spawned `claude' start a real top-level session even when the
-tests themselves run inside a Claude Code session."
+  "Run BODY without `claude-code-tests--nesting-env-vars' in the environment."
   (declare (indent 0))
   `(let ((process-environment
           (seq-remove
@@ -2899,9 +2840,7 @@ tests themselves run inside a Claude Code session."
 
 (defmacro claude-code-tests--with-registered-pty (buffer fired &rest body)
   "Run BODY with BUFFER a registered instance on a real pty, FIRED its exit count.
-FIRED counts `claude-code-last-instance-exit-hook' runs.  `cat' just holds the
-pty open; no `claude' is involved.  The registry and the hook are private to
-the run."
+FIRED counts `claude-code-last-instance-exit-hook' runs.  The pty runs `cat'."
   (declare (indent 2))
   `(claude-code-tests--with-registry
      (let* ((,fired 0)
@@ -2918,7 +2857,7 @@ the run."
 (ert-deftest claude-code-test-integration-instance-exit ()
   "A real terminal's instance retires once, whether buffer or process ends first.
 A process exit kills the buffer without asking, whatever the user set for
-Ghostel terminals: keeping a dead one would leave its instance registered."
+Ghostel terminals."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let ((ghostel-kill-buffer-on-exit nil)
@@ -3025,11 +2964,9 @@ and a transcript as the CLI would, then sleeps under its PID."
 
 (ert-deftest claude-code-test-integration-export-transcript ()
   "A real CLI exports a transcript's whole conversation, in order.
-The fixture chains its messages by uuid, as Claude writes them; the CLI
-follows that chain, so without it only the last message would export.  The
-`Write' call is one the CLI leaves out unless the tool is loaded.  The
-transcript is left as it was, and the export's config dir holds no sessions/
-entry once it has ended."
+The CLI follows the fixture's uuid chain, and shows its `Write' call only with
+the tool loaded.  The transcript is left as it was, and the export's config
+dir holds no sessions/ entry once it has ended."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (let* ((id "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
          (root (file-truename (make-temp-file "cc-export" t)))
@@ -3064,10 +3001,9 @@ entry once it has ended."
 (ert-deftest claude-code-test-integration-clear ()
   "A real `/clear' moves an instance onto a new session, and the model follows.
 The new session is alive in the same buffer and the one it left is dead, so it
-can be deleted.  No prompt is sent, so no model turn runs.  A session never
-prompted has no transcript, and a `/clear' writes its own lines under the
-session it starts, so the session left behind with a transcript is the one the
-first of two `/clear's started."
+can be deleted.  A session never prompted has no transcript, and a `/clear'
+writes its own lines under the session it starts, so only the second of two
+leaves behind a session with a transcript."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))

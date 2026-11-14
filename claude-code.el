@@ -10,20 +10,9 @@
 
 ;;; Commentary:
 
-;; Orchestrate and manage Claude Code CLI sessions from Emacs, scoped to the
-;; current `project.el' project.  Running instances are hosted in `ghostel'
-;; terminal buffers.  A "claude sessions" view lists every session of a project
-;; -- alive, external or dead -- and offers visit, create, resume, kill, detach,
-;; attach, delete, rename, send-text and interrupt actions, and each session's
-;; transcript as Claude exports it.
-;;
-;; The package is split into a programmatic model (plain functions operating on
-;; `claude-code-session' structs) and a view layer.  All knowledge of the
-;; on-disk `~/.claude' layout is confined to the "Storage adapter" section;
-;; those formats are Claude internals and are documented in
-;; docs/storage-model.md.  Reads of the status records Ghostel keeps for an
-;; instance are kept in the "Ghostel adapter" section, and how dtach holds a
-;; detachable instance in the "dtach adapter" section.
+;; Orchestrate Claude Code CLI sessions per `project.el' project.  Emacs hosts
+;; the instances it launches or attaches in `ghostel' terminal buffers, and a
+;; view lists a project's sessions, alive, external or dead, and acts on them.
 
 ;;; Code:
 
@@ -37,9 +26,8 @@
 (require 'transient)
 (require 'xdg)
 
-;; Ghostel is required lazily in the launch path (see `claude-code--launch').
-;; Declaring its API here keeps the byte-compiler happy without the native
-;; module being present, so the package compiles and tests in CI.
+;; Ghostel is loaded lazily, so the package compiles and tests without its
+;; native module.
 (declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
 (declare-function ghostel-mode "ghostel" ())
 (declare-function ghostel-send-key "ghostel" (key-name &optional mods))
@@ -62,10 +50,7 @@
 (defvar desktop-save-buffer)
 (defvar bookmark-make-record-function)
 
-;; The MCP server lives in `claude-code-mcp.el', required lazily in the launch
-;; path (see `claude-code--launch').  Declaring its one entry point here keeps
-;; the byte-compiler happy without pulling the MCP file in eagerly, and avoids
-;; a load cycle.
+;; Loaded on launch, since `claude-code-mcp' itself requires this file.
 (declare-function claude-code--mcp-wiring "claude-code-mcp" (buffer))
 
 
@@ -79,42 +64,34 @@
 (defcustom claude-code-cli "claude"
   "Executable used to launch the Claude Code CLI.
 A bare name is searched for on the project's host: on variable `exec-path'
-locally, on `tramp-remote-path' remotely.  A wrapper must `exec' the CLI, which
-has to run under the PID it was started with: that PID is what names the
-instance."
+locally, on `tramp-remote-path' remotely.  A wrapper script must `exec' the
+CLI, so the CLI runs under the wrapper's PID."
   :type 'string)
 
 (defcustom claude-code-detachable 'remote
-  "Which new instances are detachable.
+  "Which new instances are detachable by default.
 A detachable instance runs under `claude-code-dtach' on its host, so closing its
-buffer leaves it running as an external session.  `remote' makes an instance
-in a remote directory detachable, t every instance, and nil none.
-`claude-code-spawn', `claude-code-resume' and the create menu's `--detached'
-take their default from here."
+buffer leaves it running.  `remote' makes an instance in a remote directory
+detachable, t every instance, and nil none."
   :type '(choice (const :tag "Remote instances" remote)
                  (const :tag "Every instance" t)
                  (const :tag "None" nil)))
 
 (defcustom claude-code-dtach "dtach"
   "Executable a detachable instance runs under.
-Searched for on the instance's host as `claude-code-cli' is; a launch that
-cannot find it is refused."
+Searched for on the instance's host as `claude-code-cli' is."
   :type 'string)
 
 (defcustom claude-code-config-dir
   (let ((env (getenv "CLAUDE_CONFIG_DIR")))
     (if (member env '(nil "")) (expand-file-name "~/.claude") env))
-  "Directory where Claude Code stores its state on this machine.
-Mirrors the CLI's own `$CLAUDE_CONFIG_DIR' resolution."
+  "Directory where Claude Code stores its state on this machine."
   :type 'directory)
 
 
 ;;;; Storage adapter
 ;;
-;; Everything in this section depends on Claude Code's internal, version-volatile
-;; on-disk layout under the config dir.  Keep that knowledge HERE only; the rest
-;; of the package must speak in `claude-code-session' structs.  See
-;; docs/storage-model.md for the documented formats.
+;; Claude's on-disk state.
 ;;
 ;; A HOST is a remote prefix as `file-remote-p' returns it, or nil for this
 ;; machine.
@@ -124,8 +101,7 @@ Mirrors the CLI's own `$CLAUDE_CONFIG_DIR' resolution."
 VALUE is nil where the variable is unset or empty.")
 
 (defun claude-code--remote-config-env (host)
-  "Return remote HOST's entry in `claude-code--remote-config-envs'.
-HOST is asked the first time."
+  "Return remote HOST's entry in `claude-code--remote-config-envs'."
   (or (gethash host claude-code--remote-config-envs)
       (let ((default-directory (concat host "/")))
         (with-temp-buffer
@@ -138,9 +114,7 @@ HOST is asked the first time."
                      claude-code--remote-config-envs))))))
 
 (defun claude-code--forget-remote-config-env (&optional vec)
-  "Forget what the host of TRAMP connection VEC said, or every host without VEC.
-On TRAMP's cleanup hooks, so cleaning a connection up makes its host be asked
-again."
+  "Forget what the host of TRAMP connection VEC said, or every host without VEC."
   (dolist (host (hash-table-keys claude-code--remote-config-envs))
     (when (or (null vec)
               (tramp-file-name-equal-p vec (tramp-dissect-file-name host)))
@@ -158,6 +132,8 @@ again."
     (let ((env (let ((value (getenv "CLAUDE_CONFIG_DIR")))
                  (and (not (equal value "")) value)))
           (dir (directory-file-name (expand-file-name claude-code-config-dir))))
+      ;; Any value, even ~/.claude, makes the CLI keep its global config in the
+      ;; dir instead of ~/.claude.json, so an unset variable stays unset.
       (if (equal dir (directory-file-name (expand-file-name (or env "~/.claude"))))
           env
         dir))))
@@ -201,8 +177,7 @@ again."
 
 (defun claude-code--encode-cwd (path)
   "Encode absolute PATH, on whatever host, into its Claude project-directory name.
-The mapping is lossy and MUST NOT be inverted; read the real cwd from session
-data instead.  See docs/storage-model.md for the rule."
+The mapping is lossy: distinct directories can share a name."
   (let* ((dir (file-local-name (directory-file-name (expand-file-name path))))
          (name (concat (mapcar (lambda (unit)
                                  (if (or (<= ?a unit ?z) (<= ?A unit ?Z)
@@ -220,12 +195,10 @@ data instead.  See docs/storage-model.md for the rule."
   (expand-file-name "projects" (claude-code--config-dir host)))
 
 (defconst claude-code--worktrees-dir ".claude/worktrees"
-  "Where a `--worktree=NAME' checkout lands, relative to the project root.
-Claude puts one nowhere else, which is what lets a name round-trip.")
+  "Where a `--worktree=NAME' checkout lands, relative to the repository root.")
 
 (defun claude-code--worktree-path (root name)
-  "Return the checkout `--worktree=NAME' builds under ROOT.
-The CLI flattens a `/' in NAME to `+'."
+  "Return the checkout `--worktree=NAME' builds under ROOT."
   (expand-file-name (concat claude-code--worktrees-dir "/"
                             (string-replace "/" "+" name))
                     root))
@@ -236,8 +209,7 @@ A `+', which no name may contain, is a `/' the CLI flattened."
   (string-replace "+" "/" (file-name-nondirectory dir)))
 
 (defun claude-code--worktree-names (root)
-  "Return the names of the worktrees Claude keeps under ROOT.
-Naming one of these runs a session in it rather than building another."
+  "Return the names of the worktrees Claude keeps under ROOT."
   (let ((dir (expand-file-name claude-code--worktrees-dir root)))
     (when (file-directory-p dir)
       (mapcar #'claude-code--worktree-name
@@ -247,14 +219,11 @@ Naming one of these runs a session in it rather than building another."
 
 (defun claude-code--worktree-parent (root)
   "Return (PARENT . NAME) when ROOT is a worktree Claude built, else nil.
-ROOT is a normalised project root.  Rather than match a pattern, this drops
-three directories and asks `claude-code--worktree-path' to rebuild ROOT from
-what is left: a path `--worktree=NAME' could not have built fails to rebuild.
-Three is the whole depth, and the components are real, so NAME comes back as
-the user wrote it (see docs/storage-model.md).  A checkout kept anywhere else
-files its transcripts under itself, making it a project in its own right."
+ROOT is a normalised project root."
   (and-let* ((name (claude-code--worktree-name root))
              ((not (string-empty-p name)))
+             ;; The CLI flattens a `/' in NAME and never nests checkouts, so
+             ;; one sits exactly three directories below its parent.
              (up1 (file-name-parent-directory root))
              (up2 (file-name-parent-directory up1))
              (up3 (file-name-parent-directory up2))
@@ -267,10 +236,8 @@ files its transcripts under itself, making it a project in its own right."
   (expand-file-name "sessions" (claude-code--config-dir host)))
 
 (defun claude-code--read-session-file (file)
-  "Return what sessions/ FILE says of its `claude' process, or nil.
-A plist with keys :session, :cwd, :status and :waiting-for.  Nil covers a file
-that is gone, unreadable, or names no session.  A missing status field yields a
-nil :status."
+  "Return what sessions/ FILE says of its `claude' process, or nil."
+  ;; Claude rewrites the file in place, so a read can catch it half-written.
   (when-let* ((obj (ignore-errors
                      (with-temp-buffer
                        (insert-file-contents file)
@@ -288,10 +255,7 @@ nil :status."
   "Matches the name of a sessions/ file, which is its process's PID.")
 
 (defun claude-code--live-table (&optional host)
-  "Parse the per-process files under HOST's sessions/ into a hash keyed by PID.
-Each value is a `claude-code--read-session-file' plist.  This is pure parsing
-of the files Claude writes for every running process; process liveness is
-decided by the caller."
+  "Parse the per-process files under HOST's sessions/ into a hash keyed by PID."
   (let ((dir (claude-code--sessions-dir host))
         (table (make-hash-table)))
     (when (file-directory-p dir)
@@ -302,10 +266,7 @@ decided by the caller."
 
 (defun claude-code--watch-sessions-dir (callback)
   "Watch this machine's sessions/, calling CALLBACK with a PID on each change.
-CALLBACK runs when the file of the process PID is created, rewritten or
-deleted.  Return the watch descriptor, or nil while there is no sessions/
-yet.  A rewrite can reach CALLBACK before it is complete; the read it makes
-then fails to parse, and the event of the write completing it follows."
+Return the watch descriptor, or nil while there is no sessions/ yet."
   (let ((dir (claude-code--sessions-dir)))
     (when (file-directory-p dir)
       (file-notify-add-watch
@@ -317,8 +278,7 @@ then fails to parse, and the event of the write completing it follows."
              (funcall callback (string-to-number (file-name-base name))))))))))
 
 (defun claude-code--pid-info (pid &optional host)
-  "Return what sessions/ says of the `claude' process PID on HOST, or nil.
-See `claude-code--read-session-file'."
+  "Return what sessions/ says of the `claude' process PID on HOST, or nil."
   (and (integerp pid)
        (claude-code--read-session-file
         (expand-file-name (format "%d.json" pid)
@@ -329,13 +289,11 @@ See `claude-code--read-session-file'."
   (plist-get (claude-code--pid-info pid host) :cwd))
 
 (defvar claude-code--transcript-cache (make-hash-table :test 'equal)
-  "Cache mapping a transcript file to (MTIME . FIELDS).
-Transcripts are append-only, so an unchanged modification time means
-the extracted fields are still valid.")
+  "Cache mapping a transcript file to (MTIME . FIELDS).")
 
 (defun claude-code--json-line-at-point ()
   "Return the line point is on parsed as JSON, or nil when it does not parse.
-Moves point to the start of the line, so a scan can step off it either way."
+Moves point to the start of the line."
   (goto-char (line-beginning-position))
   (ignore-errors
     (json-parse-string
@@ -343,14 +301,9 @@ Moves point to the start of the line, so a scan can step off it either way."
 
 (defun claude-code--json-line-field (literal field &optional predicate)
   "Return FIELD from the newest line in the current buffer containing LITERAL.
-Scans backward from the end and returns FIELD from the first such line that
-parses as JSON with a non-nil FIELD, skipping the ones that lack it -- a line
-carrying LITERAL inside a message, or as a nested key rather than a top-level
-one.  LITERAL need only be loose enough to catch every line that sets FIELD,
-since the parsed top-level FIELD is what confirms a match.  PREDICATE, called
-with the parsed line, is that confirmation where FIELD alone is not enough
-because other line types carry a key by the same name.  Point is moved.
-Returns nil when no such line exists."
+The line must parse as JSON with a non-nil top-level FIELD and, when PREDICATE
+is given, satisfy it, called with the parsed line.  Return nil when none does.
+Point is moved."
   (goto-char (point-max))
   (let (result)
     (while (and (not result) (search-backward literal nil t))
@@ -360,14 +313,11 @@ Returns nil when no such line exists."
     result))
 
 (defconst claude-code--program-entrypoints '("sdk-cli" "sdk-py" "sdk-ts")
-  "The `entrypoint' stamps that mean no person was driving a session.
-These three are what the CLI itself tests for.  Naming them, rather than
-listing the stamps a person leaves, is what keeps a surface Anthropic adds
-later on the listed side.  See docs/storage-model.md.")
+  "The `entrypoint' stamps the CLI itself takes to mean a program is driving it.")
 
 (defun claude-code--interactive-transcript-p ()
   "Return non-nil unless a program drove every invocation in the current buffer.
-Point is moved.  See docs/storage-model.md for the stamp this reads."
+Point is moved."
   (goto-char (point-min))
   (let (stamped person)
     (while (and (not person) (search-forward "\"entrypoint\"" nil t))
@@ -382,13 +332,10 @@ Point is moved.  See docs/storage-model.md for the stamp this reads."
 (defun claude-code--read-worktree-binding (&optional host)
   "Return the worktree binding recorded in the transcript in the current buffer.
 A plist (:name NAME :path PATH :bound FLAG), nil for a session that never ran
-in a worktree.  PATH is a file name on HOST, the transcript's.  The newest
-`worktree-state' line says whether the session is still in its worktree; the
-newest one carrying a binding names it, verbatim where the directory token is
-flattened.  See docs/storage-model.md.
-A field that is not a string is dropped rather than trusted: JSON null arrives
-as a symbol, and one of those reaching `file-directory-p' or the CLI would cost
-the whole view rather than this one session."
+in a worktree.  PATH is a file name on HOST, the transcript's.  FLAG is non-nil
+while the session is still in the worktree."
+  ;; Claude writes a `worktree-state' line with a null binding when the session
+  ;; leaves its worktree.
   (when-let* ((latest (claude-code--json-line-field "\"worktree-state\""
                                                     "worktreeSession"))
               (named (claude-code--json-line-field "\"worktreeName\""
@@ -402,16 +349,14 @@ the whole view rather than this one session."
               :bound (hash-table-p latest))))))
 
 (defconst claude-code--recap-chrome " (disable recaps in /config)"
-  "Trailing text the CLI appends to a process's first few recaps.
-It points at a Claude `/config' toggle, so it is chrome the moment the recap
-leaves the CLI's own screen.  See docs/storage-model.md.")
+  "Trailing text the CLI appends to a process's first few recaps.")
 
 (defun claude-code--read-recap ()
   "Return the newest recap in the transcript in the current buffer, or nil.
-Point is moved.  See docs/storage-model.md for the line this reads and for why
-`content' alone does not identify it."
+Point is moved."
   (when-let* ((recap (claude-code--json-line-field
                       "\"away_summary\"" "content"
+                      ;; Other line types carry a top-level `content' too.
                       (lambda (obj) (equal (gethash "subtype" obj)
                                            "away_summary"))))
               ((stringp recap))
@@ -420,8 +365,7 @@ Point is moved.  See docs/storage-model.md for the line this reads and for why
     text))
 
 (defun claude-code--read-transcript-fields (file)
-  "Read FILE's transcript fields from disk.
-:last-active is nil when FILE has no timestamped line."
+  "Read FILE's transcript fields from disk."
   (with-temp-buffer
     (insert-file-contents file)
     (list :interactive-p
@@ -436,14 +380,13 @@ Point is moved.  See docs/storage-model.md for the line this reads and for why
           :worktree-binding
           (claude-code--read-worktree-binding (file-remote-p file))
           :last-active
+          ;; Not the mtime: Claude appends untimestamped metadata long after
+          ;; the conversation's last activity.
           (let ((ts (claude-code--json-line-field "\"timestamp\"" "timestamp")))
             (and (stringp ts) (ignore-errors (date-to-time ts)))))))
 
 (defun claude-code--transcript-fields (file)
-  "Return FILE's transcript fields, cached by mtime.
-The keys are :id, :interactive-p, :title, :last-prompt, :recap,
-:worktree-binding and :last-active, the mtime standing in for the last of those
-when FILE has no timestamped line."
+  "Return FILE's transcript fields, cached by mtime."
   (let ((mtime (file-attribute-modification-time (file-attributes file)))
         (cached (gethash file claude-code--transcript-cache)))
     (if (and cached (equal (car cached) mtime))
@@ -463,16 +406,7 @@ when FILE has no timestamped line."
 (defun claude-code--project-transcripts (cwd)
   "Return transcript descriptors for project CWD and its worktrees.
 Each descriptor is a plist with keys :id, :interactive-p, :title, :last-prompt,
-:recap, :worktree-binding, :last-active and :transcript (absolute file).  Every
-transcript is described, including the ones `claude-code-project-sessions'
-declines to list, so that an id resolves whatever the view shows.  Ids are
-unique across the result: a session's transcript lives in exactly one encoded
-directory.
-A transcript belongs to CWD when it sits in CWD's own encoded directory or in
-one prefixed \"--claude-worktrees-\".  That prefix decides membership and
-nothing else: the encoding is lossy, so what follows it is never read as a name
-and never leaves this function.  The worktree a session runs in is
-:worktree-binding's business (see docs/storage-model.md)."
+:recap, :worktree-binding, :last-active and :transcript (absolute file)."
   (let* ((projects (claude-code--projects-dir (file-remote-p cwd)))
          (base (claude-code--encode-cwd cwd))
          (wt-prefix (concat base "--claude-worktrees-"))
@@ -491,38 +425,31 @@ and never leaves this function.  The worktree a session runs in is
 
 ;;;; Ghostel adapter
 ;;
-;; Reads of the program status records Ghostel keeps for an instance's terminal,
-;; decoded from the OSC 7501 reports Claude sends.  Their layout is Ghostel's,
-;; described under `ghostel-program-status-functions'.
+;; Ghostel keeps the OSC 7501 reports Claude sends as program status records,
+;; one per id: the empty id for the session, another for each subagent.
 
 (defun claude-code--root-record (buffer)
-  "Return the root program status record of BUFFER's terminal, or nil.
-The root record speaks for the session; the others are its subagents."
+  "Return the root program status record of BUFFER's terminal, or nil."
   (cdr (assoc "" (buffer-local-value 'ghostel-program-status buffer))))
 
 (defun claude-code--root-status (buffer)
-  "Return the root program status of BUFFER's terminal as (STATE . MSG), or nil.
-MSG is nil when Claude sent none."
+  "Return the root program status of BUFFER's terminal as (STATE . MSG), or nil."
   (when-let* ((record (claude-code--root-record buffer)))
     (cons (plist-get record :state) (plist-get record :msg))))
 
 (defun claude-code--record-turn-end (record)
-  "Return the turn end program status RECORD reports, or nil.
-That is (STATE . MSG) while its state is `done' or `error', MSG nil when
-Claude sent none."
+  "Return RECORD's turn end, (STATE . MSG) while it is `done' or `error'."
   (when (memq (plist-get record :state) '(done error))
     (cons (plist-get record :state) (plist-get record :msg))))
 
 
 ;;;; dtach adapter
-;;
-;; How a detachable instance is held on its host: the `dtach' master that owns
-;; its terminal, and the socket a client attaches through.
 
 (defconst claude-code--dtach-flags "-E -z -r ctrl_l"
   "The dtach flags every master and client runs with.
-No detach key and no suspend key, leaving every key to Claude, and a Ctrl-L on
-attach, which makes Claude redraw.")
+They leave the detach and suspend keys to Claude, and send a Ctrl-L on attach,
+which makes Claude repaint the screen, but not an inline instance's scrollback,
+when no dialog is open.")
 
 (defconst claude-code--holding-script
   (concat
@@ -534,9 +461,8 @@ attach, which makes Claude redraw.")
    " exit 1; };"
    " n=$1; shift; exec \"$0\" -c \"$d/$n\" " claude-code--dtach-flags " \"$@\"")
   "The `/bin/sh' script starting a detachable instance under dtach.
-Called with dtach as $0, the socket's name, and the command.  The socket lives
-in a directory of the user's own, mode 0700.  The terminal running the script
-becomes the first client, so it answers what Claude asks of it at startup.")
+Called with dtach as $0, the socket's name, and the command.  The terminal
+running it becomes the first client, so it answers Claude's startup probes.")
 
 (defun claude-code--holding-command (dtach name command)
   "Return COMMAND run as a detachable instance under DTACH, on socket NAME."
@@ -551,105 +477,75 @@ becomes the first client, so it answers what Claude asks of it at startup.")
   "Matches the command line of a master `claude-code--holding-script' started.")
 
 (defun claude-code--holder-socket (args)
-  "Return the socket named by ARGS, a dtach master's command line, or nil.
-Nil unless the master is one `claude-code--holding-command' started."
+  "Return the socket named by ARGS, a dtach master's command line, or nil."
   (and (stringp args)
        (string-match claude-code--holder-args-re args)
        (match-string 1 args)))
 
 (defun claude-code--holder (pid &optional host)
   "Return the dtach socket on HOST of the detachable instance PID, or nil.
-The instance's parent is its dtach master, which keeps the command line it was
-started with, socket included.  Read from HOST's process table, which on a
-remote host is TRAMP's copy as the last `list-system-processes' read it."
+On a remote HOST, TRAMP answers from its last `list-system-processes' there."
   (let ((default-directory (concat host "/")))
     (when-let* ((ppid (alist-get 'ppid (process-attributes pid))))
       (claude-code--holder-socket (alist-get 'args (process-attributes ppid))))))
 
 (defun claude-code--attaching-command (dtach socket)
-  "Return the command attaching a terminal through DTACH to SOCKET.
-Claude does not repeat the terminal modes it set at startup when a client
-attaches, so the shell first sets them as Claude does: bracketed paste, which
-`claude-code-send-text' relies on, palette reports, focus reporting, and the
-kitty keyboard flags, without which modified keys arrive in the legacy
-encoding."
+  "Return the command attaching a terminal through DTACH to SOCKET."
   (list "/bin/sh" "-c"
+        ;; Claude's startup modes, which it does not reliably repeat for a new
+        ;; client: bracketed paste, palette and focus reports, kitty keys.  Not
+        ;; the alt screen, so a fullscreen instance repaints on the main one.
         (concat "printf '\\033[?2004h\\033[?2031h\\033[?1004h\\033[>5u';"
                 " exec \"$0\" -a \"$1\" " claude-code--dtach-flags)
         dtach socket))
 
 (defun claude-code--held-instance-ended-p (event)
-  "Return non-nil when a terminal running dtach's client ended with its instance.
-EVENT is the terminal's process event.  The client exits 0 when its master
-hangs up, as the master does once the instance it holds has ended, and fails
-on a signal or a lost connection, which leave the instance running."
+  "Return non-nil when process EVENT of a dtach client says its instance ended."
+  ;; The client exits 0 only when its master hangs up, which it does once the
+  ;; instance ends.
   (equal event "finished\n"))
 
 
 ;;;; Model
-;;
-;; The rest of the package works with `claude-code-session' structs produced by
-;; `claude-code-project-sessions', each in one of the three liveness states
-;; `claude-code--session-liveness' classifies.
 
 (cl-defstruct (claude-code-session (:constructor claude-code-session--create)
                                    (:copier nil))
-  "A Claude Code session, alive or dead.
-ID is the session UUID.  ALIVE-P is non-nil when Emacs manages a live instance,
-in which case BUFFER holds the Ghostel buffer and PID its `claude' process, on
-the project's host and nil until reported (`claude-code--report-pid').  STATUS
-is Claude's native `busy'/`shell'/`idle'/`waiting' string (alive sessions
-only), with WAITING-FOR set while waiting.  TURN-END is how the instance's last
-turn ended, `done' or `error', read off its root program status record, with
-TURN-END-MESSAGE Claude's message for it, if any.  EXTERNAL-P flags a session
-whose process is running outside Emacs, so it must not be resumed or deleted.
-TITLE and LAST-PROMPT come from the transcript and, via
-`claude-code--session-display-name', are the session's only display-name
-sources; WORKTREE names the session's worktree, nil for a main-tree one, and
-WORKTREE-BINDING is the storage adapter's record behind it, which the resume
-path reads (see `claude-code--resume-worktree').  RECAP is Claude's own
-one-paragraph account of where the session stood, nil for a session that has
-none.  TRANSCRIPT is the absolute `.jsonl' path, nil before Claude writes one.
-LAST-ACTIVE is the session's last genuine activity, taken from the newest
-timestamped transcript line.  HOLDER is the dtach socket, as a file name on the
-session's host, of the detachable instance running an external session, which
-can therefore be attached; nil for every other session."
+  "A Claude Code session, alive, external or dead.
+ID is the session id.  ALIVE-P is non-nil when Emacs manages an instance
+running it: BUFFER is then its Ghostel buffer, and PID its `claude' process on
+the project's host, nil until reported.  STATUS is an alive session's \"idle\",
+\"busy\", \"waiting\" or \"shell\", with WAITING-FOR set while waiting.
+TURN-END is how its last turn ended, `done' or `error', with TURN-END-MESSAGE
+Claude's message on it, if any.  EXTERNAL-P is non-nil when a `claude' outside
+Emacs runs it, and HOLDER is then the dtach socket file of the detachable
+instance running it, if any.  TITLE, LAST-PROMPT, RECAP and LAST-ACTIVE come
+from the transcript, the file TRANSCRIPT, nil before Claude writes one.
+WORKTREE names the session's worktree, nil for the main tree, and
+WORKTREE-BINDING is the transcript's record of it."
   id status waiting-for turn-end turn-end-message alive-p pid buffer
   worktree worktree-binding title last-prompt recap transcript external-p
   last-active holder)
 
 (defvar claude-code--managed (make-hash-table :test 'eq)
-  "Hash of instance buffer -> plist describing the Emacs-managed instance in it.
-Keys: :origin (project root the instance was launched from, normalised with
-`claude-code--normalize-root', whose host is the instance's), :worktree (the
-name of the worktree it was asked for, nil for none), :session (the session it
-runs) and :info (what sessions/ says of its process), both as last read
-\(`claude-code--entry-update'), :detachable (whether the instance is), and
-:named, (ID . ARGS) for the `claude-code--transcript-session-args' a query last
-built for session ID.")
+  "Hash of instance buffer -> plist describing the managed instance in it.
+Keys: :origin, the normalized root it was launched from, whose host is the
+instance's; :worktree, the worktree it was asked for; :session, the session it
+runs, and :info, what sessions/ says of its process, both as last read;
+:detachable, whether it is; and :named, (ID . ARGS) for the
+`claude-code--transcript-session-args' a query last built for session ID.")
 
 (defvar-local claude-code--pid nil
-  "PID of the `claude' process this instance buffer hosts, on its host.
-Nil until the launch wrapper reports it (`claude-code--report-pid').")
+  "PID of the `claude' this buffer hosts, on its host; nil until reported.")
 
 (defun claude-code--session-display-name (session)
-  "Return SESSION's display name.
-This is the single authority for a session's name, so it cannot drift: the
-name is derived from the transcript on every query, never cached by this
-package.  The sources, in order: the transcript TITLE (a user custom title,
-which a spawn name or a `/rename' writes, else Claude's generated one), the
-latest prompt, and finally the short session id."
+  "Return SESSION's title, else its latest prompt, else its short id."
   (or (claude-code-session-title session)
       (claude-code-session-last-prompt session)
       (string-limit (claude-code-session-id session) 8)))
 
 (defun claude-code--normalize-root (path)
-  "Return PATH as an absolute, symlink-resolved directory name.
-Claude records a session's cwd as the real (symlink-resolved) path its process
-reports, whereas Emacs `project-root' may hand back a symlinked path.  Resolving
-with `file-truename' keeps the root we compute matching Claude's encoded
-transcript directory, and keeps a spawned instance's `:origin' comparable to the
-root a later query normalises the same way."
+  "Return PATH absolute and symlink-resolved, without a trailing slash."
+  ;; Claude records cwds symlink-resolved.
   (directory-file-name (file-truename (expand-file-name path))))
 
 (defun claude-code--session-process (buffer)
@@ -663,20 +559,16 @@ root a later query normalises the same way."
   (buffer-local-value 'claude-code--pid buffer))
 
 (defun claude-code--origin-project (origin)
-  "Return the project an instance launched from ORIGIN belongs to.
-That is ORIGIN's parent when ORIGIN is a worktree, so the instance belongs to
-the same project wherever it goes to work."
+  "Return the project ORIGIN belongs to, its parent when ORIGIN is a worktree."
   (or (car (claude-code--worktree-parent origin)) origin))
 
 (defun claude-code--under-root-p (dir root)
-  "Return non-nil when an instance in DIR belongs to project ROOT.
-DIR is ROOT itself or a worktree Claude built under it."
+  "Return non-nil when DIR is project ROOT or a worktree of it."
   (or (equal dir root) (equal (claude-code--origin-project dir) root)))
 
 (defun claude-code--entry-update (entry info)
-  "Record INFO, what sessions/ says of ENTRY's process, in ENTRY; return ENTRY.
-A nil INFO, from a file that is gone or caught mid-rewrite, keeps what was
-last read."
+  "Record INFO, what sessions/ says of ENTRY's process, in ENTRY; return ENTRY."
+  ;; INFO is nil when the file is gone or caught half-written.
   (when info
     (plist-put entry :info info)
     (plist-put entry :session (plist-get info :session)))
@@ -688,9 +580,8 @@ last read."
 
 (defun claude-code--instance-entry (buffer)
   "Return the registry entry of the managed instance BUFFER hosts, or nil.
-A local instance's entry is first refreshed from its sessions/ file.  A remote
-one holds what the last query read (`claude-code--running'): hooks and timers
-read through here, and must not wait on the network."
+A local entry is first refreshed from its sessions/ file; a remote one holds
+what the last query read."
   (when-let* ((entry (gethash buffer claude-code--managed)))
     (if (claude-code--entry-host entry)
         entry
@@ -698,23 +589,19 @@ read through here, and must not wait on the network."
        entry (claude-code--pid-info (claude-code--instance-pid buffer))))))
 
 (defun claude-code--pid-running-p (&optional host)
-  "Return a predicate telling whether a PID is a running process on HOST.
-HOST's process table is read once, here.  A table read empty could not be
-read, and every PID then reads as running."
+  "Return a predicate testing whether a PID is in HOST's current process table."
   (let ((pids (let ((default-directory (concat host "/")))
                 (list-system-processes))))
     (if pids
         (lambda (pid) (memql pid pids))
+      ;; The table could not be read.  Refusing a resume or delete costs less
+      ;; than putting two processes on one session.
       #'always)))
 
 (defun claude-code--running (&optional host live)
   "Return a hash of session id -> what runs it on HOST.
-That is the buffer of an instance Emacs manages, or the PID of a `claude'
-outside Emacs.  A managed instance runs the session its entry names, refreshed
-from sessions/ (`claude-code--entry-update'), while its buffer's process lives;
-any other `claude' runs the one sessions/ names while
-`claude-code--pid-running-p' says its PID does.  LIVE is HOST's
-`claude-code--live-table' when the caller has already read it."
+That is a managed instance's buffer, or the PID of a `claude' outside Emacs.
+LIVE is HOST's `claude-code--live-table', when the caller has already read it."
   (let* ((live (or live (claude-code--live-table host)))
          (running-p (unless (hash-table-empty-p live)
                       (claude-code--pid-running-p host)))
@@ -727,6 +614,7 @@ any other `claude' runs the one sessions/ names while
                        instances))
          (running (make-hash-table :test 'equal)))
     (maphash (lambda (pid info)
+               ;; A `claude' ended by SIGKILL leaves its sessions/ file behind.
                (when (and (not (memql pid held)) (funcall running-p pid))
                  (puthash (plist-get info :session) pid running)))
              live)
@@ -738,50 +626,35 @@ any other `claude' runs the one sessions/ names while
     running))
 
 (defun claude-code--session-liveness (session)
-  "Return SESSION's liveness: `alive', `external', or `dead'.
-`alive' means Emacs manages a live instance for it; `external' means a
-`claude' process is running it outside Emacs; `dead' means no process is
-running it at all.  This is the single classifier the view builds on."
+  "Return SESSION's liveness: `alive', `external', or `dead'."
   (cond ((claude-code-session-alive-p session) 'alive)
         ((claude-code-session-external-p session) 'external)
         (t 'dead)))
 
 (defun claude-code--binding-worktree (binding)
-  "Return the worktree BINDING names, or nil when there is none to name.
-A session Claude still holds in its worktree is named on Claude's word alone.
-One that left is named only while the directory survives: the name outlives a
-worktree removed on exit, but the session it held belongs to the parent tree
-now, which is where a resume lands it."
+  "Return BINDING's worktree name while it is bound or its directory exists."
   (when (or (plist-get binding :bound)
             (when-let* ((path (plist-get binding :path)))
               (file-directory-p path)))
     (plist-get binding :name)))
 
 (defun claude-code--resume-worktree (root binding)
-  "Return the worktree a resume of BINDING under ROOT must pass, or nil.
-A session Claude still considers bound needs nothing: it re-enters its worktree
-by itself.  One whose worktree is gone needs nothing either, since the flag
-builds a checkout rather than resuming in none.  What is left is the session
-that left a worktree still on disk -- see docs/storage-model.md.
-The name must also round-trip: `--worktree=NAME' resolves to
-ROOT/.claude/worktrees/NAME, and Claude records only the worktree's base name.
-For a worktree kept anywhere else -- a `git worktree add' checkout Claude was
-asked to enter, or one a `WorktreeCreate' hook placed elsewhere -- that flag
-would build a fresh checkout beside the work instead of returning to it."
+  "Return the worktree name a resume of BINDING under ROOT must pass, or nil."
+  ;; A bound session re-enters its worktree by itself.  A clean exit unbinds
+  ;; one even when its worktree is kept.
   (when-let* (((not (plist-get binding :bound)))
+              ;; Nil for a worktree that is gone, which the flag would rebuild.
               (name (claude-code--binding-worktree binding))
+              ;; Claude can work in a worktree kept elsewhere, which
+              ;; `--worktree=NAME' would not lead back to.
               (round-trip (claude-code--worktree-path root name))
               ((file-equal-p round-trip (plist-get binding :path))))
     name))
 
 (defun claude-code--transcript-session-args (tr &optional reg)
   "Return `claude-code-session--create' arguments derived from descriptor TR.
-TR is a `claude-code--project-transcripts' descriptor, nil for an instance with
-no transcript yet.  REG, when given, is the managed-registry plist whose
-worktree name stands in while TR carries none.  The binding is the only thing
-that names a worktree: a session it does not name is one a resume lands in the
-main tree, and labelling it anyway would promise a checkout the resume cannot
-reach."
+TR is a transcript descriptor, or nil.  REG, a registry entry, names the
+worktree when TR does not."
   (list :worktree-binding (plist-get tr :worktree-binding)
         :worktree (or (claude-code--binding-worktree
                        (plist-get tr :worktree-binding))
@@ -794,16 +667,13 @@ reach."
 
 (defun claude-code--alive-session (buffer &optional args)
   "Return the alive `claude-code-session' for the managed instance BUFFER hosts.
-Its session and native status are what its registry entry holds, and ARGS are
-the `claude-code--transcript-session-args' of that session's transcript, which
-the entry keeps as :named.  Without ARGS the session has no transcript yet,
-and the registry stands in for the worktree."
+ARGS are the `claude-code--transcript-session-args' of its transcript, nil
+while it has none; the registry entry keeps them as :named."
   (let* ((entry (gethash buffer claude-code--managed))
          (id (plist-get entry :session))
          (info (plist-get entry :info))
-         ;; Only a resting instance has ended its turn.  A turn's report and
-         ;; its sessions/ rewrite arrive apart, so either can be read beside
-         ;; what the other said of the turn before.
+         ;; A turn's report and its sessions/ rewrite arrive apart, so either
+         ;; can lag: both must say the turn ended.
          (turn-end (and (member (plist-get info :status) '("idle" "shell"))
                         (claude-code--record-turn-end
                          (claude-code--root-record buffer)))))
@@ -825,10 +695,7 @@ and the registry stands in for the worktree."
 
 (defun claude-code--instance-session (buffer)
   "Return the alive `claude-code-session' for the instance BUFFER hosts, or nil.
-Nil when BUFFER hosts no instance Emacs manages.  The struct describes the
-session the instance runs now (`claude-code--instance-entry'), named from its
-transcript: looked up under the instance's `claude-code--origin-project' for a
-local instance, and the one the last query found for a remote one."
+A remote instance's transcript fields are those the last query read."
   (when-let* ((entry (claude-code--instance-entry buffer)))
     (let ((id (plist-get entry :session)))
       (claude-code--alive-session
@@ -843,17 +710,9 @@ local instance, and the one the last query found for a remote one."
 
 (defun claude-code-project-sessions (project-root)
   "Return the list of `claude-code-session' structs for PROJECT-ROOT.
-A transcript's session is alive when Emacs manages a live instance running it,
-external when a `claude' outside Emacs runs it, and dead when no process is.
-Aliveness is keyed by session id, never by PROJECT-ROOT, because one session can
-belong to two roots (see docs/storage-model.md).  The launch root recorded in
-`claude-code--managed' is consulted only to list the instances launched from
-PROJECT-ROOT, or from a worktree of it, whose session has no transcript here.
-A session a program drove is left out unless Emacs manages an instance for it
-\(`claude-code--interactive-transcript-p').  An external session a detachable
-instance runs names its `claude-code--holder', and is listed before Claude
-writes its transcript when sessions/ has the instance in PROJECT-ROOT or a
-worktree of it."
+These are the sessions of its transcripts that a person drove or a managed
+instance runs, and the sessions with no transcript there that a managed or
+detachable instance runs under PROJECT-ROOT."
   (let* ((root (claude-code--normalize-root project-root))
          (host (file-remote-p root))
          (live (claude-code--live-table host))
@@ -867,7 +726,6 @@ worktree of it."
       (let* ((id (plist-get tr :id))
              (runner (gethash id running)))
         (puthash id t seen)
-        ;; An instance Emacs manages is the user's whatever it is stamped with.
         (when (or (bufferp runner) (plist-get tr :interactive-p))
           (push (if (bufferp runner)
                     (claude-code--alive-session
@@ -877,6 +735,7 @@ worktree of it."
                          :holder (and runner (funcall holder runner))
                          (claude-code--transcript-session-args tr)))
                 sessions))))
+    ;; Claude writes no transcript before a session's first input.
     (maphash (lambda (id runner)
                (unless (gethash id seen)
                  (if (bufferp runner)
@@ -895,20 +754,13 @@ worktree of it."
     (nreverse sessions)))
 
 (defvar claude-code--proc-children-p
+  ;; A kernel without CONFIG_PROC_CHILDREN has /proc but not this file.
   (file-readable-p (format "/proc/%d/task/%d/children" (emacs-pid) (emacs-pid)))
-  "Whether the system names a process's children, as Linux does under `/proc'.
-Where it does, a session's subtree is sampled on its own; where it does not,
-the only way to find children is to walk the whole process table.  This probes
-the very file `claude-code--child-pids' reads, because a kernel built without
-`CONFIG_PROC_CHILDREN' offers the enclosing directory but not the file, and a
-subtree that silently sums to its root alone would read as a plausible number.")
+  "Whether the system names a process's children, as Linux does under `/proc'.")
 
 (defun claude-code--child-pids (pid)
-  "Return the pids `/proc' names as PID's children.
-`/proc' lists them per thread and this reads PID's main thread, which is the
-one every observed `claude' forks its tool subprocesses from.  A child forked
-from another of PID's threads goes uncounted until that thread exits and the
-child re-parents to PID."
+  "Return the pids `/proc' names as children of PID's main thread."
+  ;; `claude' forks its tool processes from its main thread.
   (ignore-errors
     (with-temp-buffer
       (insert-file-contents (format "/proc/%d/task/%d/children" pid pid))
@@ -916,10 +768,7 @@ child re-parents to PID."
 
 (defun claude-code--process-snapshot (&optional host)
   "Return (ATTRS . CHILDREN) hashes of HOST's current process table.
-ATTRS maps a pid to its `process-attributes' alist; CHILDREN maps a
-pid to the list of its child pids.  This is the source of a subtree on a
-remote host, and on this one where `claude-code--proc-children-p' is nil:
-reading every process is the only way left to learn who parents whom."
+ATTRS maps a pid to its `process-attributes', CHILDREN to its child pids."
   (let ((default-directory (concat host "/"))
         (attrs (make-hash-table :test 'eql))
         (children (make-hash-table :test 'eql)))
@@ -932,14 +781,10 @@ reading every process is the only way left to learn who parents whom."
     (cons attrs children)))
 
 (defun claude-code--process-usage (pid &optional snapshot)
-  "Return (CPU . RSS) summed over PID's process subtree, or nil.
-Nil means no usage is available: PID is not an integer, or no process runs
-under it (a dead process, so a caller can tell it apart from a live but idle
-one).  SNAPSHOT is a table from `claude-code--process-snapshot' to read PID
-in.  Without one, PID is a local process, read directly where
-`claude-code--proc-children-p' allows and in a snapshot built here otherwise.
-CPU is a percentage that may be a lifetime average depending on the platform;
-RSS is in kibibytes."
+  "Return (CPU . RSS) summed over PID's process subtree, or nil if PID is gone.
+SNAPSHOT is a `claude-code--process-snapshot' to read PID in; without one, PID
+is local.  CPU is a percentage, a lifetime average on some platforms; RSS is in
+kibibytes."
   (when (integerp pid)
     (let* ((snap (or snapshot
                      (unless claude-code--proc-children-p
@@ -948,8 +793,8 @@ RSS is in kibibytes."
                       (lambda (p) (gethash p (car snap)))
                     #'process-attributes))
            (children (if snap
-                         ;; The walk must not splice into this list: it is
-                         ;; the snapshot's own and every later row reads it.
+                         ;; Shared with every later row, so the walk must not
+                         ;; modify it.
                          (lambda (p) (gethash p (cdr snap)))
                        #'claude-code--child-pids))
            (cpu 0.0) (rss 0) (stack (list pid)) (found nil))
@@ -959,8 +804,8 @@ RSS is in kibibytes."
           (when a
             (setq found t)
             (let ((pcpu (alist-get 'pcpu a)))
-              ;; Linux divides CPU time by age, so a process younger than a
-              ;; tick reads NaN or infinity.
+              ;; On Linux this is CPU time over age, so a process younger than
+              ;; a tick reads NaN or infinity.
               (when (and pcpu (< (abs pcpu) 1.0e+INF))
                 (cl-incf cpu pcpu)))
             (cl-incf rss (or (alist-get 'rss a) 0))
@@ -968,11 +813,7 @@ RSS is in kibibytes."
       (and found (cons cpu rss)))))
 
 (defun claude-code--instance-cwd (buffer)
-  "Return the directory the managed instance BUFFER hosts works in, or nil.
-That is what its sessions/ file says (`claude-code--instance-entry') -- the
-worktree directory for one working in a worktree -- and, before that file has
-been read, the worktree it was asked to run in or the root it was launched
-from."
+  "Return the directory the managed instance BUFFER hosts works in, or nil."
   (when-let* ((entry (claude-code--instance-entry buffer)))
     (let ((origin (plist-get entry :origin))
           (worktree (plist-get entry :worktree)))
@@ -980,11 +821,7 @@ from."
           (if worktree (claude-code--worktree-path origin worktree) origin)))))
 
 (defun claude-code--session-directory (session root)
-  "Return the directory SESSION, listed under project ROOT, works in now.
-A process running it answers for itself: Emacs's instance as
-`claude-code--instance-cwd' does, and one outside Emacs by its sessions/ file.
-A session no process runs works in the worktree its binding names while that is
-a directory, and in ROOT otherwise."
+  "Return the directory SESSION, listed under project ROOT, works in now."
   (or (pcase (claude-code--session-liveness session)
         ('alive (claude-code--instance-cwd (claude-code-session-buffer session)))
         ('external (let ((host (file-remote-p root)))
@@ -1002,23 +839,10 @@ a directory, and in ROOT otherwise."
 
 (cl-defun claude-code--build-args
     (&key session-id resume prompt name worktree model effort)
-  "Build the argument list for the `claude' CLI.
-
-When RESUME is non-nil it is a session id to resume, and the result is
-\"--resume=ID\" -- preceded by \"--worktree=NAME\" when WORKTREE is a
-string, as `claude-code--resume-worktree' decides.  Every other new-session
-argument is ignored.
-
-Otherwise a new session is described:
-SESSION-ID is passed as \"--session-id\" so the caller can map the instance to
-its session up front.  NAME sets the session's display name
-\(\"--name=NAME\").  WORKTREE, when t, requests a new worktree
-\(\"--worktree\"); when a string, names it (\"--worktree=NAME\").  MODEL sets
-\"--model\" and EFFORT sets \"--effort\".  The name, the model and the effort
-are passed through verbatim -- their validity is the CLI's concern, and a name
-that is empty or nothing but whitespace is one the CLI reads as no name at all.
-PROMPT, when a non-empty string, is emitted last as a positional argument
-behind a \"--\" option terminator."
+  "Return the argument list for the `claude' CLI.
+A new session SESSION-ID starts with PROMPT, NAME, WORKTREE, MODEL and
+EFFORT; the CLI reads a blank NAME as no name.  When RESUME is a session id,
+that session resumes instead, inside WORKTREE when that is a string."
   (if resume
       (append (when (stringp worktree)
                 (list (concat "--worktree=" worktree)))
@@ -1035,26 +859,18 @@ behind a \"--\" option terminator."
               (list "--" prompt)))))
 
 (defcustom claude-code-buffer-name-function #'claude-code--default-buffer-name
-  "Function that seeds the name of the buffer hosting a new instance.
-Called with the project root; must return a string.  This is only the
-pre-title seed: once the instance reports a terminal title, Ghostel renames
-the buffer via `claude-code--ghostel-buffer-name'.  Name clashes are resolved
-by `generate-new-buffer'."
+  "Function returning the name for a new instance's buffer.
+Called with the project root; the name need not be unique.  It holds until
+Claude sets a terminal title."
   :type 'function)
 
 (defun claude-code--default-buffer-name (root)
-  "Return a pre-title seed buffer name for an instance in ROOT."
+  "Return the buffer name for a new instance in ROOT."
   (format "*claude: %s*" (file-name-nondirectory (directory-file-name root))))
 
 (defun claude-code--ghostel-buffer-name (title)
-  "Name a managed instance buffer \"*claude: TITLE*\" from the terminal TITLE.
-A buffer-local `ghostel-buffer-name-function' so Ghostel's own title tracking
-drives the name — Claude sets the OSC 2 title, so no bookkeeping is needed
-here.  Claude prefixes the title with a status indicator — a symbol glyph
-\(a spinner frame while busy, an idle marker otherwise) and a space — in the
-form \"<indicator> <title>\".  That leading run of symbol and whitespace
-characters is stripped so only the title remains.  Declines (returns nil)
-when nothing but the indicator is left, like `ghostel-buffer-name-by-title'."
+  "Return \"*claude: TITLE*\" for the terminal TITLE, minus Claude's status glyph.
+Return nil when nothing but the glyph is left."
   (when title
     (let ((clean (replace-regexp-in-string
                   "\\`[^[:alnum:][:space:]]+[[:space:]]+" "" title)))
@@ -1063,15 +879,10 @@ when nothing but the indicator is left, like `ghostel-buffer-name-by-title'."
 
 (defvar-local claude-code--names-held nil
   "Names this instance buffer has held, newest first, as (NAME . SINCE).
-SINCE is the `float-time' at which NAME was taken.  Kept from the mode's entry
-by `claude-code--record-name', so the name held at any instant since can be
-looked up (`claude-code--name-at').")
+SINCE is the `float-time' at which NAME was taken.")
 
 (defun claude-code--record-name ()
-  "Log the current buffer's name in `claude-code--names-held' when it changed.
-A buffer-local `buffer-list-update-hook' entry: `rename-buffer' runs the hook
-in the renamed buffer with the new name in place.  The hook also runs for a
-buffer created or killed while this one is current, which changes no name."
+  "Log the current buffer's name in `claude-code--names-held' when it changed."
   (unless (equal (buffer-name) (caar claude-code--names-held))
     (push (cons (buffer-name) (float-time)) claude-code--names-held)))
 
@@ -1086,49 +897,40 @@ buffer created or killed while this one is current, which changes no name."
   ;; and emacs mode.
   :parent (make-sparse-keymap)
   :doc "Keymap active in every buffer hosting a Claude instance.
-Bindings here outrank every enabled minor mode and Ghostel's own terminal
-bindings.  What Ghostel puts in `emulation-mode-map-alists' still wins: char
-mode's whole map, and the scroll and drag-and-drop intercepts in every mode.
-A parent of your own may replace the empty one.")
+Its bindings outrank minor modes and Ghostel's terminal bindings, but not what
+Ghostel puts in `emulation-mode-map-alists', such as char mode's map.  A parent
+of your own may replace the empty one.")
 
 (defvar-local claude-code--instance-keys nil
   "Non-nil in buffers where `claude-code-instance-mode-map' is active.")
 
 (defvar claude-code--sessions-changed-hook nil
-  "Hook run when this machine's sessions may have changed.
-That is when an instance here registers, reports its PID, changes its turn end
-or closes, and when a file in this machine's sessions/ changes.")
+  "Hook run when this machine's sessions may have changed.")
 
 (defun claude-code--sessions-changed ()
-  "Run `claude-code--sessions-changed-hook'.
-It runs from process filters, file notifications and `kill-buffer-hook', so a
-handler's error is reported rather than raised."
+  "Run `claude-code--sessions-changed-hook'."
   (with-demoted-errors "claude-code: reporting a change: %S"
     (run-hooks 'claude-code--sessions-changed-hook)))
 
 (defun claude-code--follow-cwd ()
   "Hand Ghostel the directory this buffer's `claude' process works in.
-Nothing is handed while the buffer is there already.  The directory goes
-through Ghostel's own OSC 7 handling, since Claude sends no OSC 7 report."
+Claude sends no OSC 7 report, so this feeds Ghostel's handler for one."
   (when-let* ((cwd (claude-code--instance-cwd (current-buffer)))
               ((not (equal (file-name-as-directory cwd) default-directory))))
-    ;; Ghostel skips the directory it last took, even one a `let' undid.
+    ;; Ghostel skips the directory it last took, even if the buffer has left it.
     (setq ghostel--last-directory nil)
     (ghostel--update-directory cwd)))
 
 (defun claude-code--follow-directory (record-id old new)
-  "Follow the directory this buffer's instance works in as it changes state.
-A `ghostel-program-status-functions' entry, acting when the root record, whose
-RECORD-ID is \"\", changes state from OLD to NEW."
+  "Follow the instance's directory when its root record changes state.
+A `ghostel-program-status-functions' entry taking RECORD-ID, OLD and NEW."
   (when (and (string-empty-p record-id)
              (not (eq (plist-get old :state) (plist-get new :state))))
     (claude-code--follow-cwd)))
 
 (defun claude-code--on-root-status (record-id old new)
-  "Report a change of this buffer's turn end, from OLD to NEW.
-A `ghostel-program-status-functions' entry: the turn end is read off the root
-record, whose RECORD-ID is \"\", so a change of it runs
-`claude-code--sessions-changed' for a managed instance on this machine."
+  "Report a change of the instance's turn end.
+A `ghostel-program-status-functions' entry taking RECORD-ID, OLD and NEW."
   (when-let* (((string-empty-p record-id))
               ((not (equal (claude-code--record-turn-end old)
                            (claude-code--record-turn-end new))))
@@ -1140,36 +942,27 @@ record, whose RECORD-ID is \"\", so a change of it runs
   "The `ghostel-eval-cmds' name an instance's launch wrapper reports under.")
 
 (defun claude-code--report-pid (pid)
-  "Record PID, a decimal string, as this instance buffer's `claude' process.
-The `ghostel-eval-cmds' entry the launch wrapper calls, dropped once it has
-taken a PID: the wrapper reports ahead of anything else the terminal shows."
+  "Record PID, a decimal string, as this instance buffer's `claude' process."
   (when (string-match-p "\\`[0-9]+\\'" pid)
     (setq claude-code--pid (string-to-number pid))
+    ;; Only the wrapper's report, which precedes Claude's output, is trusted.
     (setq ghostel-eval-cmds nil)
     (when-let* ((entry (gethash (current-buffer) claude-code--managed))
                 ((not (claude-code--entry-host entry))))
       (claude-code--sessions-changed))))
 
 (defun claude-code--refuse-bookmark ()
-  "Refuse to bookmark an instance buffer.
-The buffer-local `bookmark-make-record-function' standing in for Ghostel's,
-whose bookmark would run the instance's command line again as a terminal no
-instance owns."
+  "Refuse to bookmark an instance buffer."
   (user-error "A Claude instance cannot be bookmarked"))
 
 (define-derived-mode claude-code-instance-mode ghostel-mode "Claude"
   "Major mode for a Ghostel terminal hosting a Claude instance.
-Gives Claude's terminals a `display-buffer-alist' key and a keymap that no
-other Ghostel terminal answers to.  The buffer's `default-directory' follows
-the directory the instance works in (`claude-code--follow-directory'), and VC
-commands act on it.  The buffer is kept out of desktop files and bookmarks,
-which Ghostel would fill with the instance's command line, initial prompt
-included.
 
 \\{claude-code-instance-mode-map}"
   :interactive nil
   (use-local-map ghostel-semi-char-mode-map)
   (setq-local claude-code--instance-keys t)
+  ;; Ghostel's input-mode commands replace the local map, but not this alist.
   (setq-local minor-mode-overriding-map-alist
               (cons (cons 'claude-code--instance-keys
                           claude-code-instance-mode-map)
@@ -1177,6 +970,8 @@ included.
   (setq-local ghostel-buffer-name-function #'claude-code--ghostel-buffer-name)
   (setq-local ghostel-eval-cmds
               (list (list claude-code--pid-report #'claude-code--report-pid)))
+  ;; Ghostel saves the command line, initial prompt included, in desktop and
+  ;; bookmark files, and a bookmark would run it again in an unmanaged terminal.
   (setq-local desktop-save-buffer nil)
   (setq-local bookmark-make-record-function #'claude-code--refuse-bookmark)
   (claude-code--record-name)
@@ -1200,18 +995,13 @@ included.
             (substring s 17 20) (substring s 20 32))))
 
 (defvar claude-code-last-instance-exit-hook nil
-  "Hook run once the last managed instance's buffer has closed.
-A handler that signals is reported and skipped, so it costs neither the
-handlers behind it nor the `kill-buffer' this may be running inside.")
+  "Hook run once the last managed instance's buffer has closed.")
 
 (defvar-local claude-code--exit-event nil
   "The event this instance's terminal ended on, nil while it runs.")
 
 (defun claude-code--runs-on-p (buffer)
-  "Return non-nil when BUFFER's instance goes on running without BUFFER.
-That is a detachable instance that has started -- its terminal runs, or it
-reported its PID -- and whose terminal has not ended with it
-\(`claude-code--held-instance-ended-p')."
+  "Return non-nil when BUFFER's instance goes on running without BUFFER."
   (and (plist-get (gethash buffer claude-code--managed) :detachable)
        (not (claude-code--held-instance-ended-p
              (buffer-local-value 'claude-code--exit-event buffer)))
@@ -1219,12 +1009,7 @@ reported its PID -- and whose terminal has not ended with it
            (claude-code--instance-pid buffer))))
 
 (defun claude-code--on-buffer-kill ()
-  "Unregister the instance hosted in the buffer being killed.
-This buffer-local `kill-buffer-hook' is the one report of a buffer closing: a
-non-detachable instance ends with it, and a detachable one that runs on, which
-is announced, goes on as an external session.  A terminal this package does
-not manage retires nothing, and `claude-code-last-instance-exit-hook' runs
-only for the kill that removed the last entry."
+  "Unregister the instance hosted in the buffer being killed."
   (when-let* ((entry (gethash (current-buffer) claude-code--managed)))
     (when (claude-code--runs-on-p (current-buffer))
       (message "Detached %s: its instance runs on as an external session"
@@ -1243,10 +1028,7 @@ only for the kill that removed the last entry."
 
 (defun claude-code--report-exit (buffer event)
   "Record the EVENT BUFFER's terminal ended on, reporting an abnormal end.
-A `ghostel-exit-functions' function: BUFFER dies with its process, and with it
-what a launch that failed printed about why, which is reported with the
-terminal's last lines.  A terminal lost under an instance that runs on is
-left to `claude-code--on-buffer-kill', which announces the detach."
+The report quotes the terminal's last lines, which die with BUFFER."
   (with-current-buffer buffer (setq claude-code--exit-event event))
   (unless (or (equal event "finished\n") (claude-code--runs-on-p buffer))
     (message "%s" (string-join
@@ -1260,14 +1042,8 @@ left to `claude-code--on-buffer-kill', which announces the detach."
                    "\n"))))
 
 (defun claude-code--register (id buffer origin worktree &optional detachable)
-  "Record the instance BUFFER hosts, launched on session ID from ORIGIN.
-Stored under :worktree is the name of a named WORKTREE request, nil otherwise
--- an auto-named one has no name to show until Claude writes the transcript
-that carries it -- and under :detachable whether the instance is DETACHABLE.
-Registering a live BUFFER also wires up the entry's removal: BUFFER is made to
-die with its process, reporting an abnormal exit, so its kill is the one event
-that retires the entry.  An instance on this machine has its sessions/ watched
-\(`claude-code--watch-sessions')."
+  "Register the instance BUFFER hosts, launched on session ID from ORIGIN.
+WORKTREE is its worktree request and DETACHABLE whether it is detachable."
   (with-current-buffer buffer
     (setq-local ghostel-kill-buffer-on-exit t)
     (add-hook 'ghostel-exit-functions #'claude-code--report-exit nil t)
@@ -1286,11 +1062,7 @@ that retires the entry.  An instance on this machine has its sessions/ watched
   "(DIR . DESCRIPTOR) of the watch on this machine's sessions/, or nil.")
 
 (defun claude-code--watch-sessions ()
-  "Watch this machine's sessions/ unless it is watched already.
-The first local instance or view starts the watch, which stays until Emacs
-exits.  It is added again once it has stopped, or when `claude-code-config-dir'
-names another directory, and not before the directory exists.  A directory the
-system refuses to watch leaves the views to `g'."
+  "Watch this machine's sessions/ unless it is watched already."
   (let ((dir (claude-code--sessions-dir)))
     (unless (and (equal (car claude-code--sessions-watch) dir)
                  (file-notify-valid-p (cdr claude-code--sessions-watch)))
@@ -1303,9 +1075,7 @@ system refuses to watch leaves the views to `g'."
               (cons dir watch))))))
 
 (defun claude-code--on-session-file (pid)
-  "React to the sessions/ file of the process PID on this machine changing.
-A managed instance with that PID follows the directory the file names, and
-the change runs `claude-code--sessions-changed'."
+  "React to a change of the sessions/ file of PID, a process on this machine."
   (when-let* ((buffer (seq-find
                        (lambda (buffer)
                          (and (eql (claude-code--instance-pid buffer) pid)
@@ -1317,10 +1087,8 @@ the change runs `claude-code--sessions-changed'."
   (claude-code--sessions-changed))
 
 (defun claude-code--buffer (session)
-  "Return the buffer of SESSION's instance, or signal a `user-error'.
-Every operation on an alive session reaches its instance through here, which
-refuses one no longer running in Emacs: a struct built before its instance
-exited or was detached names a buffer that is gone."
+  "Return the buffer of SESSION's instance.
+Signal a `user-error' when the instance no longer runs in Emacs."
   (let ((buffer (claude-code-session-buffer session)))
     (unless (claude-code--session-process buffer)
       (user-error "Session %s is not running in Emacs"
@@ -1328,33 +1096,30 @@ exited or was detached names a buffer that is gone."
     buffer))
 
 (defcustom claude-code-renderer nil
-  "Renderer to force Claude instances onto, or nil to leave the choice to Claude.
-`inline' is the classic main-screen renderer, which leaves the scrollback and
-the mouse to Emacs; `fullscreen' is the flicker-free alt-screen renderer with
-virtualized scrollback.  Either is forced over Claude's own `tui' setting."
+  "Renderer to force Claude instances onto, or nil for Claude's `tui' setting.
+`inline' leaves the scrollback and the mouse to Emacs; `fullscreen' is the
+alt-screen renderer with virtualized scrollback."
   :type '(choice (const :tag "Default -- Claude's own `tui' setting" nil)
                  (const :tag "Inline -- classic main-screen renderer" inline)
                  (const :tag "Fullscreen -- alt-screen, virtualized scrollback"
                         fullscreen)))
 
 (defun claude-code--renderer-env ()
-  "Return the environment `claude-code-renderer' asks for.
-A list of (NAME . VALUE) cells, a nil VALUE meaning unset and no cells meaning
-leave the environment alone.  Signals a `user-error' for a value naming no
-valid renderer option."
+  "Return the (NAME . VALUE) environment cells `claude-code-renderer' asks for.
+Signal a `user-error' for an unknown value."
   (pcase claude-code-renderer
     ('nil '())
     ('inline '(("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" . "1")))
     ('fullscreen '(("CLAUDE_CODE_NO_FLICKER" . "1")
+                   ;; Unset: an inherited one is read first and forces inline.
                    ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")))
     (other (user-error "Unknown `claude-code-renderer': %S" other))))
 
 (defun claude-code--apply-env (cells)
   "Set the (NAME . VALUE) CELLS in the environment Ghostel will spawn into.
-A `ghostel-pre-spawn-hook' function: the `setq' below is safe only because
-Ghostel binds `process-environment' around the hook."
-  ;; Copied first because `setenv' would otherwise rewrite, in place, the
-  ;; entries that binding shares with Emacs's own environment.
+Call it from `ghostel-pre-spawn-hook', which binds `process-environment'."
+  ;; The binding shares entries with Emacs's own environment, which `setenv'
+  ;; would otherwise edit in place.
   (setq process-environment (copy-sequence process-environment))
   (dolist (cell cells)
     (setenv (car cell) (cdr cell))))
@@ -1366,7 +1131,7 @@ Signal a `user-error' when that host has no such executable."
         (bare (not (file-name-directory program))))
     (or (if bare
             ;; A remote search path ends in `default-directory', which must not
-            ;; supply the CLI.
+            ;; supply PROGRAM.
             (let ((default-directory (concat host "/")))
               (executable-find program t))
           (let ((file (expand-file-name (if (file-name-absolute-p program)
@@ -1392,8 +1157,8 @@ then `exec's PROGRAM under that PID."
 
 (defun claude-code--start-terminal (buffer command env &optional pid)
   "Run COMMAND as the terminal of an instance in BUFFER, with ENV set.
-ENV is a list of cells as `claude-code--apply-env' takes them.  PID is the
-instance's when it is already known, and then no report of it is awaited."
+ENV is a list of (NAME . VALUE) cells.  PID is the instance's when it is
+already known, and then no report of it is awaited."
   ;; Ahead of the spawn: Ghostel refuses a mode change once the terminal
   ;; process is live.
   (with-current-buffer buffer
@@ -1401,6 +1166,8 @@ instance's when it is already known, and then no report of it is awaited."
     (when pid
       (setq-local ghostel-eval-cmds nil
                   claude-code--pid pid)))
+  ;; Set from the hook, in the instance's buffer, where `process-environment'
+  ;; may be buffer-local.
   (let ((env-hook (lambda () (claude-code--apply-env env))))
     ;; The default value is the one Ghostel reads in the instance's own buffer.
     (set-default 'ghostel-pre-spawn-hook
@@ -1413,17 +1180,10 @@ instance's when it is already known, and then no report of it is awaited."
 
 (defun claude-code--launch (id project-root detachable &rest opts)
   "Host a `claude' instance for session ID in a new buffer; return the buffer.
-PROJECT-ROOT is the directory it is launched from and recorded as the instance's
-origin, except that a worktree Claude built is swapped for its parent, with
-`:worktree' defaulting to its name.  A non-nil DETACHABLE makes the instance
-detachable.  OPTS are `:prompt', `:name', `:worktree', `:model' and `:effort'
-as `claude-code--build-args' takes them, or `:resume' ID to resume that
-session rather than start it, which `:worktree' may accompany; the
-`:worktree' request is also recorded in the registry.
-The instance is launched through `claude-code--reporting-command', under
-`claude-code--holding-command' when detachable, with `CLAUDE_CONFIG_DIR' as
-`claude-code--config-env' has it, on `claude-code-renderer' when it names one,
-and with the arguments and environment `claude-code--mcp-wiring' asks for."
+PROJECT-ROOT is where it is launched from, except that a worktree Claude built
+is swapped for its parent, with `:worktree' defaulting to its name.  A non-nil
+DETACHABLE makes the instance detachable.  OPTS are the other keywords
+`claude-code--build-args' takes."
   (require 'ghostel)
   (require 'claude-code-mcp)
   (let* (;; Resolved first so a bad value aborts before a buffer is created.
@@ -1474,14 +1234,10 @@ and with the arguments and environment `claude-code--mcp-wiring' asks for."
                              (detachable (claude-code--detachable-default
                                           project-root)))
   "Spawn a new Claude Code instance for PROJECT-ROOT; return (ID . BUFFER).
-ID is the generated session id -- a session's only durable name, and what a
-caller needs to find the session again once Claude renames BUFFER after its
-terminal title.  PROMPT is an optional initial prompt.  NAME is the session's
-display name, which the sessions view shows in place of any title Claude
-generates for it.
-WORKTREE requests a git worktree: t for an auto-named one, or a string to
-name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
-\"max\").  DETACHABLE makes the instance detachable, defaulting to what
+ID is the new session's id.  PROMPT is an initial prompt and NAME the session's
+display name.  WORKTREE requests a git worktree: t for one Claude names, or the
+name of one to enter or create.  MODEL and EFFORT set the model and the effort
+level (\"low\" to \"max\").  DETACHABLE defaults to what
 `claude-code-detachable' says for PROJECT-ROOT."
   (let ((id (claude-code--new-uuid)))
     (cons id (claude-code--launch id project-root detachable
@@ -1490,13 +1246,7 @@ name it.  MODEL sets the model and EFFORT the effort level (\"low\" to
 
 (defun claude-code--resume (root id binding detachable)
   "Resume session ID under ROOT with worktree BINDING; return its buffer.
-A new instance is detachable when DETACHABLE is non-nil.
-The one resume path: `claude-code-resume' reads BINDING off disk for a caller
-holding nothing but an id, while a caller holding a `claude-code-session' hands
-over the one it already has.  A binding that went stale between the two costs
-nothing, because what makes it a `--worktree\=' argument -- the worktree still
-being a directory -- is decided here and now.  Behaves as `claude-code-resume\='
-documents."
+A new instance is detachable when DETACHABLE is non-nil."
   (let ((runner (gethash id (claude-code--running (file-remote-p root)))))
     (cond
      ((bufferp runner) runner)
@@ -1511,13 +1261,9 @@ documents."
                               &key (detachable (claude-code--detachable-default
                                                 project-root)))
   "Resume session ID for PROJECT-ROOT in a new instance; return its buffer.
-The instance is launched from PROJECT-ROOT and lands wherever the session was
-working, `claude-code--resume-worktree' naming the worktree Claude has
-forgotten.  DETACHABLE makes it detachable, defaulting to what
-`claude-code-detachable' says for PROJECT-ROOT.  When an instance Emacs
-manages already runs ID, return that instance's buffer rather than starting a
-second `claude' for the same session.  Refuses a session a `claude' outside
-Emacs is running."
+When an instance Emacs manages already runs ID, return its buffer instead.
+Refuses a session a `claude' outside Emacs runs.  DETACHABLE defaults to what
+`claude-code-detachable' says for PROJECT-ROOT."
   (let ((root (claude-code--normalize-root project-root)))
     (claude-code--resume
      project-root id
@@ -1527,12 +1273,9 @@ Emacs is running."
 ;;;###autoload
 (defun claude-code-attach (project-root id &optional name)
   "Attach to the detachable instance running session ID; return its buffer.
-The session is one PROJECT-ROOT lists, running as an external session, and the
-instance is found by id when called.  It is hosted in a new buffer, named after
-NAME until Claude's next title, and becomes alive again.  When an instance
-Emacs manages already runs ID, return its buffer.  Refuses a session no process
-runs, one a process other than a detachable instance runs, and one whose socket
-is gone."
+PROJECT-ROOT is a project listing the session.  The new buffer is named after
+NAME, when given, until Claude's next title.  When an instance Emacs manages
+already runs ID, return its buffer."
   (require 'ghostel)
   (let* ((root (claude-code--normalize-root project-root))
          (host (file-remote-p root))
@@ -1550,6 +1293,7 @@ is gone."
                                  (or (claude-code--pid-cwd runner host) root)))
              (dtach (claude-code--resolve-executable claude-code-dtach))
              (buffer (generate-new-buffer
+                      ;; Claude repeats no title on attach.
                       (or (and name (claude-code--ghostel-buffer-name name))
                           (funcall claude-code-buffer-name-function root)))))
         (claude-code--start-terminal
@@ -1558,14 +1302,7 @@ is gone."
         buffer)))))
 
 (defun claude-code-kill (session)
-  "Kill the process running SESSION, leaving the session dead.
-An alive session's instance is the one in the buffer SESSION names (see
-`claude-code--buffer').  A non-detachable instance goes with its buffer, and a
-detachable one, which would outlive it, is sent SIGTERM on its host.  An
-external session's process is sent SIGTERM on the host of its transcript, or
-of its holder before it has one, found by id when called: a session that has
-stopped since SESSION was built is refused, and so is one an instance Emacs
-manages has resumed since, which only that instance's alive row kills."
+  "Kill the process running SESSION, leaving the session dead."
   (let ((id (claude-code-session-id session)))
     (cond
      ((claude-code-session-alive-p session)
@@ -1596,10 +1333,7 @@ manages has resumed since, which only that instance's alive row kills."
                       runner id))))))))
 
 (defun claude-code-detach (session)
-  "Close alive SESSION's buffer, leaving its detachable instance running.
-SESSION goes on as an external session.  Refuses a session no instance runs in
-Emacs, and one whose instance is not detachable, which closing its buffer
-would kill."
+  "Close alive SESSION's buffer, leaving its detachable instance running."
   (let ((buffer (claude-code--buffer session)))
     (unless (plist-get (gethash buffer claude-code--managed) :detachable)
       (user-error "Session %s is not detachable: closing it would kill it"
@@ -1608,9 +1342,7 @@ would kill."
       (kill-buffer buffer))))
 
 (defun claude-code-delete (session)
-  "Delete dead SESSION's transcript from disk.
-Refuses an alive session and one running outside Emacs, checked by id on the
-host of its transcript as well as by SESSION's own flags"
+  "Delete dead SESSION's transcript from disk."
   (let* ((id (claude-code-session-id session))
          (file (claude-code-session-transcript session))
          (runner (gethash id (claude-code--running
@@ -1625,36 +1357,32 @@ host of its transcript as well as by SESSION's own flags"
 
 (defun claude-code-send-text (session text &optional submit)
   "Send TEXT to SESSION's instance, submitting with RET when SUBMIT is non-nil.
-TEXT goes as a bracketed paste, so a RET arriving with it still submits; typed,
-a long TEXT read together with its RET would leave the RET a newline.  Claude
-collapses a long or many-line paste into a placeholder and runs no slash
+Claude collapses a long or many-line TEXT into a placeholder and runs no slash
 command in it."
   (require 'ghostel)
   (with-current-buffer (claude-code--buffer session)
+    ;; Pasted, since a long TEXT typed with its RET leaves the RET a newline.
     ;; An empty paste can make Claude read an image off the clipboard.
     (unless (string-empty-p text)
       (ghostel-paste-string text))
     (when submit (ghostel-send-key "return"))))
 
 (defun claude-code-rename (session name)
-  "Rename SESSION to NAME by sending a /rename command to its instance.
-Claude records the new name as a `custom-title' line in the transcript, which
-is where `claude-code--session-display-name' reads it back on the next refresh."
+  "Rename SESSION to NAME by sending a /rename command to its instance."
   (claude-code-send-text session (format "/rename %s" name) t))
 
 (defun claude-code-interrupt (session)
-  "Send an interrupt signal (SIGINT) to SESSION's instance."
+  "Interrupt SESSION's instance by sending it a Ctrl-C keystroke.
+Two in quick succession while Claude is idle make it exit."
   (require 'ghostel)
   (with-current-buffer (claude-code--buffer session)
     (ghostel-send-C-c)))
 
 (defcustom claude-code-export-config-dir
   (expand-file-name "claude-code-export/" (xdg-cache-home))
-  "Config directory the `claude' exporting a transcript runs with.
-That process files itself under sessions/ as an instance of the session it
-exports, so it is kept away from `claude-code-config-dir', where it would read
-as one.  The CLI creates the directory and keeps nothing there worth keeping.
-An export on a remote host runs with ~/.cache/claude-code-export/ there."
+  "Config directory the `claude' exporting a local transcript runs with.
+The CLI creates it, and keeps nothing there worth keeping.  An export on a
+remote host runs with ~/.cache/claude-code-export/ there."
   :type 'directory)
 
 (defvar claude-code--export-timeout 30
@@ -1674,12 +1402,11 @@ An export on a remote host runs with ~/.cache/claude-code-export/ there."
     (expand-file-name claude-code-export-config-dir)))
 
 (defun claude-code--export-args (file)
-  "Return the CLI arguments that export transcript FILE on request.
-The CLI answers the SDK's `export_conversation' control request without an API
-call, and leaves FILE untouched.  `--safe-mode' keeps the hooks and MCP servers
-of the directory it runs in out of a process that is no session, and leaves
-every built-in tool loaded: the export leaves out a call to a tool that is
-not."
+  "Return the CLI arguments that export transcript FILE on request."
+  ;; Answering `export_conversation' costs no API call.  `--safe-mode' keeps
+  ;; the directory's hooks and MCP servers out but every built-in tool in, as
+  ;; the export leaves out calls to a tool not loaded.  FILE goes as a path
+  ;; because the export's own config dir knows no session ids.
   (list "-p" "--safe-mode" "--input-format" "stream-json"
         "--output-format" "stream-json" "--verbose"
         "--no-session-persistence" (concat "--resume=" file)))
@@ -1689,6 +1416,11 @@ not."
 A `/bin/sh' pipes the export request to PROGRAM and holds that pipe open until
 a line arrives on its own input.  Once PROGRAM exits, the shell prints a line
 of type `claude-code--export-exit' carrying its exit status, then its stderr."
+  ;; The CLI reads no request from a terminal, which is all TRAMP gives a
+  ;; remote process.  It drops a request whose input ends right after it, and
+  ;; exits only once its input ends, which TRAMP cannot signal.  Its stderr
+  ;; waits for the exit so it cannot split the one-line answer, and `cat'
+  ;; keeps its stdout off a terminal, where it pads prompt rows to 80 columns.
   (append (list "/bin/sh" "-c"
                 (concat "r=$1; shift; { printf '%s\\n' \"$r\"; read -r _; } | "
                         "{ e=$(\"$0\" \"$@\" 2>&1 >&3 3>&-); "
@@ -1704,11 +1436,8 @@ of type `claude-code--export-exit' carrying its exit status, then its stderr."
 
 (defun claude-code--export-outcome (line)
   "Return what stdout LINE of a transcript export tells, or nil for nothing.
-\(text . TEXT) carries the exported text; (error . MESSAGE) a failure
-the CLI reported, as its answer to the request or as the result of a run that
-ended; (exit . STATUS) the CLI's exit, as `claude-code--export-command'
-reports it.  A transcript holding no conversation is reported under a session
-id the CLI made up, so the message names none."
+That is (text . TEXT) for the exported text, (error . MESSAGE) for a failure
+the CLI reported, or (exit . STATUS) for the CLI's exit status."
   (when-let* ((obj (ignore-errors
                      (json-parse-string line :null-object nil
                                         :false-object nil)))
@@ -1732,6 +1461,8 @@ id the CLI made up, so the message names none."
                 (message (if (and (vectorp errors) (> (length errors) 0))
                              (mapconcat (lambda (e) (format "%s" e)) errors "; ")
                            (format "%s" (gethash "subtype" obj)))))
+           ;; For a transcript holding no conversation, the CLI names a
+           ;; session id it made up.
            (cons 'error (if (string-prefix-p "No conversation found" message)
                             "No conversation to export"
                           message)))))
@@ -1741,20 +1472,18 @@ id the CLI made up, so the message names none."
 
 (defun claude-code--export-file (session root)
   "Return SESSION's transcript file as it lies now, or signal a `user-error'.
-ROOT is the project SESSION is listed under.  Claude moves a transcript after
-the directory it files the session under (see docs/storage-model.md), so the
-file SESSION names may be gone."
+ROOT is the project SESSION is listed under."
   (let ((id (claude-code-session-id session))
         (file (claude-code-session-transcript session)))
     (or (and file (file-exists-p file) file)
+        ;; Claude can move a transcript to another project directory.
         (plist-get (claude-code--transcript-for
                     (claude-code--normalize-root root) id)
                    :transcript)
         (user-error "No transcript on disk for session %s" id))))
 
 (defun claude-code--export-settle (proc)
-  "Mark PROC's export settled; return non-nil unless it already was.
-Of its answer, its exit, its timeout and a cancel, only the first is heard."
+  "Mark PROC's export settled; return non-nil unless it already was."
   (unless (process-get proc 'claude-code-settled)
     (process-put proc 'claude-code-settled t)))
 
@@ -1768,18 +1497,19 @@ Of its answer, its exit, its timeout and a cancel, only the first is heard."
     (claude-code--export-terminate proc)))
 
 (defun claude-code-export-transcript (session root on-text &optional on-error)
-  "Export SESSION's transcript as Claude's `/export' does; return the process.
-ROOT is the project SESSION is listed under.  The export is asynchronous:
-ON-TEXT is called with the text, or ON-ERROR, `message' by default, with why
-there is none.  Signals a `user-error' when SESSION has no transcript on disk
-or its host cannot run the CLI.
-The text is the conversation as a terminal shows it, at 80 columns, with tool
-calls collapsed; file paths in it are relative to the directory SESSION works
-in."
+  "Export SESSION's transcript as text; return the exporting process.
+ROOT is the project SESSION is listed under.  ON-TEXT is called with the text,
+or ON-ERROR, `message' by default, with why there is none.  Signals a
+`user-error' when SESSION has no transcript on disk or its host cannot run the
+CLI.  The text is the conversation as Claude's export lays it out, 80 columns
+wide and without MCP tool calls."
   (let* ((file (claude-code--export-file session root))
          (on-error (or on-error (lambda (msg) (message "%s" msg))))
+         ;; Claude prints a tool's path under its cwd relative to it.
          (default-directory (file-name-as-directory
                              (claude-code--session-directory session root)))
+         ;; A `claude -p' registers in sessions/ as running the session it
+         ;; resumes, so the export gets a config dir of its own.
          (process-environment
           (cons (concat "CLAUDE_CONFIG_DIR="
                         (claude-code--export-config-dir
@@ -1787,7 +1517,6 @@ in."
                 process-environment))
          (pending '())
          (released nil)
-         ;; The CLI's exit status once reported, and the stderr after it.
          (status nil)
          (stderr '())
          (proc
@@ -1839,8 +1568,7 @@ in."
                                     claude-code-cli (string-trim event))))))))))
     ;; TRAMP picks a remote process's coding system itself.
     (set-process-coding-system proc 'utf-8-unix 'utf-8-unix)
-    ;; Armed until the process ends, answered or not: a CLI the EOF does not
-    ;; end is ended here.
+    ;; Kept after the answer, to end a CLI that hangs once its input closes.
     (process-put proc 'claude-code-timer
                  (run-at-time claude-code--export-timeout nil
                               (lambda ()
@@ -1854,15 +1582,8 @@ in."
 
 
 ;;;; Notifications
-;;
-;; An instance reports what it is doing over OSC 7501, which Ghostel keeps as
-;; program status records and hands, change by change, to the buffer-local
-;; `ghostel-program-status-functions' entry installed here.  Which reports are
-;; announced, what a click does, and why the notification is shaped the way it
-;; is, are in docs/architecture.md.
 
-;; `notifications' ships with Emacs but needs a D-Bus build, so it is required
-;; where it is used rather than at the top level.
+;; `notifications' needs a D-Bus build, so it is required where it is used.
 (declare-function notifications-notify "notifications" (&rest params))
 (declare-function dbus-call-method-asynchronously "dbus"
                   (bus service path interface method handler &rest args))
@@ -1872,62 +1593,46 @@ in."
 (defvar notifications-close-notification-method)
 
 (defcustom claude-code-notify-function #'claude-code-notify-desktop
-  "Function announcing that an instance wants the user's attention.
-Called with the instance's `claude-code-session' and the message to show:
-the one Claude sent with its status report, else one describing the report.
-Set to nil to ignore notifications."
+  "Function announcing that an instance wants the user's attention, or nil.
+Called with the instance's `claude-code-session' and the message to show."
   :type '(choice (const :tag "Disabled" nil) function))
 
 (defcustom claude-code-notify-desktop-entry "emacs"
   "Basename of the desktop entry this Emacs runs as.
-`claude-code-notify-desktop' sends it with every notification so the desktop
-knows which application to raise when one is clicked.  A name matching no
-installed desktop file still notifies, but the click cannot reach Emacs."
+A click on a notification raises the application it names, so it must match
+an installed desktop file for the click to reach Emacs."
   :type 'string)
 
 (defcustom claude-code-notify-urgency 'critical
-  "Urgency `claude-code-notify-desktop' sends with every notification.
-GNOME draws no banner over a fullscreen window below `critical', and a
-`critical' banner stays up until it is acted on instead of timing out."
+  "Urgency `claude-code-notify-desktop' sends with every notification."
   :type '(choice (const :tag "Low -- listed, never bannered" low)
                  (const :tag "Normal -- times out, hidden by fullscreen" normal)
                  (const :tag "Critical -- shows over fullscreen, stays up" critical)))
 
 (defvar claude-code--notify-activation-window 1.0
-  "Seconds a dismissed notification waits for the desktop to raise Emacs.
-The same window bounds how long one click suppresses the closes of the
-notifications dismissed alongside it.")
+  "Seconds a dismissed notification waits for the desktop to raise Emacs.")
 
 (defvar claude-code--notify-claim nil
   "The activation window claimed by the first close of a burst, or nil.
-A cons of (WATCH . TIMER), where WATCH is nil when Emacs already held focus
-and no raise had to be waited for.")
+A cons (WATCH . TIMER), where WATCH is nil when Emacs already held focus.")
 
 (defun claude-code--frame-focused-p (frame)
-  "Non-nil when FRAME is on screen and holds input focus.
-An `unknown' focus state is not focus.  Visibility is asked for separately
-because a minimized frame keeps whatever `last-focus-update' it was left with."
+  "Non-nil when FRAME is on screen and holds input focus."
+  ;; A minimized frame keeps the focus state it was left with.
   (and (eq (frame-visible-p frame) t) (eq (frame-focus-state frame) t)))
 
 (defun claude-code--focused-p ()
-  "Non-nil when any frame has input focus.
-`frame-focus-state' answers for a single frame and several can report focus
-at once, so deciding whether Emacs holds focus means scanning them all."
+  "Non-nil when any frame has input focus."
   (seq-some #'claude-code--frame-focused-p (frame-list)))
 
 (defun claude-code--on-screen-p (buffer)
-  "Non-nil when BUFFER is displayed on a frame holding input focus.
-An instance the user can see needs no announcement, whether or not its window
-is the one being typed in.  Every window showing it is tested, since the same
-instance can sit on a focused frame and an unfocused one at once."
+  "Non-nil when BUFFER is displayed on a frame holding input focus."
   (seq-some (lambda (window)
               (claude-code--frame-focused-p (window-frame window)))
             (get-buffer-window-list buffer nil t)))
 
 (defun claude-code--notify (buffer body)
-  "Announce BODY from BUFFER's instance via `claude-code-notify-function'.
-Silent for an instance that has exited or that Emacs does not manage, and for
-one the user can already see."
+  "Announce BODY from BUFFER's instance via `claude-code-notify-function'."
   (when-let* (((and claude-code-notify-function
                     (claude-code--session-process buffer)
                     (not (claude-code--on-screen-p buffer))))
@@ -1936,8 +1641,7 @@ one the user can already see."
 
 (defvar claude-code--notify-settle 0.5
   "Seconds a reported state must hold before it is announced.
-Claude rewrites its sessions/ status just after the report, and that status is
-what tells a finished turn from one a background shell command keeps going.")
+It must give Claude time to rewrite its sessions/ status after the report.")
 
 (defvar-local claude-code--working-since nil
   "When the instance in this buffer set to work after resting, or nil.")
@@ -1946,12 +1650,7 @@ what tells a finished turn from one a background shell command keeps going.")
   "The timer announcing the root state of this buffer's instance, or nil.")
 
 (defun claude-code--install-notifications (buffer)
-  "Announce BUFFER's instance from the status reports its terminal receives.
-Ghostel's own announcement of them and every OSC 9 or OSC 777 notification
-are silenced, while its mode-line indicator stays.  The bindings are
-buffer-local, so Ghostel terminals this package does not manage keep the
-user's handlers.  BUFFER's window changes, and every focus change while an
-instance runs, close the notifications of an instance that comes into sight."
+  "Announce BUFFER's instance from its status reports, in Ghostel's place."
   (with-current-buffer buffer
     (setq-local ghostel-notification-functions nil)
     (setq-local ghostel-status-notify-states nil)
@@ -1962,13 +1661,8 @@ instance runs, close the notifications of an instance that comes into sight."
                 #'claude-code--schedule-seen))
 
 (defun claude-code--on-status (record-id old new)
-  "Track the current buffer's status record RECORD-ID changing from OLD to NEW.
-Only the root record, \"\", speaks for the session; the others are its
-subagents.  A change of the root's state closes the notifications announcing
-the one it left, and entering `done', `blocked' or `error' is announced once
-it has held for `claude-code--notify-settle' seconds.  A stretch of work
-starts when the root sets to work after resting, and ends with an interrupt,
-a record the user acknowledged, or an announced `done' or `error'."
+  "Track the current buffer's status record RECORD-ID changing from OLD to NEW."
+  ;; "" is the root record, which speaks for the session.
   (when (string-empty-p record-id)
     (let ((state (plist-get new :state)))
       (unless (eq state (plist-get old :state))
@@ -1989,11 +1683,11 @@ a record the user acknowledged, or an announced `done' or `error'."
         (claude-code--close-posted)))))
 
 (defun claude-code--announce (buffer state reported)
-  "Announce BUFFER's instance entering root STATE, reported at time REPORTED.
-A `done' while a background shell command the instance started still runs is
-a turn the command keeps going -- its completion starts the next one -- so it
-neither ends the stretch of work nor announces anything."
+  "Announce BUFFER's instance entering root STATE, reported at time REPORTED."
   (when (and (claude-code--session-process buffer)
+             ;; Claude's sessions/ status reads `shell' while a background shell
+             ;; task runs, monitors included, and the task can start the next
+             ;; turn.  A remote status is only as fresh as the last query.
              (not (and (eq state 'done)
                        (let ((entry (claude-code--instance-entry buffer)))
                          (and (not (claude-code--entry-host entry))
@@ -2009,8 +1703,7 @@ neither ends the stretch of work nor announces anything."
 
 (defun claude-code--status-message (state since reported)
   "Return the body announcing root STATE, reported at time REPORTED.
-For a report Claude sent without a message.  SINCE is when the stretch of
-work it ends began, or nil when that is unknown."
+SINCE is when the stretch of work it ends began, or nil."
   (pcase state
     ('done (if (and since (>= (- reported since) 1))
                (format "Finished after %s"
@@ -2029,9 +1722,7 @@ work it ends began, or nil when that is unknown."
 
 (defun claude-code--display-frames ()
   "Return the frames a jump may land on: this display's, the selected one first.
-`frame-terminal' groups the frames of one display and leaves out the terminal
-frames of `emacsclient -t'.  A minimized frame counts; an invisible one does
-not, since reaching a window on it would bring the frame back."
+A minimized frame counts; an invisible one does not."
   (let ((here (selected-frame)))
     (cons here (seq-filter (lambda (frame)
                              (and (frame-visible-p frame)
@@ -2040,13 +1731,11 @@ not, since reaching a window on it would bring the frame back."
                            (remq here (frame-list))))))
 
 (defun claude-code--tab-shows-p (tab buffer frame)
-  "Non-nil when TAB, a background tab of FRAME, shows BUFFER.
-TAB's window state names its buffers as they were when the tab was left, at
-TAB's time.  Selecting a tab whose window configuration belongs to FRAME puts
-that configuration back, and it holds the buffers themselves, so BUFFER is in
-it if it held a listed name at that time.  Any other tab is rebuilt from the
-state by name, so BUFFER is in it only if it holds a listed name now."
+  "Non-nil when TAB, a background tab of FRAME, shows BUFFER."
   (when-let* ((ws (alist-get 'ws tab))
+              ;; WS names buffers as of when TAB was left.  Selecting TAB brings
+              ;; back those buffers if its window configuration belongs to
+              ;; FRAME, else whichever buffers hold those names now.
               (name (let ((wc (alist-get 'wc tab))
                           (time (alist-get 'time tab)))
                       (if (and time
@@ -2058,9 +1747,9 @@ state by name, so BUFFER is in it only if it holds a listed name now."
 
 (defun claude-code--tab-showing (buffer frame)
   "Return the background tab of FRAME showing BUFFER, or nil.
-When several do, the one left most recently.  The tabs are read off the frame
-parameter: `tab-bar-tabs' on a frame other than the selected one renames that
-frame's current tab after the selected frame's buffer."
+When several do, the one left most recently."
+  ;; `tab-bar-tabs' would rename an unselected FRAME's current tab after the
+  ;; selected frame's buffer.
   (car (sort (seq-filter (lambda (tab)
                            (claude-code--tab-shows-p tab buffer frame))
                          (frame-parameter frame 'tabs))
@@ -2068,10 +1757,7 @@ frame's current tab after the selected frame's buffer."
              :reverse t)))
 
 (defun claude-code--instance-place (buffer)
-  "Return where BUFFER is displayed: a window, (FRAME . TAB), or nil.
-A live window on any frame of the display outranks every background tab:
-restoring a tab would show the instance a second time, and Ghostel sizes the
-pty to the smallest window showing it.  The selected frame is searched first."
+  "Return where BUFFER is displayed: a window, (FRAME . TAB), or nil."
   (let ((frames (claude-code--display-frames)))
     (or (seq-some (lambda (frame) (get-buffer-window buffer frame)) frames)
         (seq-some (lambda (frame)
@@ -2080,10 +1766,7 @@ pty to the smallest window showing it.  The selected frame is searched first."
                   frames))))
 
 (defun claude-code--jump-to (buffer)
-  "Select a window showing BUFFER, in whatever tab and frame, or pop it up.
-An instance shown nowhere -- or a tab that turns out not to show it -- is
-displayed with `pop-to-buffer', deliberately not `claude-code--show': a
-notification is no reason to take a sessions view's window."
+  "Select a window showing BUFFER, in whatever tab and frame, or pop it up."
   (pcase (claude-code--instance-place buffer)
     ((and (pred windowp) window)
      (unless (eq (window-frame window) (selected-frame))
@@ -2092,7 +1775,7 @@ notification is no reason to take a sessions view's window."
     (`(,frame . ,tab)
      (unless (eq frame (selected-frame))
        (select-frame-set-input-focus frame))
-     ;; Numbered as `tab-bar-select-tab' counts, through `tab-bar-tabs-function'.
+     ;; `tab-bar-select-tab' numbers tabs as `tab-bar-tabs-function' lists them.
      (when-let* ((index (seq-position (funcall tab-bar-tabs-function) tab #'eq)))
        (let ((inhibit-message t))
          (tab-bar-select-tab (1+ index))))
@@ -2102,32 +1785,28 @@ notification is no reason to take a sessions view's window."
     (_ (pop-to-buffer buffer))))
 
 (defun claude-code--notify-show (buffer)
-  "Display the instance BUFFER hosts, unless it has exited by then.
-The display runs from a timer so that it does not rearrange windows inside
-the D-Bus handler or focus hook that asked for it."
+  "Display the instance BUFFER hosts, unless it has exited by then."
+  ;; Not inside the D-Bus handler or focus hook that asked for it.
   (run-at-time 0 nil
                (lambda ()
                  (when (buffer-live-p buffer)
                    (claude-code--jump-to buffer)))))
 
 (defun claude-code--notify-follow (buffer)
-  "Display BUFFER's instance if its notification was the one clicked.
-The first close of a burst is the clicked one, and it claims
-`claude-code--notify-activation-window' seconds.  Within that window the
-closes of the notifications dismissed alongside it are ignored, and a raise --
-which only a click produces -- displays the instance.  An already-focused
-Emacs has no raise coming, so it displays at once."
+  "Display BUFFER's instance if its notification was the one clicked."
+  ;; A click dismisses the notifications grouped with it too, so only the
+  ;; first close of a burst counts.
   (unless claude-code--notify-claim
     (let ((expiry (run-at-time claude-code--notify-activation-window nil
                                #'claude-code--notify-retire)))
       (if (claude-code--focused-p)
+          ;; With no raise coming, a wave-away jumps too.
           (progn
             (setq claude-code--notify-claim (cons nil expiry))
             (claude-code--notify-show buffer))
         (let (watch)
-          ;; Only the watch is dropped once the raise lands; the claim stands
-          ;; until it expires, so a close arriving behind the raise is still
-          ;; ignored rather than jumping again.
+          ;; Only a click raises Emacs.  The claim outlives the watch, so a
+          ;; close arriving behind the raise cannot jump again.
           (setq watch (lambda ()
                         (when (claude-code--focused-p)
                           (remove-function after-focus-change-function watch)
@@ -2139,25 +1818,20 @@ Emacs has no raise coming, so it displays at once."
   "Desktop notifications posted for the instance in this buffer, still up.")
 
 (defvar-local claude-code--close-count 0
-  "How many times `claude-code--close-posted' has run in this buffer.
-`claude-code-notify-desktop' compares it across a post.")
+  "How many times `claude-code--close-posted' has run in this buffer.")
 
 (defun claude-code--close-notification (notification)
-  "Ask the desktop to close NOTIFICATION, without waiting for its answer.
-A state change closes from inside Ghostel's status hook, where a wait would
-let Ghostel handle newer terminal events ahead of older ones still queued.
-A close that cannot be sent is only reported, since an error escaping
-`kill-buffer-hook' would keep the buffer alive."
+  "Ask the desktop to close NOTIFICATION, without waiting for its answer."
+  ;; An error escaping `kill-buffer-hook' would keep the buffer alive.
   (with-demoted-errors "claude-code: closing a notification: %S"
+    ;; Waiting inside Ghostel's status hook would let Ghostel handle newer
+    ;; terminal output ahead of older output still queued.
     (dbus-call-method-asynchronously
      :session notifications-service notifications-path notifications-interface
      notifications-close-notification-method nil :uint32 notification)))
 
 (defun claude-code--close-posted ()
-  "Close the desktop notifications still up for this buffer's instance.
-Run when the state they announced ends, when the instance comes into sight,
-and from the buffer's `kill-buffer-hook', since a click on what a dead
-instance left behind would have nothing to open."
+  "Close the desktop notifications still up for this buffer's instance."
   (cl-incf claude-code--close-count)
   (mapc #'claude-code--close-notification claude-code--posted)
   (setq claude-code--posted nil))
@@ -2166,9 +1840,7 @@ instance left behind would have nothing to open."
   "The timer about to close the notifications of instances in sight, or nil.")
 
 (defun claude-code--schedule-seen (&rest _)
-  "Close the notifications of every instance in sight, from a timer.
-An instance buffer's `window-buffer-change-functions' member and an
-`after-focus-change-function' advice.  One timer serves a burst of changes."
+  "Close the notifications of every instance in sight, from a timer."
   (unless claude-code--seen-timer
     (setq claude-code--seen-timer
           (run-at-time 0 nil #'claude-code--close-seen))))
@@ -2188,10 +1860,7 @@ An instance buffer's `window-buffer-change-functions' member and an
 (add-hook 'claude-code-last-instance-exit-hook #'claude-code--unwatch-focus)
 
 (defun claude-code-notify-desktop (session body)
-  "Post BODY as a desktop notification that jumps to SESSION when clicked.
-The notification declares no actions: a desktop with one to invoke hands the
-click to Emacs instead of raising it, and the raise is what the jump needs.
-It is remembered in SESSION's buffer, for `claude-code--close-posted'."
+  "Post BODY as a desktop notification that jumps to SESSION when clicked."
   (require 'notifications)
   (let* ((buffer (claude-code-session-buffer session))
          (live (buffer-live-p buffer))
@@ -2207,10 +1876,11 @@ It is remembered in SESSION's buffer, for `claude-code--close-posted'."
                          (with-current-buffer buffer
                            (setq claude-code--posted
                                  (delq notification claude-code--posted))))
+                       ;; A click closes it as `dismissed', like a wave-away.
                        (when (eq reason 'dismissed)
                          (claude-code--notify-follow buffer))))))
-    ;; Posting waits on D-Bus, where the buffer's notifications can be closed,
-    ;; or the buffer killed, before this one is up.
+    ;; While posting waits on D-Bus, the buffer can close its notifications
+    ;; or be killed.
     (when live
       (if (and (buffer-live-p buffer)
                (= count (buffer-local-value 'claude-code--close-count buffer)))
@@ -2221,34 +1891,27 @@ It is remembered in SESSION's buffer, for `claude-code--close-posted'."
 
 
 ;;;; View
-;;
-;; A `tabulated-list-mode' buffer listing every session of a project, grouped by
-;; liveness or by status (Emacs 30 `tabulated-list-groups' prints a header line
-;; per group); a collapsed group simply contributes no entry rows.
 
 (defvar-local claude-code--project nil
   "Project root a sessions view is scoped to.")
 (defvar-local claude-code--group-by 'state
   "How the sessions view groups rows: `state' (liveness) or `status'.")
 (defvar-local claude-code--collapsed nil
-  "List of collapsed group names in a sessions view.
-`claude-code-sessions-mode' seeds this with the \"dead\" group so it starts
-folded.")
+  "List of collapsed group names in a sessions view.")
 (defvar-local claude-code--marks nil
-  "List of the keys (`claude-code--row-key') of the marked rows in a view.")
+  "List of the row keys of the marked rows in a sessions view.")
 (defvar-local claude-code--session-table nil
   "Hash of row key -> struct for every row `claude-code--read-view' read.")
 (defvar-local claude-code--usage-table nil
-  "Hash of row key -> (CPU . RSS) for every row `claude-code--read-view' read.")
+  "Hash of row key -> (CPU . RSS) for the alive rows `claude-code--read-view' read.")
 (defvar-local claude-code--stale nil
   "Non-nil when a change reached a sessions view while no window showed it.")
 
 ;;;;; Formatting
 
 (defun claude-code--row-key (session)
-  "Return the key of SESSION's row: its instance's buffer, or else its id.
-Keyed by the buffer, an instance keeps its row, and the point and mark on it,
-when `/clear', `/resume' or `/branch' moves it onto another session."
+  "Return the key of SESSION's row: its instance's buffer, or else its id."
+  ;; An instance keeps its row across `/clear', `/resume' and `/branch'.
   (or (claude-code-session-buffer session) (claude-code-session-id session)))
 
 (defun claude-code--status-display (session)
@@ -2334,9 +1997,8 @@ USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
 
 (defun claude-code--group-header (key sessions collapsed)
   "Return the header line for group KEY holding SESSIONS.
-A COLLAPSED group also counts how many of them are marked and how many carry
-each turn end, or are attachable, standing in for the tags and flags it
-is not showing."
+A COLLAPSED group's header also counts the marks, turn ends and attachable
+sessions it hides."
   (let ((counts
          (when collapsed
            (cl-loop for (label . pred)
@@ -2365,17 +2027,15 @@ sorts lowest."
        (or (funcall get (gethash (car b) claude-code--usage-table)) -1))))
 
 (defun claude-code--entry-time (entry)
-  "Return the last-active time of ENTRY's session as a float, infinity if unknown.
-ENTRY is a tabulated-list entry whose car is the row key, looked up in
-`claude-code--session-table'."
+  "Return the last-active time of ENTRY's session as a float, infinity if unknown."
   (if-let* ((session (gethash (car entry) claude-code--session-table))
             (time (claude-code-session-last-active session)))
       (float-time time)
+    ;; No time means no transcript yet: the session is the newest.
     1.0e+INF))
 
 (defun claude-code--time-less-p (a b)
-  "Order tabulated-list entries A and B by their session's last-active time.
-A session without a known time has no transcript yet, and sorts as newest."
+  "Order tabulated-list entries A and B by their session's last-active time."
   (< (claude-code--entry-time a) (claude-code--entry-time b)))
 
 (defun claude-code--status-order (entry)
@@ -2395,10 +2055,7 @@ A session without a known time has no transcript yet, and sorts as newest."
 
 (defun claude-code--read-view ()
   "Read the current view's sessions and their usage into its tables.
-`claude-code--session-table' and `claude-code--usage-table' are what every
-reprint draws, so this is the one place a view reads its project.  Also prunes
-`claude-code--marks' to the rows read, so a mark cannot outlive its row and
-come back armed."
+Also prune `claude-code--marks' to the rows read."
   (let* ((sessions (claude-code-project-sessions claude-code--project))
          (host (file-remote-p claude-code--project))
          ;; One table shared by every row, and built only where a subtree
@@ -2422,9 +2079,7 @@ come back armed."
                       claude-code--marks))))
 
 (defun claude-code--tabulated-groups ()
-  "Return the grouped rows of the view's last read, honouring collapse state.
-The view's variable `tabulated-list-groups', so every reprint draws what
-`claude-code--read-view' last read, with no read of its own."
+  "Return the grouped rows of the view's last read, honouring collapse state."
   (let ((now (current-time))
         (buckets (make-hash-table :test 'equal))
         (order '()))
@@ -2457,18 +2112,14 @@ The view's variable `tabulated-list-groups', so every reprint draws what
     (gethash id claude-code--session-table)))
 
 (defun claude-code--eldoc-session (&rest _)
-  "Return the documentation of the session on the current line, or nil.
-The view's `eldoc-documentation-functions' member: the turn end's
-message, then the recap.  Both are struct fields, so this answers
-synchronously by returning the string."
+  "Return the turn end's message and the recap of the session at point, or nil."
   (when-let* ((session (claude-code--session-at-point))
               (parts (delq nil (list (claude-code-session-turn-end-message session)
                                      (claude-code-session-recap session)))))
     (string-join parts "\n\n")))
 
 (defun claude-code--group-at-point ()
-  "Return the key of the group the current line belongs to, or nil.
-Point may be on the group header or on one of the group's rows."
+  "Return the key of the group the current line belongs to, or nil."
   (or (get-text-property (line-beginning-position) 'claude-code-group)
       (when-let* ((s (claude-code--session-at-point)))
         (claude-code--group-key s))))
@@ -2491,15 +2142,13 @@ Return nil and leave point alone when no line matches."
         (lambda () (equal key (get-text-property (point) 'claude-code-group))))))
 
 (defun claude-code--print-entry (id cols)
-  "Print the row for ID with COLS, tagging it when ID is in `claude-code--marks'.
-The view's `tabulated-list-printer': tagging here rather than after the fact
-keeps a mark visible through reprints that bypass `claude-code--redraw'.  The
-row carries its session's id (`claude-code--line-session')."
+  "Print the row for ID with COLS, tagging it when ID is in `claude-code--marks'."
   (let ((start (point)))
     (tabulated-list-print-entry id cols)
     (put-text-property start (point) 'claude-code-session
                        (claude-code-session-id
                         (gethash id claude-code--session-table))))
+  ;; Tagging here keeps marks through tabulated-list's own reprints.
   (when (member id claude-code--marks)
     (save-excursion
       (forward-line -1)
@@ -2507,8 +2156,7 @@ row carries its session's id (`claude-code--line-session')."
 
 (defun claude-code--target-sessions (&rest liveness)
   "Return the marked sessions, or the session at point when none are marked.
-LIVENESS, when given, are the states (`claude-code--session-liveness') to keep,
-so a command's targets are exactly the ones its model operation accepts."
+LIVENESS, when given, are the liveness states to keep."
   (let ((targets (if claude-code--marks
                      (delq nil (mapcar (lambda (row)
                                          (gethash row claude-code--session-table))
@@ -2520,11 +2168,9 @@ so a command's targets are exactly the ones its model operation accepts."
       targets)))
 
 (defun claude-code--act-on (targets operation done)
-  "Call OPERATION on each session in TARGETS, then update every view.
-A refusal from OPERATION does not end the batch: the other targets are still
-acted on and the refusals reported, DONE naming what OPERATION did.  Only the
-rows acted on lose their marks, leaving a refused one armed for a retry, and
-the redraw happens however the batch ends."
+  "Call OPERATION on each session in TARGETS, then update the views on their host.
+A target OPERATION refuses with a `user-error' is skipped and stays marked; the
+refusals are reported after DONE, the verb for the targets acted on."
   (let ((acted '())
         (refused '()))
     (unwind-protect
@@ -2532,8 +2178,6 @@ the redraw happens however the batch ends."
           (condition-case err
               (progn (funcall operation session)
                      (push (claude-code--row-key session) acted))
-            ;; A refusal is a `user-error' and belongs in the report; a real
-            ;; fault must still reach the debugger.
             (user-error (push (error-message-string err) refused))))
       (claude-code--drop-marks acted)
       (claude-code--refresh-views (file-remote-p claude-code--project)))
@@ -2542,12 +2186,7 @@ the redraw happens however the batch ends."
                (string-join (nreverse refused) "; ")))))
 
 (defun claude-code--view-outdated-p ()
-  "Return non-nil when Emacs knows a remote view no longer shows its instances.
-A view of a remote project is read only on `g' and by the commands that change
-its sessions.  Emacs knows without asking the host when an instance of the
-project starts or closes, and when a drawn one reports another PID or turn
-end.  A view of a local project is read again on each of these, so it never
-is."
+  "Return non-nil when Emacs knows a remote view no longer shows its instances."
   (when (file-remote-p claude-code--project)
     (or (seq-some
          (lambda (session)
@@ -2573,8 +2212,7 @@ is."
 
 (defun claude-code--offer-refresh ()
   "Offer to read an outdated view again instead of acting on it.
-Accepting reads it and signals a `user-error', so the command acting on the
-view stops; declining leaves the command to act on the view as drawn."
+Accepting refreshes the view and signals a `user-error' to abort the caller."
   (when (and (claude-code--view-outdated-p)
              (yes-or-no-p
               (format "Sessions on %s changed since this view was read.  \
@@ -2584,15 +2222,12 @@ Refresh instead? "
     (user-error "Refreshed the view; nothing was done")))
 
 (defun claude-code--instance-at-point ()
-  "Return the alive session on the current line, or signal a `user-error'.
-Aliveness is tested through the live process, not the row's `alive-p': a view
-of a remote project is not redrawn when an instance leaves Emacs, so a session
-that left since the last refresh still draws as alive.  The error names that
-row's remedy."
+  "Return the alive session on the current line, or signal a `user-error'."
   (let* ((session (or (claude-code--session-at-point)
                       (user-error "No session on this line")))
          (id (claude-code-session-id session)))
     (cond
+     ;; A remote view's row can still read alive after its instance left.
      ((claude-code--session-process (claude-code-session-buffer session)) session)
      ((claude-code-session-external-p session)
       (user-error "Session %s is running outside Emacs" id))
@@ -2607,6 +2242,7 @@ row's remedy."
 Only windows on the selected frame count, the selected one first, and a
 dedicated view window is never taken."
   (let* ((views (claude-code--views))
+         ;; Shown twice, the terminal would take the smaller window's size.
          (window (or (get-buffer-window buffer)
                      (seq-find (lambda (w)
                                  (and (memq (window-buffer w) views)
@@ -2623,8 +2259,7 @@ dedicated view window is never taken."
     (user-error "Not in a Claude sessions buffer")))
 
 (defun claude-code--line-key ()
-  "Return what names the current line across a reprint, or nil.
-A row is named by its entry id, a group header by its group's key."
+  "Return what names the current line across a reprint, or nil."
   (if-let* ((id (tabulated-list-get-id)))
       (cons 'row id)
     (when-let* ((group (get-text-property (line-beginning-position)
@@ -2636,7 +2271,7 @@ A row is named by its entry id, a group header by its group's key."
   (get-text-property (line-beginning-position) 'claude-code-session))
 
 (defun claude-code--row-place (pos)
-  "Return POS as (KEY SESSION LINE . COLUMN), for `claude-code--row-pos'."
+  "Return POS as (KEY SESSION LINE . COLUMN)."
   (save-excursion
     (goto-char pos)
     (cons (claude-code--line-key)
@@ -2644,13 +2279,12 @@ A row is named by its entry id, a group header by its group's key."
                 (cons (line-number-at-pos) (current-column))))))
 
 (defun claude-code--row-pos (place)
-  "Return the position `claude-code--row-place' PLACE names in the reprint.
-That is its column on the line its key names, else on the row of its session,
-whose key changes as it gains or loses an instance, else on its line."
+  "Return the position `claude-code--row-place' PLACE names in the reprint."
   (pcase-let ((`(,key ,session ,line . ,column) place))
     (save-excursion
       (unless (or (and key (claude-code--goto-line-where
                             (lambda () (equal (claude-code--line-key) key))))
+                  ;; The key changes as a session gains or loses an instance.
                   (and session (claude-code--goto-line-where
                                 (lambda ()
                                   (equal (claude-code--line-session) session)))))
@@ -2661,9 +2295,7 @@ whose key changes as it gains or loses an instance, else on its line."
 
 (defun claude-code--redraw (&optional group)
   "Reprint the view's last read, keeping every window showing it on its row.
-The view's own point and each window's point and start are found again by the
-row or group header they were on, and by their line when it is no longer
-printed.  GROUP, when given, puts point on that group's header instead."
+GROUP, when given, puts point on that group's header instead."
   (let ((windows (mapcar (lambda (window)
                            (list window
                                  (claude-code--row-place (window-point window))
@@ -2678,15 +2310,12 @@ printed.  GROUP, when given, puts point on that group's header instead."
   (claude-code--goto-group group))
 
 (defun claude-code--refresh-view (&rest _)
-  "Read the current view's project again and redraw the view.
-Also the view's `revert-buffer-function', whose arguments it ignores."
+  "Read the current view's project again and redraw the view."
   (claude-code--read-view)
   (claude-code--redraw))
 
 (defun claude-code-sessions-refresh ()
-  "Read the sessions again and redraw the view.
-In a local project's view, also start watching this machine's sessions/
-\(`claude-code--watch-sessions')."
+  "Read the sessions again and redraw the view."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (unless (file-remote-p claude-code--project)
@@ -2694,9 +2323,7 @@ In a local project's view, also start watching this machine's sessions/
   (claude-code--refresh-view))
 
 (defun claude-code--views ()
-  "Return every sessions-view buffer that names a project, displayed or not.
-A buffer left in the mode without one (`claude-code-sessions-mode' run by hand)
-has nothing to list, so it is not a view for these purposes."
+  "Return every sessions-view buffer that names a project, displayed or not."
   (seq-filter (lambda (buffer)
                 (with-current-buffer buffer
                   (and (derived-mode-p 'claude-code-sessions-mode)
@@ -2705,24 +2332,20 @@ has nothing to list, so it is not a view for these purposes."
 
 (defun claude-code--update-view ()
   "Refresh the current view while a window shows it, else once one does.
-A remote project's view out of sight is left as it is: Emacs shows a view
-during redisplay, where a read over the network would freeze it."
+A remote view out of sight is left as it is."
   (cond ((get-buffer-window-list nil nil t) (claude-code--refresh-view))
+        ;; Catching up runs in redisplay; a remote read there would hang Emacs.
         ((not (file-remote-p claude-code--project))
          (setq claude-code--stale t))))
 
 (defun claude-code--redraw-if-stale (window)
-  "Refresh the current view if WINDOW now shows it and a change reached it.
-A buffer-local `window-buffer-change-functions' entry, which also runs when
-WINDOW stops showing the view."
+  "Refresh the current view if WINDOW now shows it and a change reached it."
+  ;; Also called for a window that has just stopped showing this view.
   (when (and claude-code--stale (eq (window-buffer window) (current-buffer)))
     (claude-code--refresh-view)))
 
 (defun claude-code--refresh-views (&optional host)
-  "Update every view of a project on HOST, this machine when nil.
-Which sessions a view lists is not exclusive to it (see
-`claude-code-project-sessions'), but a session is listed only by views of its
-own host.  Also a `claude-code--sessions-changed-hook' entry."
+  "Update every view of a project on HOST, this machine when nil."
   (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
       (when (equal (file-remote-p claude-code--project) host)
@@ -2731,19 +2354,14 @@ own host.  Also a `claude-code--sessions-changed-hook' entry."
 (add-hook 'claude-code--sessions-changed-hook #'claude-code--refresh-views)
 
 (defun claude-code--drop-marks (rows)
-  "Unmark the rows whose keys are ROWS in every sessions view.
-A killed external session stays listed under its key, so the pruning
-`claude-code--read-view' does would otherwise keep its mark armed."
+  "Unmark the rows whose keys are ROWS in every sessions view."
   (dolist (buffer (claude-code--views))
     (with-current-buffer buffer
       (setq claude-code--marks
             (cl-set-difference claude-code--marks rows :test #'equal)))))
 
 (defun claude-code-sessions-toggle-group ()
-  "Collapse or expand the group at point.
-Works whether point is on a group header or on one of the group's rows: in the
-latter case the row's session determines the enclosing group.  Point stays on
-the group's header."
+  "Collapse or expand the group the current line belongs to."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (when-let* ((group (claude-code--group-at-point)))
@@ -2753,11 +2371,9 @@ the group's header."
     (claude-code--redraw group)))
 
 (defun claude-code--visit-session (session display)
-  "Show SESSION's instance buffer through DISPLAY, getting it one if it has none.
-The instance the row was drawn for is shown while it runs, even once a
-`/clear' has moved it onto another session, which refreshes the views, and
-refused once it has left Emacs.  An external session a detachable instance
-runs is attached, and any other session is resumed."
+  "Show SESSION's instance through DISPLAY, attaching or resuming it as needed.
+The instance the row was drawn for is shown while it runs, even once it has
+moved onto another session."
   (let* ((drawn (claude-code-session-buffer session))
          (id (claude-code-session-id session))
          (buffer (cond
@@ -2799,9 +2415,8 @@ An attachable session is attached first, and a dead one resumed."
                               #'switch-to-buffer-other-window))
 
 (defcustom claude-code-vc-function #'vc-dir
-  "Function showing the version-control status of a working tree.
-Called with the directory of the session at point by
-`claude-code-sessions-vc'; `magit-status' takes the same argument."
+  "Function called with a directory to show its version-control status.
+`magit-status' fits too."
   :type 'function)
 
 (defun claude-code-sessions-vc ()
@@ -2832,7 +2447,7 @@ Called with the directory of the session at point by
     (tabulated-list-put-tag " " t)))
 
 (defun claude-code--confirm (verb targets)
-  "Ask whether to VERB the sessions TARGETS, naming each by its display name."
+  "Ask whether to VERB the sessions TARGETS."
   (yes-or-no-p
    (format "%s %s? " verb
            (mapconcat (lambda (session)
@@ -2843,8 +2458,7 @@ Called with the directory of the session at point by
                       targets ", "))))
 
 (defun claude-code-sessions-kill ()
-  "Kill the processes of the marked running sessions, or of the one at point.
-A running session is an alive or an external one; see `claude-code-kill'."
+  "Kill the processes of the marked running sessions, or of the one at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (claude-code--offer-refresh)
@@ -2855,8 +2469,7 @@ A running session is an alive or an external one; see `claude-code-kill'."
         (claude-code--act-on targets #'claude-code-kill "Killed")))))
 
 (defun claude-code-sessions-detach ()
-  "Detach the marked alive sessions, or the one at point.
-See `claude-code-detach'."
+  "Detach the marked alive sessions, or the one at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (claude-code--offer-refresh)
@@ -2884,7 +2497,7 @@ See `claude-code-detach'."
     (claude-code-rename session (read-string "New name: "))))
 
 (defun claude-code-sessions-interrupt ()
-  "Interrupt (SIGINT) the alive session at point."
+  "Interrupt the alive session at point."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (claude-code-interrupt (claude-code--instance-at-point)))
@@ -2905,9 +2518,7 @@ See `claude-code-detach'."
   (claude-code--redraw))
 
 (defun claude-code-sessions-transcript ()
-  "Show the transcript of the session at point beside the view.
-The text is Claude's own export.  The view stays selected, and the next row's
-transcript takes the same window."
+  "Show the transcript of the session at point beside the view."
   (interactive nil claude-code-sessions-mode)
   (claude-code--ensure-sessions-mode)
   (display-buffer
@@ -2950,9 +2561,7 @@ transcript takes the same window."
 
 (defun claude-code--transcript-fill (text)
   "Replace the current buffer's text with TEXT, keeping every place in it.
-A window, or the buffer's own point, that was at the end stays there, at the
-latest of the conversation, with as much of it in view as fits.  Any other
-keeps its line and column, and a window the line its display started on."
+A point at the end stays at the end, and any other keeps its line and column."
   (let ((windows (mapcar (lambda (window)
                            (list window
                                  (claude-code--text-place (window-point window))
@@ -2986,10 +2595,7 @@ keeps its line and column, and a window the line its display started on."
             (buffer-list)))
 
 (defun claude-code--transcript-export (session root)
-  "Export SESSION's transcript, listed under ROOT, into its buffer; return it.
-The buffer is made when SESSION has none, and an export it still awaits is
-abandoned for this one.  The export starts first, so a session it refuses
-leaves no empty buffer behind."
+  "Export SESSION's transcript, listed under ROOT, into its buffer; return it."
   (let* ((id (claude-code-session-id session))
          (answer (lambda (fn)
                    (lambda (arg)
@@ -2997,6 +2603,7 @@ leaves no empty buffer behind."
                        (setq claude-code--transcript-export nil
                              mode-line-process nil)
                        (funcall fn arg)))))
+         ;; Before the buffer, so a refused export leaves no empty one behind.
          (proc (claude-code-export-transcript
                 session root
                 (funcall answer #'claude-code--transcript-fill)
@@ -3033,12 +2640,11 @@ leaves no empty buffer behind."
 (define-derived-mode claude-code-transcript-mode special-mode "Claude Transcript"
   "Major mode showing a session's transcript as Claude exports it.
 \\<claude-code-transcript-mode-map>\\[revert-buffer] exports it again.
-Claude wraps the text at 80 columns, so a narrower window truncates its lines
-rather than wrapping them a second time.
 
 \\{claude-code-transcript-mode-map}"
   :interactive nil
   (buffer-disable-undo)
+  ;; Claude already wraps the export.
   (setq-local truncate-lines t)
   (setq-local revert-buffer-function #'claude-code--transcript-revert)
   (add-hook 'change-major-mode-hook #'claude-code--transcript-abandon nil t)
@@ -3071,8 +2677,7 @@ rather than wrapping them a second time.
 \\{claude-code-sessions-mode-map}"
   (setq-local claude-code--session-table (make-hash-table :test 'equal))
   (setq-local claude-code--usage-table (make-hash-table :test 'equal))
-  ;; Dead sessions are folded by default.  A fresh list keeps `toggle-group's
-  ;; destructive `delete' from mutating shared state.
+  ;; Fresh, since `claude-code-sessions-toggle-group' deletes from it in place.
   (setq-local claude-code--collapsed (list "dead"))
   (setq-local tabulated-list-padding 2)
   (setq-local tabulated-list-printer #'claude-code--print-entry)
@@ -3085,8 +2690,7 @@ rather than wrapping them a second time.
                             :right-align t)
                       (list "Mem" 8 (claude-code--num-sorter #'cdr)
                             :right-align t)
-                      ;; Name is last so it is never truncated and fills the
-                      ;; remaining window width.
+                      ;; Last, so it fills the remaining width untruncated.
                       '("Name" 26 t)))
   ;; A fresh list: `tabulated-list' reverses a sort by mutating its key.
   (setq-local tabulated-list-sort-key (list "Status"))
@@ -3102,12 +2706,9 @@ rather than wrapping them a second time.
 
 (defun claude-code--current-project ()
   "Return (ROOT . WORKTREE) for the current buffer's commands to act on.
-In order: the project `project-current-directory-override' names, as
-`project-switch-project' sets it; a sessions view's own; an instance's, from
-`claude-code--instance-project'; the buffer's `project.el' project, prompted
-for when it has none.  A `project.el' root inside a Claude worktree resolves to
-its parent, WORKTREE naming the worktree (see \"Worktree session\" in
-docs/glossary.md)."
+A Claude worktree resolves to its parent project, WORKTREE naming it.  Prompts
+for a project when the buffer has none."
+  ;; Set by `project-switch-project', whose choice outranks the buffer's own.
   (or (unless project-current-directory-override
         (if claude-code--project
             (cons claude-code--project nil)
@@ -3117,10 +2718,7 @@ docs/glossary.md)."
         (or (claude-code--worktree-parent root) (cons root nil)))))
 
 (defun claude-code--instance-project ()
-  "Return (ROOT . WORKTREE) for the instance hosted in this buffer, or nil.
-ROOT is the instance's `claude-code--origin-project'.  WORKTREE is the
-worktree of ROOT the buffer's directory -- the one the instance works in --
-names, nil when it names none."
+  "Return (ROOT . WORKTREE) for the instance hosted in this buffer, or nil."
   (when-let* ((origin (plist-get (gethash (current-buffer) claude-code--managed)
                                  :origin)))
     (let ((root (claude-code--origin-project origin))
@@ -3133,22 +2731,18 @@ names, nil when it names none."
   (car (claude-code--current-project)))
 
 (defun claude-code--args-worktree (args)
-  "Return the worktree ARGS ask for: a name, t for an unnamed one, or nil.
-`transient-arg-value' knows only the named spelling, so both are read here.
-An empty name reads as the unnamed request, which is what the empty infix value
-means and the only reading the CLI would not reject."
+  "Return the worktree ARGS ask for: a name, t for an unnamed one, or nil."
   (cond ((member "--worktree" args) t)
         ((seq-some (lambda (arg)
                      (and (stringp arg)
                           (string-prefix-p "--worktree=" arg)
                           (let ((name (substring arg (length "--worktree="))))
+                            ;; The CLI rejects an empty name.
                             (if (string-empty-p name) t name))))
                    args))))
 
 (defun claude-code--spawn-session (root &optional args)
-  "Create a session for ROOT with the options in ARGS and display it.
-ARGS comes from a live `claude-code-spawn-menu'; the `interactive' form reads
-ROOT from that menu's scope, falling back to `claude-code--project-root'."
+  "Create a session for ROOT with the options in ARGS and display it."
   (interactive (if transient-current-command
                    (list (or (transient-scope) (claude-code--project-root))
                          (transient-args transient-current-command))
@@ -3159,27 +2753,22 @@ ROOT from that menu's scope, falling back to `claude-code--project-root'."
                          :worktree (claude-code--args-worktree args)
                          :model (transient-arg-value "--model=" args)
                          :effort (transient-arg-value "--effort=" args)
-                         ;; Only a live menu has a say; `claude-code-spawn'
-                         ;; defaults it otherwise.
+                         ;; Outside the menu, `claude-code-spawn' picks it.
                          (and transient-current-command
                               (list :detachable
                                     (transient-arg-value "--detached" args))))))
     (claude-code--refresh-views (file-remote-p root))
     (claude-code--show (cdr instance))))
 
-;; Keep the suffix out of `M-x' the way transient keeps its own infixes out.
+;; Keep the suffix out of `M-x'.
 (put 'claude-code--spawn-session 'completion-predicate #'transient--suffix-only)
 
 (defconst claude-code--worktree-auto "(auto)"
-  "The completion candidate standing for a worktree Claude names itself.
-`claude-code--read-worktree' drops it from the checkouts it offers alongside,
-so answering it is never also a way of naming one.")
+  "The completion candidate standing for a worktree Claude names itself.")
 
 (defclass claude-code--worktree-infix (transient-option) ()
   "A worktree request: none, one Claude names, or one the user names.
-`--worktree' and `--worktree=NAME' differ by more than their value, so the
-stock `transient-option' mapping -- argument and value concatenated -- reaches
-only the second.  The empty value is the request Claude names.")
+The empty value requests the one Claude names.")
 
 (cl-defmethod transient-infix-value ((obj claude-code--worktree-infix))
   "Return the `--worktree' argument OBJ asks for, or nil for none."
@@ -3203,9 +2792,7 @@ only the second.  The empty value is the request Claude names.")
 
 (defun claude-code--read-worktree (prompt initial-input history)
   "Read a worktree name with PROMPT, INITIAL-INPUT and HISTORY.
-Completes over the project's existing checkouts -- naming one runs the session
-in it rather than building another -- and takes any other name as typed.
-`claude-code--worktree-auto', or an empty answer, returns the empty string."
+`claude-code--worktree-auto' reads as the empty string."
   (let* ((root (transient-scope))
          (choice (completing-read
                   prompt
@@ -3216,13 +2803,8 @@ in it rather than building another -- and takes any other name as typed.
     (if (equal choice claude-code--worktree-auto) "" choice)))
 
 (defun claude-code--seed-menu (obj worktree detached)
-  "Add WORKTREE and DETACHED to the value menu OBJ opens with.
-A request for WORKTREE is added when it is a name, and `--detached' when
-DETACHED is non-nil.  The prefix's `:init-value', which is what outranks a
-pinned value -- `:value' names the `default-value' slot, and a pinned value
-beats a default.  Unbinding the slot hands OBJ back to `transient-init-value'
-to resolve its own value, so the requests join that rather than standing in
-for it."
+  "Add requests for WORKTREE and DETACHED to the value menu OBJ opens with."
+  ;; Unbound, `transient-init-value' falls back to the pinned or default value.
   (slot-makeunbound obj 'init-value)
   (transient-init-value obj)
   (oset obj value (append (and worktree (list (concat "--worktree=" worktree)))
@@ -3233,29 +2815,23 @@ for it."
 (transient-define-prefix claude-code-spawn-menu ()
   "Create a new session for a project, with options."
   ["Arguments"
-   ;; A name belongs to one session, so it is `:unsavable': that keeps it out
-   ;; of the value `transient-set' would pin on every later spawn.  So does a
-   ;; worktree, which is seeded per invocation from where the menu was opened.
+   ;; A name belongs to one session, and the worktree is seeded per invocation.
    ("-n" "Name" "--name=" :unsavable t)
    ("-w" "Worktree" "--worktree="
     :class claude-code--worktree-infix
     :reader claude-code--read-worktree
-    ;; Without this the empty value -- the request Claude names -- is read as
-    ;; no request at all.
     :allow-empty t
     :unsavable t)
    ("-m" "Model" "--model=" :choices ("opus" "sonnet" "haiku" "fable"))
    ("-e" "Effort" "--effort=" :choices ("low" "medium" "high" "xhigh" "max"))
-   ;; Seeded per invocation from `claude-code-detachable' and the project's
-   ;; host, so pinning it would only override that.
+   ;; Seeded from `claude-code-detachable' per invocation.
    ("-d" "Detached" "--detached" :unsavable t)]
   ["Create"
    ("c" "New session" claude-code--spawn-session)]
   (interactive)
   (pcase-let* ((`(,root . ,worktree) (claude-code--current-project))
                (detached (claude-code--detachable-default root)))
-    ;; With nothing to seed, the menu opens on its own value the way every
-    ;; other prefix does.
+    ;; `:init-value' outranks a value pinned with `transient-set'.
     (apply #'transient-setup 'claude-code-spawn-menu nil nil
            :scope root
            (and (or worktree detached)
@@ -3265,13 +2841,10 @@ for it."
 
 ;;;###autoload
 (defun claude-code-sessions ()
-  "Open the Claude sessions view for the current project.
-The project's existing view is reused when it has one."
+  "Open the Claude sessions view for the current project."
   (interactive)
   (let* ((root (claude-code--project-root))
-         ;; A view is identified by the project it names, not by its buffer
-         ;; name: two projects can share a basename, and a name is free to
-         ;; belong to an unrelated buffer.  A clash gets Emacs's `<2>' suffix.
+         ;; Found by project, not by name: two projects can share a basename.
          (buffer (or (seq-find (lambda (view)
                                  (equal (buffer-local-value 'claude-code--project
                                                             view)
@@ -3285,8 +2858,8 @@ The project's existing view is reused when it has one."
         (claude-code-sessions-mode))
       (setq claude-code--project root)
       (setq default-directory (file-name-as-directory root))
-      ;; The view visits no file: `ibuffer' and completion annotators read the
-      ;; root off here.  Unabbreviated, or ibuffer's filename filters miss it.
+      ;; Where `ibuffer' and completion annotators find a fileless buffer's
+      ;; directory; unabbreviated, or ibuffer's filename filters miss it.
       (setq list-buffers-directory default-directory)
       (claude-code-sessions-refresh))
     (pop-to-buffer buffer)))

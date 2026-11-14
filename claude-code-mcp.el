@@ -6,38 +6,13 @@
 
 ;;; Commentary:
 
-;; A Model Context Protocol (MCP) server that lets any local `claude' act on the
-;; user's live Emacs.  Claude runs `claude-code-mcp-bridge' as a stdio MCP
-;; server, registered once at its user scope by `claude-code-mcp-install'; the
-;; bridge hands each message to `claude-code-mcp-dispatch' through
-;; `emacsclient'.  The server advertises a growing catalog of tools, documented
-;; one by one in docs/mcp-tools.md:
+;; The tools this server advertises:
 ;;
 ;;   * `eval' -- read and evaluate Elisp, return the printed result.
 ;;   * `spawn' -- start another instance in the calling session's directory.
 ;;
-;; The file is organized in the same model/view/adapter spirit as
-;; `claude-code.el':
-;;
-;;   * Protocol -- the pure response authority:
-;;     `claude-code--mcp-response-for-body' maps a raw message to a response
-;;     envelope (or nil for a notification), guarding JSON parsing before
-;;     `claude-code--mcp-handle-request' dispatches the parsed request.  Both
-;;     are directly unit-testable.
-;;   * Registry/catalog -- the tool table and `claude-code-mcp-make-tool', plain
-;;     data describing every advertised tool.
-;;   * Session context -- what a tool call knows about the `claude' that made
-;;     it: `claude-code--mcp-with-session' runs it in its working directory.
-;;   * Bridge -- the stdio bridge, the entry point it calls, its registration,
-;;     and what a launch sets so an instance's bridge reaches this Emacs.
-;;
-;; Session state is reached ONLY through the `claude-code.el' model; this file
-;; never re-parses `~/.claude'.  A tool that acts on sessions does so through
-;; the public operations API.
-;;
 ;; SECURITY.  This server executes arbitrary Elisp for every process that can
-;; reach the Emacs server.  Read the threat model in docs/architecture.md
-;; before changing anything here.
+;; reach the Emacs server.
 
 ;;; Code:
 
@@ -53,16 +28,14 @@
   :prefix "claude-code-mcp-")
 
 (defcustom claude-code-mcp-auto-approve t
-  "When non-nil, launched instances call Emacs's MCP tools without prompting.
-A local launch then carries `--allowedTools mcp__emacs'.  Weigh it against the
-threat model in docs/architecture.md."
+  "When non-nil, local instances Emacs launches call Emacs's MCP tools unasked.
+Otherwise their permission mode decides each call."
   :type 'boolean
   :group 'claude-code-mcp)
 
 (defcustom claude-code-mcp-eval-timeout 10
-  "Seconds before the MCP `eval' tool aborts a yielding evaluation.
-The timeout interrupts only code that yields (I/O, `sit-for', process waits);
-a CPU-bound infinite loop is not stopped by it."
+  "Seconds before the MCP `eval' tool aborts an evaluation.
+Only code that yields (I/O, `sit-for', process waits) can be interrupted."
   :type 'integer
   :group 'claude-code-mcp)
 
@@ -73,9 +46,7 @@ a CPU-bound infinite loop is not stopped by it."
   "The MCP protocol version this server implements and reports.")
 
 (defconst claude-code--mcp-server-name "emacs"
-  "The name `claude' knows this MCP server by.
-Used as the `mcpServers' key `claude-code-mcp-install' registers and as the
-`mcp__<name>' rule auto-approving its tools; the two must agree.")
+  "The name `claude' knows this MCP server by.")
 
 (define-error 'claude-code--mcp-rpc-error
               "MCP JSON-RPC error carrying (CODE MESSAGE)")
@@ -84,24 +55,15 @@ Used as the `mcpServers' key `claude-code-mcp-install' registers and as the
 ;;;; Session context
 
 (defvar claude-code--mcp-session-cwd nil
-  "Working directory of the `claude' whose tool call is running.
-Bound by `claude-code--mcp-with-session' for the duration of the call.  A
-handler is passed its validated arguments and nothing else, so this is how one
-that has to act on the caller's own project reaches it.")
+  "Working directory of the `claude' whose tool call is running.")
 
 (defmacro claude-code--mcp-with-session (caller &rest body)
-  "Evaluate BODY in the context of the `claude' process whose PID is CALLER.
-Its cwd is what its sessions/ file says (`claude-code--pid-cwd'), or the
-current `default-directory' for a process with no such file -- through
-`emacsclient', the directory the bridge was started in.  It is resolved once
-and bound to `claude-code--mcp-session-cwd'.  BODY runs in a temporary buffer
-whose `default-directory' is that cwd, so the buffer the request arrived in is
-left alone.  That directory is best-effort context for a tool, not a sandbox:
-it only affects `default-directory'-relative operations, not code using
-absolute paths."
+  "Evaluate BODY in the working directory of the `claude' whose PID is CALLER.
+BODY runs in a temporary buffer."
   (declare (indent 1) (debug (form body)))
   `(let ((claude-code--mcp-session-cwd
           (or (claude-code--pid-cwd ,caller)
+              ;; `emacsclient' binds this to the directory the bridge runs in.
               (directory-file-name (expand-file-name default-directory)))))
      (with-temp-buffer
        (setq default-directory
@@ -110,39 +72,26 @@ absolute paths."
 
 
 ;;;; Tool registry and catalog
-;;
-;; The registry maps a tool name to a plist describing it.
 
 (defconst claude-code--mcp-arg-types
   (list (cons 'string #'stringp)
         (cons 'boolean (lambda (value) (memq value '(t :false)))))
-  "Argument types a tool may advertise, each with the predicate enforcing it.
-A key is the JSON-Schema type name the wire carries, and it belongs here
-exactly when `claude-code--mcp-validate-args' can hold a value to it, so the
-schema never advertises a type nothing checks.  A predicate answers for the
-value as the wire spells it, sentinels included, which is what leaves the
-validator with no type of its own to name.")
+  "Argument types a tool may advertise, each with the predicate enforcing it.")
 
 (defvar claude-code--mcp-tools (make-hash-table :test 'equal)
-  "Hash of MCP tool name (string) to its plist.
-Each value is a plist with keys `:description' (string), `:args' (a list of
-argument specs) and `:handler' (the function run for the tool).")
+  "Hash of MCP tool name to its plist of :description, :args and :handler.")
 
 (defun claude-code-mcp-make-tool (&rest slots)
   "Define and register an MCP tool from SLOTS, returning its plist.
-SLOTS is a property list with these keys:
+SLOTS is a plist with these keys:
 
-  :name         the tool name (string) Claude calls it by;
-  :description  a human-readable description of the tool (string);
-  :args         a list of argument specs, each a plist with :name (string),
-                :type (a symbol from `claude-code--mcp-arg-types'),
-                :description (string), an optional :enum listing the values the
-                argument accepts and an optional :optional flag; nil for a tool
-                taking no arguments;
-  :handler      the function invoked with the validated argument values in
-                :args order.
-
-The tool is stored in `claude-code--mcp-tools' under :name and also returned."
+  :name         the name Claude calls the tool by;
+  :description  what the tool does, as the agent reads it;
+  :args         argument specs, each a plist of :name, :type (a key of
+                `claude-code--mcp-arg-types') and :description, plus an
+                optional :enum of accepted values and an :optional flag;
+  :handler      the function called with the validated argument values, in
+                :args order."
   (let ((name (plist-get slots :name))
         (description (plist-get slots :description))
         (args (plist-get slots :args))
@@ -150,9 +99,7 @@ The tool is stored in `claude-code--mcp-tools' under :name and also returned."
     (unless name (error "Tool :name is required"))
     (unless description (error "Tool :description is required"))
     (unless handler (error "Tool :handler is required"))
-    ;; An arg spec reaches the wire as JSON Schema and comes back as the
-    ;; contract a call is held to, so a malformed one breaks `tools/list' for
-    ;; the whole catalog rather than its own tool.  Refuse it here instead.
+    ;; A malformed spec would break `tools/list' for every tool.
     (dolist (arg args)
       (let ((arg-name (plist-get arg :name))
             (arg-type (plist-get arg :type))
@@ -169,9 +116,7 @@ The tool is stored in `claude-code--mcp-tools' under :name and also returned."
 
 (defun claude-code--mcp-read-form (code)
   "Return the single top-level form in the string CODE, or nil for none.
-Whitespace and comments around the form are skipped.  Signal if anything else
-follows it: text that reads as a second form asks the caller to wrap both in
-`progn', and text that reads as no form signals the read error instead."
+Signal an error if anything but whitespace and comments follows the form."
   (with-temp-buffer
     (insert code)
     (goto-char (point-min))
@@ -187,10 +132,7 @@ follows it: text that reads as a second form asks the caller to wrap both in
           form)))))
 
 (defun claude-code--mcp-tool-eval (code)
-  "Evaluate the single Elisp form in the string CODE; return its printed value.
-Evaluation uses lexical binding and is bounded by `claude-code-mcp-eval-timeout'
-seconds.  The value prints in full, whatever `print-length' and `print-level'
-the user runs with."
+  "Evaluate the single Elisp form in the string CODE; return its printed value."
   (with-timeout (claude-code-mcp-eval-timeout
                  (error "Evaluation timed out after %s seconds"
                         claude-code-mcp-eval-timeout))
@@ -204,8 +146,7 @@ the user runs with."
  :description
  "Evaluate a single Emacs Lisp form in the user's live Emacs and return the
 printed result.  Wrap several forms in (progn ...).  Evaluation uses lexical
-binding.  The current buffer is a temporary one made for the call and killed
-after it, never a buffer the user can see: name the buffer to act on with
+binding.  The current buffer is unspecified: name the buffer to act on with
 (with-current-buffer BUFFER ...), or reach the one the user is looking at
 with (window-buffer (selected-window))."
  :args (list (list :name "code" :type 'string
@@ -213,10 +154,8 @@ with (window-buffer (selected-window))."
  :handler #'claude-code--mcp-tool-eval)
 
 (defun claude-code--mcp-tool-spawn (prompt name model effort worktree)
-  "Handle the `spawn' tool; return the new session's id.
-PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options, with
-WORKTREE the name of the checkout to run in.  The root is not among them: it
-is the directory of the session that asked."
+  "Spawn an instance in the caller's directory; return its session id.
+PROMPT, NAME, MODEL, EFFORT and WORKTREE are `claude-code-spawn' options."
   (car (claude-code-spawn claude-code--mcp-session-cwd
                           :prompt prompt :name name
                           :model model :effort effort
@@ -226,11 +165,10 @@ is the directory of the session that asked."
  :name "spawn"
  :description
  "Spawn another Claude Code instance in the user's Emacs and return its session
-id.  It runs in the calling session's own directory -- or, when asked for a
-worktree, in a worktree of it, which carries none of the caller's uncommitted
-work.  The instance takes no window of its own: the user reaches it
-through the Emacs sessions view.  An id means the instance was launched, not
-that it survived startup."
+id.  It runs in the calling session's own directory, or in the git worktree
+named by the worktree argument.  The instance takes no window of its own: the
+user reaches it through the Emacs sessions view.  An id means the instance was
+launched, not that it survived startup."
  :args (list (list :name "prompt" :type 'string :optional t
                    :description
                    "Initial prompt; without one the instance starts idle.")
@@ -247,9 +185,9 @@ that it survived startup."
                    :description
                    "Name of the git worktree to run the instance in.  A name
 that already exists runs the instance in that worktree, which may carry an
-earlier session's commits; any other name builds a fresh one.  Use letters,
-digits, dots, hyphens and underscores only -- a name the CLI rejects kills the
-instance at startup."))
+earlier session's commits; any other name builds a fresh one, branched by
+default from origin's default branch rather than the caller's HEAD.  Use at
+most 64 letters, digits, dots, hyphens and underscores."))
  :handler #'claude-code--mcp-tool-spawn)
 
 
@@ -282,8 +220,7 @@ Pass `:null' as ID for a request that could not be parsed."
           args))
 
 (defun claude-code--mcp-required-args (args)
-  "Return the required argument names in ARGS as a JSON array vector.
-An argument is required unless its spec carries a non-nil :optional flag."
+  "Return the required argument names in ARGS as a JSON array vector."
   (vconcat (delq nil (mapcar (lambda (arg)
                                (unless (plist-get arg :optional)
                                  (plist-get arg :name)))
@@ -300,8 +237,7 @@ An argument is required unless its spec carries a non-nil :optional flag."
                       (cons 'required (claude-code--mcp-required-args args)))))))
 
 (defun claude-code--mcp-initialize ()
-  "Return the `initialize' result payload.
-Reports `claude-code--mcp-protocol-version'."
+  "Return the `initialize' result payload."
   (list (cons 'protocolVersion claude-code--mcp-protocol-version)
         (cons 'capabilities
               (list (cons 'tools (list (cons 'listChanged :false)))))
@@ -318,27 +254,15 @@ Reports `claude-code--mcp-protocol-version'."
                         collect (claude-code--mcp-tool-descriptor name tool))))))
 
 (defun claude-code--mcp-reject (format-string &rest args)
-  "Signal a -32602 `claude-code--mcp-rpc-error' reading FORMAT-STRING and ARGS.
-This is the answer to a call that does not hold to the schema its tool
-advertises, which is the caller's to fix."
+  "Signal a -32602 `claude-code--mcp-rpc-error' reading FORMAT-STRING and ARGS."
   (signal 'claude-code--mcp-rpc-error
           (list -32602 (apply #'format format-string args))))
 
 (defun claude-code--mcp-validate-args (arg-specs arguments)
   "Return values from ARGUMENTS ordered to match ARG-SPECS.
-ARGUMENTS is the parsed `arguments' object (an alist), or nil when the call
-carried none.  An argument the call left out, and one it sent as JSON null, is
-unanswered: required, that is an error, and optional it reads as nil.
-
-Every value a handler receives holds to the schema its tool advertises -- the
-spec's :type, and its :enum where one is named -- and anything else signals a
-`claude-code--mcp-rpc-error' with code -32602 naming the argument, so a caller
-that ignored the schema is told what its call got wrong instead of the handler
-acting on it.  Which wire spellings a type accepts is the type's own business,
-in `claude-code--mcp-arg-types': a boolean accepts JSON false, which is how a
-required one is answered with no, and reads as nil.  An empty string is a value
-only a string can carry, and given for an optional argument it reads as nil, so
-a handler passing values on to a process emits no option with an empty value."
+ARGUMENTS is the call's parsed `arguments' object.  A value the schema rejects
+signals a -32602 `claude-code--mcp-rpc-error'.  JSON false reads as nil, and so
+does an optional argument that is missing, null or the empty string."
   (when (eq arguments :null)
     (setq arguments nil))
   (unless (listp arguments)
@@ -359,9 +283,9 @@ a handler passing values on to a process emits no option with an empty value."
                               value))
                 (claude-code--mcp-reject "Argument %s must be of type %s"
                                          name type))
-               ;; Past its predicate the value is one the type accepts, so what
-               ;; is left to shape is reachable for that one type alone.
+               ;; The predicate passed: :false is a boolean, "" a string.
                ((eq value :false) nil)
+               ;; Else a handler would pass a process an empty option.
                ((and optional (equal value "")) nil)
                ((and enum (not (member value enum)))
                 (claude-code--mcp-reject "Argument %s must be one of: %s"
@@ -371,12 +295,9 @@ a handler passing values on to a process emits no option with an empty value."
 
 (defun claude-code--mcp-tools-call (caller params)
   "Run the tool named in PARAMS for CALLER and return its result payload.
-CALLER is the PID of the calling `claude'.
-PARAMS is the `tools/call' params alist carrying `name' and `arguments', and
-must be an object -- JSON null standing for the one a call did not send.
-Signals a `claude-code--mcp-rpc-error' for a PARAMS of any other shape, for an
-unknown tool, and for arguments that do not hold to the tool's schema; a tool
-that itself errors yields an `isError' result rather than crashing the server."
+CALLER is the PID of the calling `claude'.  A tool that signals yields an
+`isError' result.  Invalid PARAMS or an unknown tool signal a
+`claude-code--mcp-rpc-error'."
   (when (eq params :null)
     (setq params nil))
   (unless (listp params)
@@ -406,11 +327,8 @@ that itself errors yields an `isError' result rather than crashing the server."
 
 (defun claude-code--mcp-handle-request (caller request)
   "Return the JSON-RPC response alist for REQUEST, or nil for a notification.
-CALLER is the PID of the calling `claude'.  REQUEST is the parsed JSON-RPC
-request object (an alist).  A request with no `id' is a notification and
-yields nil.  A non-object REQUEST -- a JSON array or bare scalar -- is answered
-with a -32600 Invalid Request; any `claude-code--mcp-rpc-error', other error or
-quit becomes a JSON-RPC error envelope echoing the request `id'."
+CALLER is the PID of the calling `claude'.  REQUEST is the parsed message.  An
+error or quit while answering it becomes an error response."
   (if (not (listp request))
       (claude-code--mcp-error :null -32600 "Invalid Request")
     (let ((id (alist-get 'id request))
@@ -436,10 +354,7 @@ quit becomes a JSON-RPC error envelope echoing the request `id'."
 
 (defun claude-code--mcp-response-for-body (caller body)
   "Return the JSON-RPC response alist for BODY, or nil for a notification.
-CALLER is the PID of the calling `claude'.  BODY is one raw JSON-RPC message;
-one that is not valid JSON is answered with a -32700 error.  Dispatch errors
-never escape `claude-code--mcp-handle-request', so the `json-error' handler
-here fires only for the parse."
+CALLER is the PID of the calling `claude'.  BODY is one raw JSON-RPC message."
   (condition-case nil
       (claude-code--mcp-handle-request
        caller (json-parse-string body :object-type 'alist))
@@ -465,9 +380,9 @@ Emacs cannot be reached; Claude starts it again for its next call.")
 
 (defun claude-code-mcp-dispatch (request pid)
   "Answer REQUEST, a base64 JSON-RPC message from the `claude' whose PID is PID.
-Return the response as base64 JSON, or nil for a notification.  This is what
-`claude-code-mcp-bridge' calls, and it never signals or quits: an error
-reaching `server.el' would end the bridge, and a quit would read as no reply."
+Return the response as base64 JSON, or nil for a notification.  It never
+signals or quits."
+  ;; An error would end the bridge, and a quit would read as no reply.
   (when-let* ((response
                (claude-code--mcp-response-for-body
                 pid (condition-case nil
@@ -492,14 +407,13 @@ reaching `server.el' would end the bridge, and a quit would read as no reply."
 ;;;###autoload
 (defun claude-code-mcp-install ()
   "Register the Emacs MCP server at Claude's user scope.
-It lands in the config dir instances launch with, replacing any user-scope
-server of the same name there, and every `claude' sharing that dir reaches
-Emacs from then on."
+It replaces any user-scope server of the same name in the config dir instances
+launch with."
   (interactive)
   (with-environment-variables (("CLAUDE_CONFIG_DIR" (claude-code--config-env)))
     (let* ((default-directory (expand-file-name "~/"))
            (program (claude-code--resolve-executable claude-code-cli)))
-      ;; Its status is ignored: there may be nothing to remove.
+      ;; `mcp add-json' refuses a taken name; there may be nothing to remove.
       (call-process program nil nil nil "mcp" "remove" "--scope" "user"
                     claude-code--mcp-server-name)
       (with-temp-buffer
@@ -517,11 +431,7 @@ Emacs from then on."
 
 (defun claude-code--mcp-server-env ()
   "Return the environment pointing `emacsclient' at this Emacs's server.
-A list of cells as `claude-code--apply-env' takes them: the file the server
-listens on, whether it runs yet or not, in the variable for its kind, with the
-other variable unset.  The first call to find this Emacs running no server
-warns, once per session: instances then reach it only once its server starts,
-and reach the other Emacs while one holds the server's name."
+The server need not run yet; the first call to find it not running warns."
   (unless (or (process-live-p server-process) claude-code--mcp-warned)
     (setq claude-code--mcp-warned t)
     (display-warning
@@ -541,11 +451,8 @@ tools until one starts; start it with \\[server-start]"))))
       (list (cons "EMACS_SOCKET_NAME" file) (list "EMACS_SERVER_FILE")))))
 
 (defun claude-code--mcp-wiring (buffer)
-  "Return what points the instance BUFFER hosts at this Emacs, or nil.
-Nil when BUFFER's directory, where Ghostel runs the instance, is remote: its
-bridge runs on that host.  Otherwise (ARGS . ENV): ARGS auto-approves the
-server's tools when `claude-code-mcp-auto-approve' is non-nil, and ENV is
-`claude-code--mcp-server-env'."
+  "Return the CLI arguments and environment wiring BUFFER's instance to Emacs.
+The value is (ARGS . ENV), or nil when BUFFER's directory is remote."
   (unless (file-remote-p (buffer-local-value 'default-directory buffer))
     (cons (and claude-code-mcp-auto-approve
                (list "--allowedTools"

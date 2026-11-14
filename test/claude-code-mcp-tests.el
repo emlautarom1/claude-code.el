@@ -1,11 +1,7 @@
 ;;; claude-code-mcp-tests.el --- Tests for claude-code-mcp -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; ERT suite for claude-code-mcp.el: the protocol as `claude-code-mcp-dispatch'
-;; answers it, the tools and the calls they take, the launch wiring, and the
-;; bridge driven end to end through a real Emacs server.  A live handshake test
-;; is gated behind CLAUDE_CODE_INTEGRATION.  Run with `make test' (unit) or
-;; `make integration' (live).
+;; ERT suite for claude-code-mcp.el.  Run with `make test'.
 
 ;;; Code:
 
@@ -14,16 +10,11 @@
 (require 'cl-lib)
 (require 'claude-code)
 (require 'claude-code-mcp)
-;; For the `claude-code-tests--' scaffolding the sibling suite owns, starting
-;; with `claude-code-tests--with-registry', which every isolated test here
-;; expands into.
+;; For the `claude-code-tests--' helpers.
 (require 'claude-code-tests)
 
 (defmacro claude-code-mcp-tests--isolated (&rest body)
-  "Run BODY with session lookups isolated from the real config dir.
-Points `claude-code-config-dir' at a nonexistent path, so sessions/ is empty
-and `claude-code--pid-cwd' names no directory, and rebinds
-`claude-code--managed' to a fresh table."
+  "Run BODY with an empty registry and a config dir that does not exist."
   (declare (indent 0))
   `(let ((claude-code-config-dir "/claude-code-mcp-tests-nonexistent"))
      (claude-code-tests--with-registry ,@body)))
@@ -41,9 +32,7 @@ along with the registry."
        ,@body)))
 
 (defmacro claude-code-mcp-tests--with-tools (names &rest body)
-  "Run BODY, then unregister the tools named in NAMES.
-The registry is global, so a tool left behind would leak into every later
-`tools/list'."
+  "Run BODY, then unregister the tools named in NAMES."
   (declare (indent 1))
   `(unwind-protect (progn ,@body)
      (dolist (name ,names) (remhash name claude-code--mcp-tools))))
@@ -373,8 +362,7 @@ ARGUMENTS are the (NAME . VALUE) pairs of the call's `arguments' object."
 
 (defmacro claude-code-mcp-tests--with-caller (var cwd execs &rest body)
   "Run BODY with VAR the PID of a `claude' working in CWD, the launch stubbed.
-EXECS collects the (BUFFER ARGS) of every launch, so a test asserts what
-reached the CLI without a `claude' ever running."
+EXECS collects the (BUFFER ARGS ENV PROGRAM) of every launch."
   (declare (indent 3))
   `(let ((,var 4242))
      (claude-code-mcp-tests--with-session-at ,var ,cwd
@@ -607,13 +595,11 @@ the bridge started.  Once Emacs is gone it exits silently on the next message."
 
 ;;;; Live integration (real `claude' + real MCP handshake)
 ;;
-;; Gated behind CLAUDE_CODE_INTEGRATION (run via `make integration'); strips the
-;; Claude nesting env vars so the spawned CLI starts a real top-level session.
+;; Skipped unless CLAUDE_CODE_INTEGRATION is set, as `make integration' does.
 
 (defun claude-code-mcp-tests--worktrees (root)
   "Return an alist of (PATH . BRANCH) for every worktree registered in ROOT.
-BRANCH is the short branch name, or nil for a detached worktree.  Parses the
-output of `git worktree list --porcelain' run in ROOT."
+BRANCH is the short branch name, or nil for a detached worktree."
   (with-temp-buffer
     (let ((default-directory (file-name-as-directory root)))
       (when (zerop (call-process "git" nil t nil
@@ -638,15 +624,12 @@ output of `git worktree list --porcelain' run in ROOT."
 (defun claude-code-mcp-tests--remove-new-worktrees (root before)
   "Remove ROOT worktrees under .claude/worktrees that are absent from BEFORE.
 BEFORE is the list of worktree paths captured before the test spawned.  Each
-newly-appeared worktree is force-removed -- twice-forced so a locked worktree
-goes in one call -- and its actual branch (read back from git, never guessed)
-is deleted.  Every worktree already in BEFORE is left untouched, so a
-developer's real worktrees are never disturbed.  Best-effort: git errors are
-ignored so a partially-created worktree is still cleaned up."
+one removed takes its branch with it, and a git error is ignored."
   (let ((default-directory (file-name-as-directory root)))
     (dolist (wt (claude-code-mcp-tests--worktrees root))
       (when (and (string-match-p "/\\.claude/worktrees/" (car wt))
                  (not (member (car wt) before)))
+        ;; Git removes a locked worktree only when forced twice.
         (ignore-errors
           (call-process "git" nil nil nil
                         "worktree" "remove" "--force" "--force" (car wt)))
@@ -658,11 +641,9 @@ ignored so a partially-created worktree is still cleaned up."
   "A real instance's whole life: launch, MCP, name, rename, kill and delete.
 Spawned named, in a new worktree, it reports the PID Ghostel runs it under,
 reaches this Emacs's MCP server under that PID, and works in its worktree.  A
-long rename lands even when Claude reads the command and its RET in one go:
-stopping the instance across the send stands for a Claude too busy to read
-between the two.  Killed and deleted, it leaves no process and no transcript.
-The instance is handed only the entry `claude-code-mcp-install' registers, so
-the test reads no user configuration and leaves none behind."
+long rename lands even when Claude reads the command and its RET in one go,
+which stopping the instance across the send forces.  The instance gets only
+the MCP entry `claude-code-mcp-install' registers."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (require 'ghostel)
   (let* ((root (directory-file-name (expand-file-name default-directory)))
@@ -691,8 +672,7 @@ the test reads no user configuration and leaves none behind."
          ;; A server of this Emacs's own, which the launch points the instance at.
          (server-name (format "cc-mcp-integration-%d" (emacs-pid)))
          (server-process nil)
-         ;; Snapshot existing worktrees so teardown removes only what this test
-         ;; creates, never a developer's real worktrees.
+         ;; Teardown removes only the worktrees this test creates.
          (worktrees-before (mapcar #'car (claude-code-mcp-tests--worktrees root)))
          buffer id pid cwd)
     (set-file-modes wrapper #o700)
@@ -783,11 +763,8 @@ the test reads no user configuration and leaves none behind."
             (when (file-directory-p own) (delete-directory own t))
             ;; The worktree's own transcript directory, once nothing is left in it.
             (ignore-errors (delete-directory dir))))
-        ;; Spawning with `:worktree t' leaves a locked git worktree behind that the
-        ;; CLI never tears down.  Remove only worktrees that appeared during this
-        ;; test; every pre-existing real worktree stays untouched.  A nil snapshot
-        ;; means the pre-spawn listing failed -- a live repo always lists its main
-        ;; worktree -- so skip cleanup rather than mistake every worktree for new.
+        ;; A killed instance leaves its worktree locked on disk.  An empty
+        ;; listing is a failed one, since a repo always lists its main tree.
         (when worktrees-before
           (claude-code-mcp-tests--remove-new-worktrees root worktrees-before))))))
 
