@@ -2317,7 +2317,7 @@ batch run."
 
 (ert-deftest claude-code-test-export-always-ends-its-cli ()
   "An export hears only its first outcome, and its CLI ends however it settles."
-  (let ((answer (concat "echo '" claude-code-tests--export-answer "'\n")))
+  (let ((answer (concat "printf '%s\\n' '" claude-code-tests--export-answer "'\n")))
     (pcase-dolist (`(,script ,timeout ,cancel ,heard)
                    `(;; Never answers.
                      (,(concat "read -r r\n" claude-code-tests--record-pid
@@ -2370,7 +2370,7 @@ batch run."
                   "out=pipe; [ -t 1 ] && out=terminal\n"
                   "{ pwd; printf '%s\\n' \"$out\" \"$CLAUDE_CONFIG_DIR\" \"$@\"; }"
                   " > \"$0.log\"\n"
-                  "echo '" claude-code-tests--export-answer "'\n"
+                  "printf '%s\\n' '" claude-code-tests--export-answer "'\n"
                   "exec cat >/dev/null\n")
         (claude-code-tests--on-mock-host nil
           (let* ((host (file-remote-p default-directory))
