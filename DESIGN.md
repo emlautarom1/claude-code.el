@@ -77,8 +77,3 @@ The server trusts every process running as the user, and nothing else. Any reque
 - Auto-approval pre-authorizes every tool for the instances Emacs launches, and a tool can launch one for any caller. A `claude` that prompts per call is therefore one approved launch away from an instance running Elisp unprompted, out of sight. Nothing caps instances launching instances.
 - An instance on a remote host is not wired to Emacs. Its bridge would run on that host, where the Emacs socket means nothing, and auto-approving an `emacs` server there would approve whatever that host calls by the name.
 - Work on another host, in a container or under another user stays out of reach only while it cannot see the user's Emacs socket directory.
-
-## Code guidelines
-
-- Keep it simple. When a behavior needs a long explanation, simplify the behavior.
-- Keep IO low: read only the host state a view needs, share one read across a redraw, and reread a transcript only when it has changed.

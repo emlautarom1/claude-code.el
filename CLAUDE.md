@@ -1,30 +1,40 @@
-# claude-code.el — project conventions
+# claude-code.el
 
-Emacs orchestration tool for the Claude Code CLI. Read `DESIGN.md` for the concepts, the architecture and the design decisions.
+Emacs orchestration tool for the Claude Code CLI. `DESIGN.md` holds the concepts, the architecture and the design decisions; changes follow it.
 
-## Hard rules
+## Code
 
-- **Target Emacs 30+ only.** No backwards-compatibility code: no `defalias`/`fset` shims, no feature-detection fallbacks, no obsolete aliases.
-- **No "history" comments.** Never describe how code "used to" work or that something "replaces" a prior approach — Git holds the history.
-- **As few dependencies as possible.** `ghostel` is loaded lazily and referenced via `declare-function`, so the package byte-compiles and tests without its native module.
-- **Source split:** the core orchestration lives in `claude-code.el`; the MCP server lives in `claude-code-mcp.el`. Tests mirror the split: `test/claude-code-tests.el` and `test/claude-code-mcp-tests.el`.
-- **Naming:** `claude-code-` for public symbols, `claude-code--` for internals.
+- **Keep it simple.** When a behavior needs a long explanation, simplify the behavior.
+- **Emacs 30+ only.** No compatibility shims, feature detection or obsolete aliases.
+- **Ghostel stays lazy:** `declare-function` at the top, `require` where it is used, so the package compiles and tests without its native module.
+- **Use what Emacs already has.** Built-in functions, Emacs hooks, modes and the conventions of built-in packages (Dired, IBuffer, Proced) come before a design of our own; check how they solve the problem first.
+- **State lives in memory, in the package's model,** updated from events. Don't spread it across buffer-locals and globals.
+- **Keep IO low:** read only the data that it's actually needed, share it across calls, and avoid re-reading data that has not changed. This is particularly important when evaluating projects over TRAMP.
+- **Don't add timers, polling, caches, advice, or files of our own** (temp, journal or marker files). If only such a design is accurate present it to the user and ask for confirmation first.
+- **No new concepts.** Reuse an existing identifier, term or mechanism before adding one, and prefer one mechanism for local and remote hosts over one each.
+- **Design for the expected case.** These hold and need no guards, tests or docs: PIDs are not reused; a resolved CLI launches; a session runs in at most one instance; a dtach socket has at most one client; hosts run Linux, and remote ones are reached by TRAMP over SSH. Ask before handling any other edge case.
 
-## Architecture
+## Tests
 
-- **Storage adapter.** All knowledge of the config dir's on-disk layout lives in the "Storage adapter" section.
-- **Ghostel adapter.** Reads of the program status records Ghostel keeps for an instance go through the "Ghostel adapter" section.
-- **dtach adapter.** How a detachable instance is held on its host by `dtach` lives in the "dtach adapter" section.
-- **MCP tool documentation.** A tool's contract — what it does and the inputs it accepts — lives in its `:description` strings, which agents read; anything else about it goes in its handler. `DESIGN.md` covers the server and the threat model over the whole catalog, and names no tool. Adding a tool is its registration and a line in the catalog list in `claude-code-mcp.el`.
+- Test core behavior a user would notice breaking, not rendering, keymaps, window placement or configuration defaults.
+- Drive public operations and assert single facts (a flag, a key, a stable substring), never whole argument lists, fixture counts, private state or stubbed private helpers.
+- Cover a use case that spans several features with one scenario or integration test rather than many unit tests. Extend existing tests and reuse the test helpers before writing new ones.
+- Tests are hermetic: real (redacted) fixtures, the fake CLI and TRAMP's mock host; no real file watches, network or config dir.
+- `make integration` runs the live tests against a real `claude` (needs Ghostel's native module and a logged-in CLI).
 
-## Workflow
+## Docs
 
-- **Test-first.** Add/extend ERT tests before or alongside each feature. Fixtures under `test/fixtures/` are real (redacted) data.
-- **Verify with `make`:** `make compile` (warnings are errors) and `make test` must stay green. They run automatically via the `Stop` hook (`scripts/compile-and-test.sh`).
-- **Docs.** `DESIGN.md` stays high-level: concepts, decisions and trade-offs, with no internal symbols, CLI internals or version stamps. Implementation detail and CLI or Emacs behavior go in docstrings and comments next to the code, and only where the code does not already say it. Update `DESIGN.md`, `README.md`, docstrings and comments in the same change that makes them stale.
+- `DESIGN.md` stays high-level: concepts, decisions and trade-offs, with no internal symbols, CLI internals or version stamps.
+- Docstrings and comments say only what the code does not. A comment explains a non-obvious why; when in doubt, leave it out.
+- No cross-references between documents. Update docs in the same change that makes them stale.
+- An MCP tool's contract lives in its `:description`.
 
-## Debugging with a real instance
+## Git
 
-`make test` never launches `claude` — it runs pure logic against fixtures. To exercise the live spawn/kill lifecycle, run `make integration` (needs Ghostel's native module and a logged-in CLI; skipped by `make test` and CI).
+- Commit on the current branch; never create one unless asked.
+- One commit per logical change. Land review fixes as fixups or commits of their own, never as one "review fixes" commit.
+- From a review, apply doc, style and de-duplication fixes directly; bring correctness, scope and coverage findings to the user.
 
-**Gotcha for anyone debugging spawning from inside a Claude Code session** (e.g. you, a Claude Code agent, driving Emacs to test this package): a running `claude` exports `CLAUDE_CODE_CHILD_SESSION` (among other `CLAUDE_*` variables) to its subprocesses. An interactive `claude` spawned with it set is a **nested child**: it does NOT create its own top-level session — no `sessions/*.json`, no transcript — so the view shows nothing and spawning looks broken. Strip it before spawning. The integration test does this via `claude-code-tests--with-top-level-env`; an ad-hoc `emacs --batch` harness needs `env -u CLAUDE_CODE_CHILD_SESSION …`. A normally launched Emacs never has these variables, so **production code deliberately leaves the nesting markers alone** — this is a test/debug concern only.
+## Spawning `claude` from a Claude session
+
+A running `claude` exports `CLAUDE_CODE_CHILD_SESSION`, and a `claude` spawned with it set is a nested child that writes no `sessions/*.json` or transcript, so spawning looks broken. Strip it: `env -u CLAUDE_CODE_CHILD_SESSION …`, or `claude-code-tests--with-top-level-env` in tests. Production code leaves it alone, since a normally launched Emacs never has it.
