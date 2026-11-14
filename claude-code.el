@@ -2323,7 +2323,7 @@ USAGE is (CPU . RSS) or nil.  NOW anchors the Active column's age."
 
 (defun claude-code--group-rank (key)
   "Return the display rank of group KEY; lower ranks come first."
-  (or (alist-get key '(("waiting" . 0) ("busy" . 1) ("shell" . 2) ("idle" . 3)
+  (or (alist-get key '(("waiting" . 0) ("idle" . 1) ("shell" . 2) ("busy" . 3)
                        ("alive" . 4) ("external" . 8) ("dead" . 9))
                  nil nil #'equal)
       5))
