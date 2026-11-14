@@ -3196,9 +3196,9 @@ only the second.  The empty value is the request Claude names.")
 (cl-defmethod transient-format-value ((obj claude-code--worktree-infix))
   "Label OBJ's unnamed request, which has no value of its own to show."
   (if (equal (oref obj value) "")
-      (concat (propertize "--worktree" 'face (transient-argument-face obj))
+      (concat (propertize "--worktree" 'face 'transient-argument)
               (propertize (concat " " claude-code--worktree-auto)
-                          'face (transient-value-face obj)))
+                          'face 'transient-value))
     (cl-call-next-method)))
 
 (defun claude-code--read-worktree (prompt initial-input history)
@@ -3206,7 +3206,7 @@ only the second.  The empty value is the request Claude names.")
 Completes over the project's existing checkouts -- naming one runs the session
 in it rather than building another -- and takes any other name as typed.
 `claude-code--worktree-auto', or an empty answer, returns the empty string."
-  (let* ((root (transient-scope 'claude-code-spawn-menu))
+  (let* ((root (transient-scope))
          (choice (completing-read
                   prompt
                   (cons claude-code--worktree-auto
