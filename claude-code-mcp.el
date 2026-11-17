@@ -410,13 +410,14 @@ signals or quits."
 It replaces any user-scope server of the same name in the config dir instances
 launch with."
   (interactive)
-  (with-environment-variables (("CLAUDE_CONFIG_DIR" (claude-code--config-env)))
-    (let* ((default-directory (expand-file-name "~/"))
-           (program (claude-code--resolve-executable claude-code-cli)))
-      ;; `mcp add-json' refuses a taken name; there may be nothing to remove.
-      (call-process program nil nil nil "mcp" "remove" "--scope" "user"
-                    claude-code--mcp-server-name)
-      (with-temp-buffer
+  ;; A buffer of its own, whose `process-environment' is Emacs's global one.
+  (with-temp-buffer
+    (with-environment-variables (("CLAUDE_CONFIG_DIR" (claude-code--config-env)))
+      (let* ((default-directory (expand-file-name "~/"))
+             (program (claude-code--resolve-executable claude-code-cli)))
+        ;; `mcp add-json' refuses a taken name; there may be nothing to remove.
+        (call-process program nil nil nil "mcp" "remove" "--scope" "user"
+                      claude-code--mcp-server-name)
         (unless (eql 0 (call-process program nil t nil "mcp" "add-json"
                                      "--scope" "user" claude-code--mcp-server-name
                                      (claude-code--mcp-serialize

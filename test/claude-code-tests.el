@@ -613,8 +613,7 @@ one."
 
 (ert-deftest claude-code-test-remote-project-reads-its-host ()
   "A remote project is read with its host's config dir and process table."
-  (let ((claude-code--remote-config-envs (make-hash-table :test 'equal))
-        (asked 0))
+  (let ((asked 0))
     ;; A host that cannot be asked is an error, and is asked again next time.
     (cl-letf (((symbol-function 'process-file)
                (lambda (&rest _) (cl-incf asked) 1)))
@@ -632,9 +631,7 @@ one."
                      (lambda ()
                        (if (file-remote-p default-directory) '(1 1002) '(1)))))
             (claude-code-tests--on-mock-host nil
-              (let* ((claude-code--remote-config-envs
-                      (make-hash-table :test 'equal))
-                     (host (file-remote-p default-directory))
+              (let* ((host (file-remote-p default-directory))
                      (default (concat host (expand-file-name ".claude" home)))
                      (base tramp-remote-process-environment)
                      (tramp-remote-process-environment base)
@@ -659,6 +656,16 @@ one."
                     (should (equal (claude-code--config-env host) env))))
                 (funcall connect (concat "CLAUDE_CONFIG_DIR="
                                          (directory-file-name config)))
+                ;; One probe per connection, however often it is read.
+                (let ((probes 0)
+                      (real (symbol-function 'process-file)))
+                  (cl-letf (((symbol-function 'process-file)
+                             (lambda (&rest args)
+                               (cl-incf probes)
+                               (apply real args))))
+                    (claude-code--config-dir host)
+                    (claude-code--config-env host))
+                  (should (= probes 1)))
                 (let* ((root (concat host "/home/test/proj"))
                        (external "22222222-2222-4222-8222-222222222222")
                        (execs '())
@@ -953,46 +960,46 @@ The status that query read is as stale, so a `shell' one holds back no
 announcement."
   (claude-code-tests--with-scratch-fixtures
     (claude-code-tests--with-managed-buffer (buf 70)
-      (claude-code-tests--on-mock-host nil
-        (let* ((host (file-remote-p default-directory))
-               (claude-code--remote-config-envs (make-hash-table :test 'equal))
-               (root (concat host "/home/test/proj"))
-               (id "33333333-3333-4333-8333-333333333333")
-               (announced 0)
-               (claude-code-notify-function
-                (lambda (_session _body) (cl-incf announced)))
-               (default-directory temporary-file-directory))
-          (puthash host (cons claude-code-config-dir "/home/test")
-                   claude-code--remote-config-envs)
-          (claude-code--register id buf root nil)
-          (cl-letf (((symbol-function 'claude-code--session-process)
-                     (lambda (b) (eq b buf))))
-            (cl-flet ((report (cwd status)
-                        (claude-code-tests--write-session-file
-                         70 (json-serialize (list :pid 70 :sessionId id
-                                                  :cwd cwd :status status)))))
-              (claude-code-tests--with-live-pids '()
-                (report "/w" "shell")
-                (let ((s (claude-code-tests--find-session
-                          (claude-code-project-sessions root) id)))
-                  ;; The host moves on; only a read of it would see that.
-                  (report "/x" "busy")
-                  (delete-file (claude-code-session-transcript s)))
-                (should (equal (claude-code--instance-cwd buf) (concat host "/w")))
-                (let ((s (claude-code--instance-session buf)))
-                  (should (equal (claude-code-session-title s) "Renamed worktree"))
-                  (should (equal (claude-code-session-worktree s) "feat"))
-                  (should (equal (claude-code-session-status s) "shell")))
-                (claude-code--announce buf 'done 1000.0)
-                (should (= announced 1))
-                ;; Once a query sees a `/clear', the session left behind lends
-                ;; the new one nothing.
-                (claude-code-tests--write-session-file 70 "cleared")
-                (claude-code-project-sessions root)
-                (let ((s (claude-code--instance-session buf)))
-                  (should (equal (claude-code-session-id s) "cleared"))
-                  (should-not (claude-code-session-title s))
-                  (should-not (claude-code-session-worktree s)))))))))))
+      (let ((tramp-remote-process-environment
+             (cons (concat "CLAUDE_CONFIG_DIR=" claude-code-config-dir)
+                   tramp-remote-process-environment)))
+        (claude-code-tests--on-mock-host nil
+          (let* ((host (file-remote-p default-directory))
+                 (root (concat host "/home/test/proj"))
+                 (id "33333333-3333-4333-8333-333333333333")
+                 (announced 0)
+                 (claude-code-notify-function
+                  (lambda (_session _body) (cl-incf announced)))
+                 (default-directory temporary-file-directory))
+            (claude-code--register id buf root nil)
+            (cl-letf (((symbol-function 'claude-code--session-process)
+                       (lambda (b) (eq b buf))))
+              (cl-flet ((report (cwd status)
+                          (claude-code-tests--write-session-file
+                           70 (json-serialize (list :pid 70 :sessionId id
+                                                    :cwd cwd :status status)))))
+                (claude-code-tests--with-live-pids '()
+                  (report "/w" "shell")
+                  (let ((s (claude-code-tests--find-session
+                            (claude-code-project-sessions root) id)))
+                    ;; The host moves on; only a read of it would see that.
+                    (report "/x" "busy")
+                    (delete-file (claude-code-session-transcript s)))
+                  (should (equal (claude-code--instance-cwd buf) (concat host "/w")))
+                  (let ((s (claude-code--instance-session buf)))
+                    (should (equal (claude-code-session-title s) "Renamed worktree"))
+                    (should (equal (claude-code-session-worktree s) "feat"))
+                    (should (equal (claude-code-session-status s) "shell")))
+                  (claude-code--announce buf 'done 1000.0)
+                  (should (= announced 1))
+                  ;; Once a query sees a `/clear', the session left behind lends
+                  ;; the new one nothing.
+                  (claude-code-tests--write-session-file 70 "cleared")
+                  (claude-code-project-sessions root)
+                  (let ((s (claude-code--instance-session buf)))
+                    (should (equal (claude-code-session-id s) "cleared"))
+                    (should-not (claude-code-session-title s))
+                    (should-not (claude-code-session-worktree s))))))))))))
 
 (ert-deftest claude-code-test-session-directory ()
   "A session works where the process running it is now, else in its worktree.
@@ -1178,19 +1185,36 @@ A CLI or a dtach the host lacks refuses the launch before anything starts."
     ;; its paths off an empty one.
     (dolist (unset '("CLAUDE_CONFIG_DIR" "CLAUDE_CONFIG_DIR="))
       (let ((process-environment (cons unset process-environment))
-            (claude-code-config-dir "~/.claude"))
+            (claude-code-config-dir nil))
         (claude-code-spawn "/r")
         (should-not (child-env "CLAUDE_CONFIG_DIR"))))
-    (let ((process-environment (cons "CLAUDE_CONFIG_DIR" process-environment))
-          (claude-code-config-dir "~/cc-config"))
-      (claude-code-spawn "/r")
-      (should (equal (child-env "CLAUDE_CONFIG_DIR")
-                     (expand-file-name "~/cc-config"))))
-    (let ((process-environment (cons "CLAUDE_CONFIG_DIR=/cc/local"
-                                     process-environment))
-          (claude-code-config-dir "/cc/local"))
-      (claude-code-spawn "/r")
-      (should (equal (child-env "CLAUDE_CONFIG_DIR") "/cc/local")))
+    ;; HOME names no directory, so no read reaches the real ~/.claude.
+    (let ((process-environment
+           (append (list (concat "CLAUDE_CONFIG_DIR=" claude-code-tests--fixtures)
+                         "HOME=/claude-code-tests-nonexistent")
+                   process-environment)))
+      (let ((claude-code-config-dir nil))
+        (claude-code-spawn "/r")
+        (should (equal (child-env "CLAUDE_CONFIG_DIR")
+                       claude-code-tests--fixtures))
+        (should (claude-code-tests--find-session
+                 (claude-code-project-sessions "/home/test/proj")
+                 "55555555-5555-4555-8555-555555555555"))
+        ;; A buffer's own value, as envrc sets, is not Emacs's.
+        (with-temp-buffer
+          (setq-local process-environment
+                      (cons "CLAUDE_CONFIG_DIR=/cc/buffer" process-environment))
+          (claude-code-spawn "/r"))
+        (should (equal (child-env "CLAUDE_CONFIG_DIR")
+                       claude-code-tests--fixtures)))
+      ;; Even ~/.claude would move the CLI's user config into the dir.
+      (let ((claude-code-config-dir "~/.claude/"))
+        (claude-code-spawn "/r")
+        (should-not (child-env "CLAUDE_CONFIG_DIR")))
+      (let ((claude-code-config-dir "~/cc-config"))
+        (claude-code-spawn "/r")
+        (should (equal (child-env "CLAUDE_CONFIG_DIR")
+                       (expand-file-name "~/cc-config")))))
     ;; A remote instance gets its host's own value, unset included.  Emacs's
     ;; own variable is left alone: TRAMP hands a binding of it to the host.
     (let ((claude-code-config-dir "/cc/local"))
@@ -1198,8 +1222,7 @@ A CLI or a dtach the host lacks refuses the launch before anything starts."
                                         ("CLAUDE_CONFIG_DIR=/cc/remote"
                                          "/cc/remote")))
         (let ((tramp-remote-process-environment
-               (cons entry tramp-remote-process-environment))
-              (claude-code--remote-config-envs (make-hash-table :test 'equal)))
+               (cons entry tramp-remote-process-environment)))
           (claude-code-tests--on-mock-host nil
             (claude-code-spawn default-directory)
             (should (equal (child-env "CLAUDE_CONFIG_DIR") value))))))))
@@ -1242,7 +1265,6 @@ A CLI or a dtach the host lacks refuses the launch before anything starts."
             (should-error (resolve "~/claude-code-tests-none") :type 'user-error)))
         (let ((exec-path '())
               (claude-code-cli "claude-code-tests-cli")
-              (claude-code--remote-config-envs (make-hash-table :test 'equal))
               (execs '()))
           (claude-code-tests--on-mock-host (list dir)
             (should (equal (resolve "claude-code-tests-cli") cli))
@@ -1564,9 +1586,7 @@ places the instance in the project or a worktree of it."
               ;; one.
               (let ((tramp-remote-process-environment
                      (cons (concat "CLAUDE_CONFIG_DIR=" claude-code-config-dir)
-                           tramp-remote-process-environment))
-                    (claude-code--remote-config-envs
-                     (make-hash-table :test 'equal)))
+                           tramp-remote-process-environment)))
                 (claude-code-tests--on-mock-host nil
                   (let ((host (file-remote-p default-directory)))
                     (claude-code-tests--with-processes table
@@ -1645,7 +1665,6 @@ attached, and a remote one is found and attached on its host."
       (let ((tramp-remote-process-environment
              (cons (concat "CLAUDE_CONFIG_DIR=" claude-code-tests--fixtures)
                    tramp-remote-process-environment))
-            (claude-code--remote-config-envs (make-hash-table :test 'equal))
             (execs '()))
         (claude-code-tests--with-registry
           (claude-code-tests--attaching execs
@@ -2083,15 +2102,14 @@ Every call returns RESULT, 0 for a delivered signal."
 (defmacro claude-code-tests--with-fake-cli (vars script &rest body)
   "Run BODY with `claude-code-cli' a shell script running SCRIPT.
 VARS is (SESSION ROOT LOG): SESSION a dead session whose transcript is on
-disk, ROOT a fresh directory holding it and the export's config dir, and LOG
-the file SCRIPT may reach as \"$0.log\".  The CLI exits only once its input
-ends, which a SCRIPT ending in `exec cat' mimics."
+disk, ROOT a fresh directory holding it, and LOG the file SCRIPT may reach as
+\"$0.log\".  The CLI exits only once its input ends, which a SCRIPT ending in
+`exec cat' mimics."
   (declare (indent 2))
   (pcase-let ((`(,session ,root ,log) vars))
     `(let* ((,root (file-truename (make-temp-file "cc-export" t)))
             (claude-code-cli (expand-file-name "claude" ,root))
             (,log (concat claude-code-cli ".log"))
-            (claude-code-export-config-dir (expand-file-name "config/" ,root))
             (,session (claude-code-session--create
                        :id "export" :transcript (expand-file-name "t.jsonl" ,root))))
        (unwind-protect
@@ -2149,6 +2167,9 @@ CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE)."
               "tail -c +100001 \"$0.answer\"\n"
               "exec cat >/dev/null\n")
     (let* ((claude-code-config-dir (expand-file-name "dot-claude/" root))
+           (process-environment
+            (cons (concat "XDG_CACHE_HOME=" (expand-file-name "cache" root))
+                  process-environment))
            ;; Where Claude moved the transcript the session recorded.
            (moved (expand-file-name
                    (concat (claude-code-session-id session) ".jsonl")
@@ -2176,7 +2197,7 @@ CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE)."
                      (insert-file-contents log)
                      (split-string (buffer-string) "\n" t))))
         (should (equal cwd root))
-        (should (equal config (expand-file-name claude-code-export-config-dir)))
+        (should (equal config (expand-file-name "cache/claude-code-export" root)))
         (should (equal (alist-get 'subtype
                                   (alist-get 'request
                                              (json-parse-string
@@ -2318,28 +2339,32 @@ CALLS lists every callback call in order, as (text TEXT) or (error MESSAGE)."
                   " > \"$0.log\"\n"
                   "printf '%s\\n' '" claude-code-tests--export-answer "'\n"
                   "exec cat >/dev/null\n")
-        (claude-code-tests--on-mock-host nil
-          (let* ((host (file-remote-p default-directory))
-                 (claude-code--remote-config-envs (make-hash-table :test 'equal))
-                 (file (claude-code-session-transcript session))
-                 (remote (claude-code-session--create
-                          :id "export" :transcript (concat host file))))
-            (puthash host (cons nil "/cc/home") claude-code--remote-config-envs)
-            (pcase-let ((`(,calls . ,proc)
-                         (claude-code-tests--export remote (concat host root))))
-              (should (equal calls '((text "\n● Because you asked.\n  Twice."))))
-              (should-not (process-live-p proc))
-              ;; Only TRAMP's own shell knows the remote PID.
-              (should (eq (null (process-get proc 'remote-pid)) direct))
-              (pcase-let ((`(,cwd ,stdout ,config . ,argv)
-                           (with-temp-buffer
-                             (insert-file-contents log)
-                             (split-string (buffer-string) "\n" t))))
-                (should (equal cwd root))
-                (should (equal stdout "pipe"))
-                (should (equal config "/cc/home/.cache/claude-code-export/"))
-                (should (member (concat "--resume=" file) argv))
-                (should (member "--no-session-persistence" argv))))))))))
+        ;; Without an XDG cache dir, the host's home holds the one it falls
+        ;; back to.
+        (let ((tramp-remote-process-environment
+               (append (list "XDG_CACHE_HOME=" (concat "HOME=" root))
+                       tramp-remote-process-environment)))
+          (claude-code-tests--on-mock-host nil
+            (let* ((host (file-remote-p default-directory))
+                   (file (claude-code-session-transcript session))
+                   (remote (claude-code-session--create
+                            :id "export" :transcript (concat host file))))
+              (pcase-let ((`(,calls . ,proc)
+                           (claude-code-tests--export remote (concat host root))))
+                (should (equal calls '((text "\n● Because you asked.\n  Twice."))))
+                (should-not (process-live-p proc))
+                ;; Only TRAMP's own shell knows the remote PID.
+                (should (eq (null (process-get proc 'remote-pid)) direct))
+                (pcase-let ((`(,cwd ,stdout ,config . ,argv)
+                             (with-temp-buffer
+                               (insert-file-contents log)
+                               (split-string (buffer-string) "\n" t))))
+                  (should (equal cwd root))
+                  (should (equal stdout "pipe"))
+                  (should (equal config (expand-file-name ".cache/claude-code-export"
+                                                          root)))
+                  (should (member (concat "--resume=" file) argv))
+                  (should (member "--no-session-persistence" argv)))))))))))
 ;;;; Notifications
 
 (defmacro claude-code-tests--holding-timers (run &rest body)
@@ -2970,7 +2995,9 @@ dir holds no sessions/ entry once it has ended."
   (skip-unless (getenv "CLAUDE_CODE_INTEGRATION"))
   (let* ((id "cccccccc-cccc-4ccc-8ccc-cccccccccccc")
          (root (file-truename (make-temp-file "cc-export" t)))
-         (claude-code-export-config-dir (expand-file-name "config/" root))
+         (process-environment
+          (cons (concat "XDG_CACHE_HOME=" (expand-file-name "cache" root))
+                process-environment))
          (file (expand-file-name (concat "export/" id ".jsonl")
                                  claude-code-tests--fixtures))
          (before (with-temp-buffer
@@ -2994,7 +3021,8 @@ dir holds no sessions/ entry once it has ended."
                              (buffer-string))
                            before))
             (should-not (directory-files
-                         (expand-file-name "sessions" claude-code-export-config-dir)
+                         (expand-file-name "cache/claude-code-export/sessions"
+                                           root)
                          nil "\\.json\\'"))))
       (delete-directory root t))))
 

@@ -24,7 +24,6 @@
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)
-(require 'xdg)
 
 ;; Ghostel is loaded lazily, so the package compiles and tests without its
 ;; native module.
@@ -82,11 +81,11 @@ detachable, t every instance, and nil none."
 Searched for on the instance's host as `claude-code-cli' is."
   :type 'string)
 
-(defcustom claude-code-config-dir
-  (let ((env (getenv "CLAUDE_CONFIG_DIR")))
-    (if (member env '(nil "")) (expand-file-name "~/.claude") env))
-  "Directory where Claude Code stores its state on this machine."
-  :type 'directory)
+(defcustom claude-code-config-dir nil
+  "Config directory local instances run with.
+nil follows `CLAUDE_CONFIG_DIR' in Emacs's global environment, not a buffer's.
+A remote instance runs with its host's own."
+  :type '(choice (const :tag "The CLI's default" nil) directory))
 
 
 ;;;; Storage adapter
@@ -97,21 +96,7 @@ Searched for on the instance's host as `claude-code-cli' is."
 ;; machine.
 
 (defvar claude-code--remote-config-envs (make-hash-table :test 'equal)
-  "Hash of remote host -> (VALUE . HOME), its `CLAUDE_CONFIG_DIR' and home.
-VALUE is nil where the variable is unset or empty.")
-
-(defun claude-code--remote-config-env (host)
-  "Return remote HOST's entry in `claude-code--remote-config-envs'."
-  (or (gethash host claude-code--remote-config-envs)
-      (let ((default-directory (concat host "/")))
-        (with-temp-buffer
-          (unless (eql 0 (process-file
-                          "/bin/sh" nil t nil "-c"
-                          "printf '%s\\n%s' \"$CLAUDE_CONFIG_DIR\" \"$HOME\""))
-            (user-error "Cannot ask %s for its Claude config dir" host))
-          (pcase-let ((`(,value ,home) (split-string (buffer-string) "\n")))
-            (puthash host (cons (and (not (string-empty-p value)) value) home)
-                     claude-code--remote-config-envs))))))
+  "Hash of remote host -> its `CLAUDE_CONFIG_DIR', \"\" where unset.")
 
 (defun claude-code--forget-remote-config-env (&optional vec)
   "Forget what the host of TRAMP connection VEC said, or every host without VEC."
@@ -127,27 +112,32 @@ VALUE is nil where the variable is unset or empty.")
 
 (defun claude-code--config-env (&optional host)
   "Return the `CLAUDE_CONFIG_DIR' an instance on HOST runs with, nil for unset."
-  (if host
-      (car (claude-code--remote-config-env host))
-    (let ((env (let ((value (getenv "CLAUDE_CONFIG_DIR")))
-                 (and (not (equal value "")) value)))
-          (dir (directory-file-name (expand-file-name claude-code-config-dir))))
-      ;; Any value, even ~/.claude, makes the CLI keep its global config in the
-      ;; dir instead of ~/.claude.json, so an unset variable stays unset.
-      (if (equal dir (directory-file-name (expand-file-name (or env "~/.claude"))))
-          env
-        dir))))
+  (let ((value
+         (cond
+          (host
+           (with-memoization (gethash host claude-code--remote-config-envs)
+             (let ((default-directory (concat host "/")))
+               (with-temp-buffer
+                 (unless (eql 0 (process-file
+                                 "/bin/sh" nil t nil "-c"
+                                 "printf %s \"$CLAUDE_CONFIG_DIR\""))
+                   (user-error "Cannot ask %s for its Claude config dir" host))
+                 (buffer-string)))))
+          ;; Any value, even ~/.claude, makes the CLI keep its user config in
+          ;; the dir instead of ~/.claude.json.
+          (claude-code-config-dir
+           (let ((dir (directory-file-name
+                       (expand-file-name claude-code-config-dir))))
+             (unless (equal dir (expand-file-name "~/.claude")) dir)))
+          (t (let ((process-environment
+                    (default-value 'process-environment)))
+               (getenv "CLAUDE_CONFIG_DIR"))))))
+    (and (not (equal value "")) value)))
 
 (defun claude-code--config-dir (&optional host)
   "Return the config dir of the `claude' on HOST, as a file name there."
-  (if host
-      (pcase-let ((`(,value . ,home) (claude-code--remote-config-env host)))
-        (concat host (or value (concat (file-name-as-directory home) ".claude"))))
-    (expand-file-name claude-code-config-dir)))
-
-(defun claude-code--remote-home (host)
-  "Return remote HOST's home directory, as a file name there."
-  (cdr (claude-code--remote-config-env host)))
+  (expand-file-name
+   (concat host (or (claude-code--config-env host) "~/.claude"))))
 
 (defconst claude-code--encoded-cwd-limit 200
   "Length past which Claude cuts a project-directory name and appends a hash.")
@@ -1378,13 +1368,6 @@ Two in quick succession while Claude is idle make it exit."
   (with-current-buffer (claude-code--buffer session)
     (ghostel-send-C-c)))
 
-(defcustom claude-code-export-config-dir
-  (expand-file-name "claude-code-export/" (xdg-cache-home))
-  "Config directory the `claude' exporting a local transcript runs with.
-The CLI creates it, and keeps nothing there worth keeping.  An export on a
-remote host runs with ~/.cache/claude-code-export/ there."
-  :type 'directory)
-
 (defvar claude-code--export-timeout 30
   "Seconds a transcript export may take before it is abandoned.")
 
@@ -1393,13 +1376,6 @@ remote host runs with ~/.cache/claude-code-export/ there."
 
 (defconst claude-code--export-exit "claude-code-exit"
   "The type of the line `claude-code--export-command' prints as the CLI exits.")
-
-(defun claude-code--export-config-dir (host)
-  "Return the config dir an export on HOST runs with, as that host names it."
-  (if host
-      (file-name-concat (claude-code--remote-home host)
-                        ".cache/claude-code-export/")
-    (expand-file-name claude-code-export-config-dir)))
 
 (defun claude-code--export-args (file)
   "Return the CLI arguments that export transcript FILE on request."
@@ -1415,14 +1391,20 @@ remote host runs with ~/.cache/claude-code-export/ there."
   "Return the command with which PROGRAM exports transcript FILE.
 A `/bin/sh' pipes the export request to PROGRAM and holds that pipe open until
 a line arrives on its own input.  Once PROGRAM exits, the shell prints a line
-of type `claude-code--export-exit' carrying its exit status, then its stderr."
-  ;; The CLI reads no request from a terminal, which is all TRAMP gives a
-  ;; remote process.  It drops a request whose input ends right after it, and
-  ;; exits only once its input ends, which TRAMP cannot signal.  Its stderr
-  ;; waits for the exit so it cannot split the one-line answer, and `cat'
-  ;; keeps its stdout off a terminal, where it pads prompt rows to 80 columns.
+of type `claude-code--export-exit' carrying its exit status, then its stderr.
+PROGRAM runs with claude-code-export/ under the host's XDG cache dir as its
+config dir, which the CLI creates and keeps nothing worth keeping in."
+  ;; A `claude -p' registers in sessions/ as running the session it resumes,
+  ;; so the export gets a config dir of its own.  The CLI reads no request
+  ;; from a terminal, which is all TRAMP gives a remote process.  It drops a
+  ;; request whose input ends right after it, and exits only once its input
+  ;; ends, which TRAMP cannot signal.  Its stderr waits for the exit so it
+  ;; cannot split the one-line answer, and `cat' keeps its stdout off a
+  ;; terminal, where it pads prompt rows to 80 columns.
   (append (list "/bin/sh" "-c"
-                (concat "r=$1; shift; { printf '%s\\n' \"$r\"; read -r _; } | "
+                (concat "export CLAUDE_CONFIG_DIR="
+                        "\"${XDG_CACHE_HOME:-$HOME/.cache}/claude-code-export\"; "
+                        "r=$1; shift; { printf '%s\\n' \"$r\"; read -r _; } | "
                         "{ e=$(\"$0\" \"$@\" 2>&1 >&3 3>&-); "
                         (format "printf '\\n{\"type\":\"%s\",\"status\":%%d}\\n%%s'"
                                 claude-code--export-exit)
@@ -1508,13 +1490,6 @@ wide and without MCP tool calls."
          ;; Claude prints a tool's path under its cwd relative to it.
          (default-directory (file-name-as-directory
                              (claude-code--session-directory session root)))
-         ;; A `claude -p' registers in sessions/ as running the session it
-         ;; resumes, so the export gets a config dir of its own.
-         (process-environment
-          (cons (concat "CLAUDE_CONFIG_DIR="
-                        (claude-code--export-config-dir
-                         (file-remote-p default-directory)))
-                process-environment))
          (pending '())
          (released nil)
          (status nil)
