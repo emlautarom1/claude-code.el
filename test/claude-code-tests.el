@@ -529,7 +529,8 @@ only the CLI's three `sdk-' stamps mean a program."
         ;; An instance Emacs manages is listed whatever drove its session.
         (claude-code-tests--with-live-pids '()
           (claude-code-tests--with-managed-buffer buf
-            (let ((proc (make-pipe-process :name "cc-test-instance" :noquery t)))
+            (let ((proc (make-pipe-process :name "cc-test-instance" :noquery t
+                                           :sentinel #'ignore)))
               (unwind-protect
                   (progn
                     (with-current-buffer buf (setq-local ghostel--process proc))
@@ -2407,7 +2408,7 @@ process, and the focus watch it installs is unwound."
               (process (gensym "process")))
     `(claude-code-tests--with-managed-buffer (,var ,pid)
        (let ((,process (make-pipe-process :name "cc-terminal" :buffer nil
-                                          :noquery t))
+                                          :noquery t :sentinel #'ignore))
              (after-focus-change-function #'ignore))
          (unwind-protect
              (progn
